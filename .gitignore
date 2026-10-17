@@ -14,6 +14,9 @@ bench-out/
 # 本地文档草稿目录（不入库）
 docs-e/
 
+# 发布产物（由 bin\build-release.bat 生成，不入库）
+release/
+
 # Python SDK 产物（packages/client-python）
 __pycache__/
 *.pyc

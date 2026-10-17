@@ -34,8 +34,10 @@
 | 构建可发布产物（仅 core、client-node、admin） | `npm run build` |
 | 基准 | `npm run bench` |
 | 吞吐回归门禁（退化 >15% 失败） | `npm run bench:regression`（`-- --update-baseline` 重录基线） |
-| 启动服务 | `npm start --workspace @ss/rtdb-server`（等价 `node packages/server/src/main.ts`） |
-| 使用 CLI | `node packages/cli/src/main.ts status`（或 `npx rtdbctl status`） |
+| 启动服务（源码树） | `npm start --workspace @ss/rtdb-server`（等价 `node packages/server/src/main.ts`） |
+| 启动服务（仓库或发布包，推荐） | `bin\start-server.bat` |
+| 生成发布包（输出到 `release\ss-rtdb-<version>\`） | `bin\build-release.bat`（可指定版本：`bin\build-release.bat 0.2.0`） |
+| 使用 CLI / rtdbctl 包装脚本 | `node packages/cli/src/main.ts status`、`npx rtdbctl status`、`bin\rtdbctl.bat status` |
 | 控制台开发服务器 | `npm run dev --workspace @ss/rtdb-admin` |
 | Python SDK 测试 | `cd packages/client-python` 后 `python -m pytest tests/` |
 
@@ -56,7 +58,11 @@ ss-rtdb/
 │   │   └── admin/            # @ss/rtdb-admin    Vue 3 + Vite 控制台（private）
 │   ├── __tests__/            # node:test 套件（*.test.ts）+ benchmark/
 │   └── scripts/              # check-runtime-dependencies.ts、check-throughput-regression.ts
-├── bin/                      # 启动 / 运维批处理脚本（.bat 规则见 §4 第 10 条）
+├── bin/                      # 发布 / 启动批处理脚本（.bat 规则见 §4 第 10 条）
+│   ├── build-release.bat     #   构建并打包到 release\ss-rtdb-<version>\
+│   ├── start-server.bat      #   前台启动服务（仓库与发布包通用）
+│   └── rtdbctl.bat           #   rtdbctl 包装脚本
+├── release/                  # 发布产物（build-release.bat 生成，**不入库**）
 └── docs-o/                   # en/ 原始英文文档，zh/ 中文译本（逐页对应）
 ```
 
@@ -225,7 +231,7 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 - Web 控制台在 `/admin/`（结尾斜杠必需），需先 `npm run build --workspace @ss/rtdb-admin`，
   否则返回 404。
 - 已忽略的本地产物：`node_modules/`、`dist/`、`tsbuildinfo`、`*.log`、`rtdb-data/`、`*.token`、
-  `coverage/`、`bench-out/`、Python 缓存目录、`docs-e/`。
+  `coverage/`、`bench-out/`、Python 缓存目录、`docs-e/`、`release/`。
 
 ---
 
@@ -236,3 +242,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 创建本文件（面向 AI 编码代理的仓库指南）；同日补充 §7「中文文档更新日志」规则 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §4 强化「所有代码文件必须带 Apache-2.0 文件头」；§7 修订记录规则扩展至中英全部文档；补齐 `src/packages/admin/index.html` 文件头 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 §4 第 10 条：`bin/` 下 `.bat` / `.cmd` 必须全英文内容、UTF-8 编码、CRLF 行尾、`REM` 形式的 Apache-2.0 文件头；§3 布局补 `bin/`；§4 第 5 条注释语法补 `REM` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增发布/启动脚本 `bin\build-release.bat`、`bin\start-server.bat`、`bin\rtdbctl.bat`；§2 命令表与 §3 布局同步；§10 忽略清单补 `release/`；`.gitignore` 忽略 `release/` | DeepSeek-V4.1-Flash |
