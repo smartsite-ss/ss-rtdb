@@ -379,12 +379,35 @@ curl -X POST "http://127.0.0.1:6180/api/v1/admin/tokens" \
 #  "label":"edge-gateway-1","createdAt":...,"expiresAt":...,"revokedAt":null}}
 
 curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:6180/api/v1/admin/tokens
+# {"tokens":[{"tokenId":"...","user":"collector","role":"write","label":"edge-gateway-1",
+#  "createdAt":...,"expiresAt":...,"revokedAt":null,
+#  "lastUsedAt":1760691600000,"lastDatabase":"plant_a","pointsPerSec":1200,"bytesPerSec":98304}],
+#  "configToken":{"user":"admin","lastUsedAt":1760691601000,"lastDatabase":"smartfactory_demo",
+#  "pointsPerSec":205,"bytesPerSec":30720}}
+
 curl -X DELETE "http://127.0.0.1:6180/api/v1/admin/tokens/<tokenId>" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 # {"ok":true}
 ```
 
 省略 `role` 时默认取所属用户的角色（或 `write`）；省略 `ttlMs` 表示永不过期。
+
+列表中的每个令牌还带有**运行期使用统计**。这些数据只存在于进程内存（重启即清零），不会写入令牌文件：
+
+| 字段 | 含义 |
+| ---- | ---- |
+| `lastUsedAt` | 最后一次通过认证的请求时间（ms）；`null` = 从未使用 |
+| `lastDatabase` | 最后一次带库请求所访问的数据库；`null` = 只访问过管理接口 |
+| `pointsPerSec` | 最近 10 秒滚动窗口内的写入点数/秒 |
+| `bytesPerSec` | 同一窗口内的请求负载字节数/秒 |
+
+静态 `auth.token`（`rtdb.token`；Smart Site 演示客户端就用它写入）在令牌存储中**没有记录**，因此不会出现在
+`tokens` 里，其用量也不会记到任何 API 令牌上。它由单独的 `configToken` 对象报告，字段与上面四项相同并带
+`user`（配置中的 `auth.username`）。该字段始终返回 —— 未使用静态令牌时 `lastUsedAt` / `lastDatabase` 为
+`null`、两个速率均为 `0`。
+
+令牌是**服务端凭据，不是会话**：关闭客户端不会通知服务端，因此令牌会一直有效，直到被吊销（`DELETE`）
+或到达 `expiresAt`（签发时用 `ttlMs` 设置）。
 
 ### 7.3 登录与会话
 
@@ -462,3 +485,5 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 | 2026-10-17 | 新增 §7.3「登录与会话」与端点索引三行：`POST /api/v1/auth/login`、`GET /api/v1/auth/session`、`POST /api/v1/auth/logout` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 `GET /api/v1/databases/:db`（磁盘占用、按天明细、保留策略读回）与 §5.1、端点索引行及 `query` 权限域条目 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §5.1 明确 `directory` 默认为相对服务工作目录的路径（`admin.exposePaths=true` 时为绝对路径） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `GET /api/v1/admin/tokens` 增加逐令牌运行期统计（`lastUsedAt`、`lastDatabase`、`pointsPerSec`、`bytesPerSec`）；§7.2 补充字段说明与「凭据而非会话」规则 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §7.2 新增 `configToken`：静态 `auth.token`（`rtdb.token`）不在令牌存储中，其用量单独返回，演示客户端等静态令牌写入不再被丢弃 | DeepSeek-V4.1-Flash |

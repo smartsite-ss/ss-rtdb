@@ -25,8 +25,8 @@ import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
 import { RtdbEngine } from '../../core/src/engine.ts';
 import { measureDatabaseSize } from '../../core/src/size.ts';
 import type { AggregateType, RangeOptions, WritePoint } from '../../core/src/types.ts';
-import { AuthVerifier, hashPassword, loadOrCreateAuthToken } from './auth.ts';
-import type { AuthScope } from './auth.ts';
+import { AuthVerifier, STATIC_TOKEN_ID, hashPassword, loadOrCreateAuthToken } from './auth.ts';
+import type { AuthPrincipal, AuthScope } from './auth.ts';
 import { reportedDatabaseDirectory, toEngineOptions, validateServerConfig } from './config.ts';
 import type { ServerConfig } from './config.ts';
 import { HttpFailure, SERVER_ERROR_CODE, toHttpErrorResponse } from './http-error.ts';
@@ -36,6 +36,7 @@ import { Logger } from './logger.ts';
 import { PROMETHEUS_METRICS_CONTENT_TYPE, encodePrometheusMetrics } from './metrics.ts';
 import { TokenStore } from './tokens.ts';
 import type { TokenRecord } from './tokens.ts';
+import { TokenUsageTracker } from './token-usage.ts';
 import { USER_ROLE, UserStore, isUserRole } from './users.ts';
 import type { UserRecord, UserRole } from './users.ts';
 
@@ -118,6 +119,8 @@ export class RtdbServer {
   private boundAddress: RtdbServerAddress | null = null;
   private openedEngine = false;
   private tagsIgnoredCount = 0;
+  /** Per-token last-use / write-rate statistics (in memory; reset on restart) */
+  private readonly tokenUsage = new TokenUsageTracker();
 
   constructor(options: RtdbServerOptions) {
     this.config = options.config;
@@ -467,22 +470,33 @@ export class RtdbServer {
    * Enforce the credential for a scope. Returns quietly when the scope needs no credential; otherwise:
    * `401 E_AUTH` when the credential is missing / invalid, `403 E_FORBIDDEN` when it is valid but the role does
    * not grant the scope (RBAC denial).
+   *
+   * The resolved principal is returned so handlers can attribute writes to a token, and every authenticated
+   * call refreshes the per-token usage statistics shown by `GET /api/v1/admin/tokens` (`database` is the
+   * database the endpoint addresses, `null` for endpoints without one).
    */
-  private requireAuth(request: IncomingMessage, scope: AuthScope): void {
+  private requireAuth(
+    request: IncomingMessage,
+    scope: AuthScope,
+    database: string | null = null,
+  ): AuthPrincipal | null {
     const auth = this.auth;
     if (auth === null) throw new RtdbError(ERROR_CODE.Internal, 'Authenticator not initialized');
-    if (!auth.isScopeProtected(scope)) return;
     const principal = auth.authenticate(request.headers);
-    if (principal === null) {
-      throw new RtdbError(ERROR_CODE.Auth, `Authentication failed (scope=${scope})`);
+    if (auth.isScopeProtected(scope)) {
+      if (principal === null) {
+        throw new RtdbError(ERROR_CODE.Auth, `Authentication failed (scope=${scope})`);
+      }
+      if (!auth.roleAllows(principal.role, scope)) {
+        throw new HttpFailure(
+          403,
+          SERVER_ERROR_CODE.Forbidden,
+          `Role "${principal.role}" (user "${principal.username}") is not allowed to access scope "${scope}"`,
+        );
+      }
     }
-    if (!auth.roleAllows(principal.role, scope)) {
-      throw new HttpFailure(
-        403,
-        SERVER_ERROR_CODE.Forbidden,
-        `Role "${principal.role}" (user "${principal.username}") is not allowed to access scope "${scope}"`,
-      );
-    }
+    this.tokenUsage.touch(principal?.tokenId, database);
+    return principal;
   }
 
   private async handleStatus(response: ServerResponse): Promise<void> {
@@ -546,7 +560,7 @@ export class RtdbServer {
     response: ServerResponse,
     database: string,
   ): Promise<void> {
-    this.requireAuth(request, 'query');
+    this.requireAuth(request, 'query', database);
     const report = measureDatabaseSize(this.config.dataDir, database);
     this.sendJson(response, 200, {
       ...report,
@@ -555,14 +569,14 @@ export class RtdbServer {
   }
 
   private async handleMetrics(request: IncomingMessage, response: ServerResponse, database: string): Promise<void> {
-    this.requireAuth(request, 'query');
+    this.requireAuth(request, 'query', database);
     await this.requireDatabaseExists(database);
     const metrics = await this.engine.listMetrics(database);
     this.sendJson(response, 200, { metrics: encodeMetricSummaries(metrics) });
   }
 
   private async handleWrite(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
-    this.requireAuth(request, 'write');
+    const principal = this.requireAuth(request, 'write');
     const database = requireDatabaseName(url.searchParams.get('db'));
     const contentType = String(request.headers['content-type'] ?? '');
     const body = await this.readRequestBody(request);
@@ -583,13 +597,15 @@ export class RtdbServer {
       );
     }
     const { accepted } = await this.engine.writeBatch(database, points);
+    this.tokenUsage.recordWrite(principal?.tokenId, accepted, body.length, database);
     this.sendJson(response, 200, { accepted, duplicates: points.length - accepted });
   }
 
   private async handleQueryRange(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    this.requireAuth(request, 'query');
+    const principal = this.requireAuth(request, 'query');
     const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'query/range'), 'query/range');
     const database = requireDatabaseName(readOptionalString(body.db));
+    this.tokenUsage.touch(principal?.tokenId, database);
     const metricName = requireMetricName(body.metricName);
     await this.requireMetric(database, metricName);
 
@@ -609,9 +625,10 @@ export class RtdbServer {
   }
 
   private async handleQueryLast(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    this.requireAuth(request, 'query');
+    const principal = this.requireAuth(request, 'query');
     const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'query/last'), 'query/last');
     const database = requireDatabaseName(readOptionalString(body.db));
+    this.tokenUsage.touch(principal?.tokenId, database);
     const metricName = requireMetricName(body.metricName);
     await this.requireMetric(database, metricName);
     const before = body.before === undefined ? undefined : requireIntegerField(body.before, 'before');
@@ -620,9 +637,10 @@ export class RtdbServer {
   }
 
   private async handleQueryCount(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    this.requireAuth(request, 'query');
+    const principal = this.requireAuth(request, 'query');
     const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'query/count'), 'query/count');
     const database = requireDatabaseName(readOptionalString(body.db));
+    this.tokenUsage.touch(principal?.tokenId, database);
     const metricName = requireMetricName(body.metricName);
     await this.requireMetric(database, metricName);
     const count = await this.engine.queryCount(database, metricName, {
@@ -634,12 +652,13 @@ export class RtdbServer {
   }
 
   private async handleQueryAggregate(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    this.requireAuth(request, 'query');
+    const principal = this.requireAuth(request, 'query');
     const body = requireJsonObject(
       this.parseJsonBody(await this.readRequestBody(request), 'query/aggregate'),
       'query/aggregate',
     );
     const database = requireDatabaseName(readOptionalString(body.db));
+    this.tokenUsage.touch(principal?.tokenId, database);
     const metricName = requireMetricName(body.metricName);
     await this.requireMetric(database, metricName);
     const windows = await this.engine.queryAggregate(database, metricName, {
@@ -652,7 +671,7 @@ export class RtdbServer {
   }
 
   private async handleRetention(request: IncomingMessage, response: ServerResponse, database: string): Promise<void> {
-    this.requireAuth(request, 'write');
+    this.requireAuth(request, 'write', database);
     const body = requireJsonObject(
       this.parseJsonBody(await this.readRequestBody(request), 'retention'),
       'retention',
@@ -662,7 +681,7 @@ export class RtdbServer {
   }
 
   private async handleBackup(request: IncomingMessage, response: ServerResponse, database: string): Promise<void> {
-    this.requireAuth(request, 'write');
+    this.requireAuth(request, 'write', database);
     const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'backup'), 'backup');
     const targetDir = requireNonEmptyString(body.targetDir, 'targetDir');
     const result = await this.engine.backup(database, targetDir);
@@ -733,7 +752,18 @@ export class RtdbServer {
     const store = this.requireTokenStore();
 
     if (method === 'GET') {
-      this.sendJson(response, 200, { tokens: store.list().map(toPublicToken) });
+      // The record is the persisted lifecycle; the usage snapshot is process-local runtime state.
+      const tokens = store.list().map((record) => ({
+        ...toPublicToken(record),
+        ...this.tokenUsage.snapshot(record.tokenId),
+      }));
+      // The static auth.token has no record in the store (clients such as the demo use it), so its usage is
+      // reported separately instead of being silently dropped.
+      const configToken = {
+        user: this.config.auth.username,
+        ...this.tokenUsage.snapshot(STATIC_TOKEN_ID),
+      };
+      this.sendJson(response, 200, { tokens, configToken });
       return;
     }
     if (method === 'POST') {
@@ -823,6 +853,7 @@ export class RtdbServer {
     const auth = this.requireAuthVerifier();
     const principal = auth.authenticate(request.headers);
     if (principal === null) throw new RtdbError(ERROR_CODE.Auth, 'Authentication failed (scope=session)');
+    this.tokenUsage.touch(principal.tokenId, null);
     this.sendJson(response, 200, {
       user: { username: principal.username, role: principal.role },
       source: principal.source,

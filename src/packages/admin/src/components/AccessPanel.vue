@@ -13,10 +13,10 @@
  * its hash; this panel keeps it in memory until the operator switches tab or reloads.
  */
 
-import { onMounted, ref, watch } from 'vue';
-import type { RtdbAdminApiClient, RtdbPublicToken, RtdbPublicUser } from '../api';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
+import type { RtdbAdminApiClient, RtdbConfigTokenUsage, RtdbPublicToken, RtdbPublicUser } from '../api';
 import { useAsyncAction } from '../async';
-import { formatDateTime } from '../format';
+import { formatBytes, formatDateTime, formatNumber } from '../format';
 import { t } from '../i18n';
 
 const props = defineProps<{ client: RtdbAdminApiClient }>();
@@ -24,10 +24,16 @@ const props = defineProps<{ client: RtdbAdminApiClient }>();
 /** Mirrors the server-side `USER_ROLE` constants (roles are plain strings, never an enum) */
 const ROLE_OPTIONS = ['admin', 'write', 'readonly'] as const;
 const HOURS_TO_MILLISECONDS = 3_600_000;
+/** Write rates are a rolling 10 s window, so the table polls while it is open instead of freezing a stale value */
+const AUTO_REFRESH_MS = 5_000;
+/** Token id the server uses for the static `auth.token` / `rtdb.token` (no token-store record) */
+const STATIC_TOKEN_ID = 'config-token';
 
 const { busy, errorMessage, successMessage, run } = useAsyncAction();
 const users = ref<RtdbPublicUser[]>([]);
 const tokens = ref<RtdbPublicToken[]>([]);
+/** Usage of the static token; `null` when the server does not report it */
+const configToken = ref<RtdbConfigTokenUsage | null>(null);
 
 const issueUser = ref('');
 const issueRole = ref('');
@@ -41,8 +47,25 @@ async function loadUsers(): Promise<void> {
 }
 
 async function loadTokens(): Promise<void> {
-  const list = await run(() => props.client.listTokens());
-  if (list !== undefined) tokens.value = list;
+  const report = await run(() => props.client.listTokens());
+  if (report !== undefined) applyTokenReport(report);
+}
+
+/**
+ * Background poll: refresh the usage numbers without touching the busy state, so the toolbar does not blink and a
+ * transient failure keeps the last snapshot instead of replacing the table with an error banner.
+ */
+async function pollTokens(): Promise<void> {
+  try {
+    applyTokenReport(await props.client.listTokens());
+  } catch {
+    // Keep the previous snapshot; the explicit Refresh button surfaces errors.
+  }
+}
+
+function applyTokenReport(report: { tokens: RtdbPublicToken[]; configToken?: RtdbConfigTokenUsage }): void {
+  tokens.value = report.tokens;
+  configToken.value = report.configToken ?? null;
 }
 
 async function reloadBoth(): Promise<void> {
@@ -81,12 +104,32 @@ async function revokeToken(tokenId: string): Promise<void> {
   }
 }
 
+/** Older servers do not report the usage fields at all; show "not reported" instead of a misleading 0 */
+function hasUsage(entry: { pointsPerSec?: number; bytesPerSec?: number }): boolean {
+  return typeof entry.pointsPerSec === 'number' && typeof entry.bytesPerSec === 'number';
+}
+
+/** Token ids are UUIDs; keep the column narrow (prefix + suffix) and expose the full id through `title` */
+function shortTokenId(tokenId: string): string {
+  return tokenId.length <= 20 ? tokenId : `${tokenId.slice(0, 8)}…${tokenId.slice(-4)}`;
+}
+
 function dismissPlaintext(): void {
   issuedTokenPlaintext.value = '';
 }
 
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
 onMounted(() => {
   void reloadBoth();
+  refreshTimer = setInterval(() => {
+    void pollTokens();
+  }, AUTO_REFRESH_MS);
+});
+
+onUnmounted(() => {
+  if (refreshTimer !== null) clearInterval(refreshTimer);
+  refreshTimer = null;
 });
 
 watch(
@@ -192,45 +235,113 @@ watch(
         <span>{{ t('access.tokensTitle') }}</span>
         <span class="card-title-note">GET /api/v1/admin/tokens · DELETE /api/v1/admin/tokens/{tokenId}</span>
       </div>
-      <div v-if="tokens.length > 0" class="table-wrap">
-        <table class="data-table">
+
+      <div class="toolbar">
+        <button :disabled="busy" @click="loadTokens">{{ t('access.refreshTokens') }}</button>
+        <span class="toolbar-note">{{ t('access.tokensCount', { count: tokens.length }) }}</span>
+        <span class="toolbar-note">{{ t('access.tokensHint') }}</span>
+        <span class="toolbar-note">{{ t('access.autoRefresh', { seconds: AUTO_REFRESH_MS / 1000 }) }}</span>
+      </div>
+
+      <div v-if="tokens.length > 0 || configToken !== null" class="table-wrap">
+        <table class="data-table token-table">
           <thead>
             <tr>
               <th>{{ t('access.column.tokenId') }}</th>
+              <th>{{ t('access.column.rate') }}</th>
               <th>{{ t('access.column.owner') }}</th>
-              <th>{{ t('access.column.role') }}</th>
               <th>{{ t('access.column.label') }}</th>
-              <th>{{ t('access.column.created') }}</th>
-              <th>{{ t('access.column.expires') }}</th>
+              <th>{{ t('access.column.validity') }}</th>
+              <th>{{ t('access.column.lastAccess') }}</th>
               <th>{{ t('access.column.status') }}</th>
-              <th />
             </tr>
           </thead>
           <tbody>
-            <tr v-for="token in tokens" :key="token.tokenId">
-              <td class="mono">{{ token.tokenId }}</td>
-              <td class="mono">{{ token.user }}</td>
-              <td><span class="badge">{{ token.role }}</span></td>
-              <td>{{ token.label }}</td>
-              <td class="mono">{{ formatDateTime(token.createdAt) }}</td>
-              <td class="mono">{{ token.expiresAt === null ? t('access.never') : formatDateTime(token.expiresAt) }}</td>
-              <td>
-                <span :class="['badge', token.revokedAt === null ? 'success' : 'danger']">
-                  {{
-                    token.revokedAt === null
-                      ? t('access.active')
-                      : t('access.revokedAt', { time: formatDateTime(token.revokedAt) })
-                  }}
-                </span>
+            <tr v-if="configToken !== null" class="static-token-row">
+              <td class="mono">{{ STATIC_TOKEN_ID }}</td>
+              <td class="mono">
+                <template v-if="hasUsage(configToken)">
+                  <div>{{ t('access.ratePoints', { points: formatNumber(configToken.pointsPerSec) }) }}</div>
+                  <div class="toolbar-note">
+                    {{ t('access.rateBytes', { bytes: formatBytes(configToken.bytesPerSec) }) }}
+                  </div>
+                </template>
+                <span v-else class="toolbar-note">{{ t('access.rateUnavailable') }}</span>
+              </td>
+              <td class="mono">
+                <div>{{ configToken.user }}</div>
+                <div><span class="badge">admin</span></div>
+              </td>
+              <td class="wrap-cell">
+                <div>{{ t('access.staticTokenLabel') }}</div>
+                <div class="toolbar-note token-hint">{{ t('access.staticTokenHint') }}</div>
               </td>
               <td>
-                <button
-                  class="small danger"
-                  :disabled="busy || token.revokedAt !== null"
-                  @click="revokeToken(token.tokenId)"
-                >
-                  {{ t('access.revoke') }}
-                </button>
+                <div class="mono">—</div>
+                <div class="toolbar-note">{{ t('access.never') }}</div>
+              </td>
+              <td>
+                <div class="mono">{{ configToken.lastDatabase ?? '—' }}</div>
+                <div class="toolbar-note">
+                  {{
+                    configToken.lastUsedAt === null
+                      ? t('access.neverUsed')
+                      : formatDateTime(configToken.lastUsedAt)
+                  }}
+                </div>
+              </td>
+              <td><span class="badge success">{{ t('access.staticTokenBadge') }}</span></td>
+            </tr>
+            <tr v-for="token in tokens" :key="token.tokenId">
+              <td class="mono" :title="token.tokenId">{{ shortTokenId(token.tokenId) }}</td>
+              <td class="mono">
+                <template v-if="hasUsage(token)">
+                  <div>{{ t('access.ratePoints', { points: formatNumber(token.pointsPerSec) }) }}</div>
+                  <div class="toolbar-note">
+                    {{ t('access.rateBytes', { bytes: formatBytes(token.bytesPerSec) }) }}
+                  </div>
+                </template>
+                <span v-else class="toolbar-note">{{ t('access.rateUnavailable') }}</span>
+              </td>
+              <td class="mono">
+                <div>{{ token.user }}</div>
+                <div><span class="badge">{{ token.role }}</span></div>
+              </td>
+              <td class="wrap-cell">{{ token.label }}</td>
+              <td>
+                <div class="mono">{{ formatDateTime(token.createdAt) }}</div>
+                <div class="toolbar-note">
+                  {{ token.expiresAt === null ? t('access.never') : formatDateTime(token.expiresAt) }}
+                </div>
+              </td>
+              <td>
+                <div class="mono">{{ token.lastDatabase ?? '—' }}</div>
+                <div class="toolbar-note">
+                  <template v-if="token.lastUsedAt === undefined">—</template>
+                  <template v-else>
+                    {{ token.lastUsedAt ? formatDateTime(token.lastUsedAt) : t('access.neverUsed') }}
+                  </template>
+                </div>
+              </td>
+              <td>
+                <div>
+                  <span :class="['badge', token.revokedAt === null ? 'success' : 'danger']">
+                    {{
+                      token.revokedAt === null
+                        ? t('access.active')
+                        : t('access.revokedAt', { time: formatDateTime(token.revokedAt) })
+                    }}
+                  </span>
+                </div>
+                <div>
+                  <button
+                    class="small danger"
+                    :disabled="busy || token.revokedAt !== null"
+                    @click="revokeToken(token.tokenId)"
+                  >
+                    {{ t('access.revoke') }}
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>

@@ -43,11 +43,20 @@ export type AuthScope = 'write' | 'query' | 'admin' | 'none';
 /** Where a verified principal came from (audit + diagnostics) */
 export type AuthSource = 'config-token' | 'token' | 'basic';
 
-/** A verified caller identity: the user name, its role, and the credential source */
+/**
+ * Pseudo token id used for usage statistics of the static `auth.token` / `rtdb.token`. That credential has no
+ * record in the token store, but clients such as the demo write with it, so the admin API reports its usage
+ * separately (`configToken`) instead of attributing it to an API token.
+ */
+export const STATIC_TOKEN_ID = 'config-token';
+
+/** A verified caller identity: the user name, its role, the credential source and (for API tokens) its id */
 export interface AuthPrincipal {
   username: string;
   role: UserRole;
   source: AuthSource;
+  /** Token-store id when the credential is a dynamic API token; absent for the static token / basic auth */
+  tokenId?: string;
 }
 
 /** Role → allowed scopes (the single source of truth for RBAC; kept in sync with `users.ts` `USER_ROLE`) */
@@ -221,11 +230,11 @@ export class AuthVerifier {
 
     if ((this.mode === 'token' || this.mode === 'both') && scheme === 'bearer' && credentials.length > 0) {
       if (this.token.length > 0 && constantTimeEquals(credentials, this.token)) {
-        return { username: this.username, role: 'admin', source: 'config-token' };
+        return { username: this.username, role: 'admin', source: 'config-token', tokenId: STATIC_TOKEN_ID };
       }
       const resolved = this.tokenStore === null ? null : this.tokenStore.resolve(credentials);
       if (resolved !== null) {
-        return { username: resolved.user, role: resolved.role, source: 'token' };
+        return { username: resolved.user, role: resolved.role, source: 'token', tokenId: resolved.tokenId };
       }
     }
     if ((this.mode === 'basic' || this.mode === 'both') && scheme === 'basic' && this.matchesCredentials(credentials)) {

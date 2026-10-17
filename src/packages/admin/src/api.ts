@@ -41,6 +41,27 @@ export interface RtdbMetricSummary {
   lastTs: number;
 }
 
+/** `POST /api/v1/query/aggregate` window: `[start, end)` with the aggregated value and its sample count */
+export interface RtdbAggregateWindow {
+  start: number;
+  end: number;
+  /** f64 → number, i64 → decimal string, bool → boolean, string → string, no coverage → null */
+  v: number | string | boolean | null;
+  vt: number;
+  count: number;
+}
+
+/** Operators accepted by `POST /api/v1/query/aggregate` (mirrors `AggregateType` in the engine) */
+export const RTDB_AGGREGATE_TYPE = {
+  avg: 'avg',
+  sum: 'sum',
+  min: 'min',
+  max: 'max',
+  count: 'count',
+  last: 'last',
+} as const;
+export type RtdbAggregateType = (typeof RTDB_AGGREGATE_TYPE)[keyof typeof RTDB_AGGREGATE_TYPE];
+
 export interface RtdbStatusReport {
   uptimeMs: number;
   databases: number;
@@ -69,6 +90,33 @@ export interface RtdbPublicToken {
   createdAt: number;
   expiresAt: number | null;
   revokedAt: number | null;
+  /** Last authenticated request (ms); `null` when the token was never used */
+  lastUsedAt: number | null;
+  /** Database of the last request that addressed one; `null` for admin-only usage */
+  lastDatabase: string | null;
+  /** Accepted points/s over the server's rolling window (reset on restart) */
+  pointsPerSec: number;
+  /** Request payload bytes/s over the rolling window (reset on restart) */
+  bytesPerSec: number;
+}
+
+/**
+ * Usage of the **static** `auth.token` (`rtdb.token`). That credential has no record in the token store, but
+ * clients such as the Smart Site demo write with it, so the server reports its runtime usage separately.
+ */
+export interface RtdbConfigTokenUsage {
+  user: string;
+  lastUsedAt: number | null;
+  lastDatabase: string | null;
+  pointsPerSec: number;
+  bytesPerSec: number;
+}
+
+/** `GET /api/v1/admin/tokens`: persisted token records plus the static-token usage snapshot */
+export interface RtdbTokenListReport {
+  tokens: RtdbPublicToken[];
+  /** Absent on servers predating the usage statistics */
+  configToken?: RtdbConfigTokenUsage;
 }
 
 export interface RtdbBackupResult {
@@ -210,6 +258,31 @@ export class RtdbAdminApiClient {
     return body.series;
   }
 
+  /**
+   * `POST /api/v1/query/aggregate` — windowed aggregation over `[start, end)`.
+   *
+   * `avg` is the engine's **time-weighted** average (neighbours just outside the window are linearly
+   * interpolated); a window without coverage comes back with `v: null` and `count: 0`.
+   */
+  async queryAggregate(
+    database: string,
+    metricName: string,
+    start: number,
+    end: number,
+    type: RtdbAggregateType,
+    windowMs: number,
+  ): Promise<RtdbAggregateWindow[]> {
+    const body = await this.request<{ windows: RtdbAggregateWindow[] }>('POST', '/api/v1/query/aggregate', {
+      db: database,
+      metricName,
+      start,
+      end,
+      type,
+      windowMs,
+    });
+    return body.windows;
+  }
+
   async setRetentionDays(database: string, days: number): Promise<void> {
     await this.request<{ ok: boolean }>('PUT', `/api/v1/retention/${encodeURIComponent(database)}`, { days });
   }
@@ -226,9 +299,8 @@ export class RtdbAdminApiClient {
     return body.users;
   }
 
-  async listTokens(): Promise<RtdbPublicToken[]> {
-    const body = await this.request<{ tokens: RtdbPublicToken[] }>('GET', '/api/v1/admin/tokens');
-    return body.tokens;
+  listTokens(): Promise<RtdbTokenListReport> {
+    return this.request<RtdbTokenListReport>('GET', '/api/v1/admin/tokens');
   }
 
   issueToken(user: string, role: string | null, label: string, ttlMs: number | null): Promise<IssueTokenResult> {

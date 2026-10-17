@@ -121,6 +121,13 @@ body {
   min-width: 240px;
 }
 
+/** Several controls that belong to one field label and must stay on a single line */
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 input[type='text'],
 input[type='password'],
 input[type='number'],
@@ -347,6 +354,16 @@ table.data-table {
 
 .data-table td.mono {
   font-family: var(--mono);
+}
+
+/* Token table: the write-rate column sits next to the id and must stay visible without horizontal scrolling */
+.token-table td.wrap-cell,
+.token-table td.wrap-cell * {
+  white-space: normal;
+}
+
+.token-table .token-hint {
+  max-width: 220px;
 }
 
 .empty-hint {

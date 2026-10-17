@@ -892,8 +892,17 @@ interface AdminTokenBody {
   };
 }
 
+interface TokenUsageFields {
+  lastUsedAt: number | null;
+  lastDatabase: string | null;
+  pointsPerSec: number;
+  bytesPerSec: number;
+}
+
 interface AdminTokensBody {
-  tokens: AdminTokenBody['tokenRecord'][];
+  tokens: Array<AdminTokenBody['tokenRecord'] & TokenUsageFields>;
+  /** Usage of the static `auth.token` (no token-store record); reported separately */
+  configToken?: TokenUsageFields & { user: string };
 }
 
 describe('server: 多用户管理（admin/users）', () => {
@@ -1304,6 +1313,101 @@ describe('server: API 令牌（admin/tokens）', () => {
       const revokeUnknown = await fetch(`${baseUrl}/api/v1/admin/tokens/${'0'.repeat(36)}`, { method: 'DELETE' });
       assert.equal(revokeUnknown.status, 404);
       assert.equal((await readErrorBody(revokeUnknown)).error, SERVER_ERROR_CODE.TokenNotFound);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('列表带出令牌的最后访问数据库与写入速度（进程内统计）', async () => {
+    const { server, baseUrl } = await startTestServer({
+      auth: { enabled: true, mode: 'token', token: TOKEN, tokenFile: join(rootDirectory, 'token-usage.token') },
+    });
+    const adminHeaders = { Authorization: `Bearer ${TOKEN}` };
+    try {
+      const issued = await postJson(baseUrl, '/api/v1/admin/tokens', { user: 'dave', role: 'write' }, adminHeaders);
+      assert.equal(issued.status, 201);
+      const issuedBody = (await issued.json()) as AdminTokenBody;
+      const tokenHeaders = { Authorization: `Bearer ${issuedBody.token}` };
+
+      const before = (await (
+        await fetch(`${baseUrl}/api/v1/admin/tokens`, { headers: adminHeaders })
+      ).json()) as AdminTokensBody;
+      const beforeToken = before.tokens.find((token) => token.tokenId === issuedBody.tokenRecord.tokenId);
+      assert.equal(beforeToken?.lastUsedAt, null);
+      assert.equal(beforeToken?.lastDatabase, null);
+      assert.equal(beforeToken?.pointsPerSec, 0);
+
+      const written = await postJson(
+        baseUrl,
+        '/api/v1/write?db=demo',
+        [
+          { metricName: 'm', t: BASE, v: 1 },
+          { metricName: 'm', t: BASE + 1, v: 2 },
+          { metricName: 'm', t: BASE + 2, v: 3 },
+        ],
+        tokenHeaders,
+      );
+      assert.equal(written.status, 200);
+
+      const after = (await (
+        await fetch(`${baseUrl}/api/v1/admin/tokens`, { headers: adminHeaders })
+      ).json()) as AdminTokensBody;
+      const afterToken = after.tokens.find((token) => token.tokenId === issuedBody.tokenRecord.tokenId);
+      assert.equal(afterToken?.lastDatabase, 'demo');
+      assert.equal(typeof afterToken?.lastUsedAt, 'number');
+      // The three accepted points of the batch produce a non-zero rate (the exact value depends on how many
+      // seconds the burst spans, which is covered deterministically by the TokenUsageTracker unit tests)
+      assert.ok((afterToken?.pointsPerSec ?? 0) > 0);
+      assert.ok((afterToken?.bytesPerSec ?? 0) > 0);
+
+      // A query with the same token updates the database but must not add to the write rate
+      const ranged = await postJson(
+        baseUrl,
+        '/api/v1/query/range',
+        { db: 'other', metricName: 'm', start: BASE, end: BASE + 10 },
+        tokenHeaders,
+      );
+      assert.ok(ranged.status === 200 || ranged.status === 404);
+      const afterQuery = (await (
+        await fetch(`${baseUrl}/api/v1/admin/tokens`, { headers: adminHeaders })
+      ).json()) as AdminTokensBody;
+      const queriedToken = afterQuery.tokens.find((token) => token.tokenId === issuedBody.tokenRecord.tokenId);
+      assert.equal(queriedToken?.lastDatabase, 'other');
+      assert.ok((queriedToken?.pointsPerSec ?? 0) > 0);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('静态 auth.token 的写入不计入任何 API 令牌的统计', async () => {
+    const { server, baseUrl } = await startTestServer({
+      auth: { enabled: true, mode: 'token', token: TOKEN, tokenFile: join(rootDirectory, 'token-static-usage.token') },
+    });
+    const adminHeaders = { Authorization: `Bearer ${TOKEN}` };
+    try {
+      const issued = await postJson(baseUrl, '/api/v1/admin/tokens', { user: 'frank', role: 'write' }, adminHeaders);
+      assert.equal(issued.status, 201);
+      const issuedBody = (await issued.json()) as AdminTokenBody;
+
+      const written = await postJson(baseUrl, '/api/v1/write?db=demo', [{ metricName: 'm', t: BASE, v: 1 }], adminHeaders);
+      assert.equal(written.status, 200);
+
+      const listed = (await (
+        await fetch(`${baseUrl}/api/v1/admin/tokens`, { headers: adminHeaders })
+      ).json()) as AdminTokensBody;
+      const record = listed.tokens.find((token) => token.tokenId === issuedBody.tokenRecord.tokenId);
+      assert.equal(record?.lastUsedAt, null);
+      assert.equal(record?.lastDatabase, null);
+      assert.equal(record?.pointsPerSec, 0);
+      assert.equal(record?.bytesPerSec, 0);
+
+      // ...but the write is not dropped: it is attributed to the static token, which the admin API reports
+      // separately (`configToken`) so clients such as the Smart Site demo are not invisible in the console.
+      assert.equal(listed.configToken?.user, 'admin');
+      assert.equal(listed.configToken?.lastDatabase, 'demo');
+      assert.equal(typeof listed.configToken?.lastUsedAt, 'number');
+      assert.ok((listed.configToken?.pointsPerSec ?? 0) > 0);
+      assert.ok((listed.configToken?.bytesPerSec ?? 0) > 0);
     } finally {
       await server.stop();
     }

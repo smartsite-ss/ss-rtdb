@@ -154,7 +154,19 @@ if (!existsSync(blobPath)) fail('the SEA blob was not generated.');
 // ---------------------------------------------------------------- inject
 const exePath = join(outDir, 'rtdb-server.exe');
 step('injecting the blob into a copy of node.exe (postject) ...');
-copyFileSync(process.execPath, exePath);
+try {
+  copyFileSync(process.execPath, exePath);
+} catch (error) {
+  // Windows refuses to overwrite a running executable (EBUSY / EPERM / EACCES), so the operator
+  // has to stop the server before rebuilding; a bare EBUSY traceback is not actionable.
+  if (error && (error.code === 'EBUSY' || error.code === 'EPERM' || error.code === 'EACCES')) {
+    fail(
+      `cannot overwrite ${relative(root, exePath).replaceAll('\\', '/')} - it is locked by a running instance.\n` +
+        '        Stop rtdb-server.exe (or the SEA test instance) and run the build again.',
+    );
+  }
+  throw error;
+}
 execFileSync(process.execPath, [
   postjectCli,
   exePath,

@@ -55,6 +55,8 @@
 - 首次构建需要联网（`postject` 安装到 `bin\.sea-tools`，已 gitignore）；产物约 89 MB，
   中间产物保留在 `release\sea\.build\` 便于排查。
 - 已验证：`PATH` 中不含 Node 时 exe 可独立运行，写入 / 查询 / `/admin/` 均正常。
+- **重新构建前必须先停掉运行中的 `rtdb-server.exe`**：Windows 不允许覆盖正在执行的镜像，
+  否则注入阶段报 `EBUSY: resource busy or locked`（脚本已给出「先停止实例再重试」的明确提示）。
 
 ## 3. 仓库布局与依赖方向
 
@@ -302,3 +304,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 新增 `packages/demo/conf/` 统一配置（`rtdb-server.json`、`client-smart-site.json`）与 `bin\start-demo-server.bat`；客户端支持 `--config` / `--no-config` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `workspaces` 增加 `packages/demo/*`，`check:deps` 支持嵌套工作区；§2 Python SDK 路径、§3 布局、§4 文件头自检路径同步到 `packages/demo/client-*` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增运行期配置目录 `conf/`（`rtdb-server.json` 默认配置，工作目录存在时自动加载）；§3 布局与 §10 运行时注意事项同步 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §2 SEA 要点补充：重建 exe 前必须停止运行中的实例，`bin/sea/build-sea.mjs` 对 `EBUSY` 覆盖失败给出明确提示 | DeepSeek-V4.1-Flash |

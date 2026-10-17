@@ -387,12 +387,36 @@ curl -X POST "http://127.0.0.1:6180/api/v1/admin/tokens" \
 #  "label":"edge-gateway-1","createdAt":...,"expiresAt":...,"revokedAt":null}}
 
 curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:6180/api/v1/admin/tokens
+# {"tokens":[{"tokenId":"...","user":"collector","role":"write","label":"edge-gateway-1",
+#  "createdAt":...,"expiresAt":...,"revokedAt":null,
+#  "lastUsedAt":1760691600000,"lastDatabase":"plant_a","pointsPerSec":1200,"bytesPerSec":98304}],
+#  "configToken":{"user":"admin","lastUsedAt":1760691601000,"lastDatabase":"smartfactory_demo",
+#  "pointsPerSec":205,"bytesPerSec":30720}}
+
 curl -X DELETE "http://127.0.0.1:6180/api/v1/admin/tokens/<tokenId>" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 # {"ok":true}
 ```
 
 Omitting `role` defaults to the owner's role (or `write`); omitting `ttlMs` means no expiry.
+
+Every listed token also carries **runtime usage statistics**. They live in process memory (a restart resets
+them) and nothing is added to the token store:
+
+| Field | Meaning |
+| ----- | ------- |
+| `lastUsedAt` | Timestamp (ms) of the last authenticated request; `null` = the token was never used |
+| `lastDatabase` | Database of the last request that addressed one; `null` = only admin endpoints were used |
+| `pointsPerSec` | Accepted points per second over a 10 s rolling window |
+| `bytesPerSec` | Request payload bytes per second over the same window |
+
+The static `auth.token` (`rtdb.token`; the Smart Site demo client writes with it) has **no record in the token
+store**, so it never shows up in `tokens` and its usage is not attributed to any API token. It is reported in a
+separate `configToken` object carrying the same four fields plus `user` (the configured `auth.username`). The field
+is always present — `lastUsedAt`/`lastDatabase` stay `null` and both rates stay `0` until the static token is used.
+
+A token is a **server-side credential, not a session**: closing a client cannot notify the server, so the token
+stays valid until it is revoked (`DELETE`) or reaches `expiresAt` (set `ttlMs` when issuing).
 
 ### 7.3 Sign-in and sessions
 
@@ -472,3 +496,5 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 | 2026-10-17 | Added §7.3 "Sign-in and sessions" plus three endpoint-index rows: `POST /api/v1/auth/login`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Added `GET /api/v1/databases/:db` (on-disk footprint, per-day detail, retention readback) with §5.1, the endpoint index row and the `query` scope entry | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `directory` in §5.1 is now documented as relative to the server working directory by default (`admin.exposePaths=true` for the absolute path) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `GET /api/v1/admin/tokens` now returns per-token runtime usage (`lastUsedAt`, `lastDatabase`, `pointsPerSec`, `bytesPerSec`); §7.2 documents the fields and the "credential, not session" rule | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §7.2 adds `configToken`: the static `auth.token` (`rtdb.token`) has no token-store record, so its usage is returned separately instead of being dropped | DeepSeek-V4.1-Flash |

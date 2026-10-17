@@ -73,13 +73,18 @@ export function formatDateTime(milliseconds: number): string {
   );
 }
 
-/** `YYYY-MM-DDTHH:mm` value accepted by `<input type="datetime-local">` */
-export function toDateTimeLocalValue(milliseconds: number): string {
+/**
+ * `YYYY-MM-DDTHH:mm` value accepted by `<input type="datetime-local">`.
+ *
+ * Pass `withSeconds` when the picker drives an exact query range: without it a "last 5 minutes" shortcut would be
+ * rounded down to the minute and silently shift the window.
+ */
+export function toDateTimeLocalValue(milliseconds: number, withSeconds = false): string {
   const date = new Date(milliseconds);
-  return (
+  const minuteValue =
     `${date.getFullYear()}-${padTwoDigits(date.getMonth() + 1)}-${padTwoDigits(date.getDate())}` +
-    `T${padTwoDigits(date.getHours())}:${padTwoDigits(date.getMinutes())}`
-  );
+    `T${padTwoDigits(date.getHours())}:${padTwoDigits(date.getMinutes())}`;
+  return withSeconds ? `${minuteValue}:${padTwoDigits(date.getSeconds())}` : minuteValue;
 }
 
 export function fromDateTimeLocalValue(value: string): number {
