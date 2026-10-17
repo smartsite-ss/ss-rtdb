@@ -29,6 +29,38 @@ Two-level design:
   lexicographic order equal to time order, and the date prefix keeps files identifiable outside their
   directory.
 
+### 1.1 Segment creation and rolling rules
+
+A new `.seg` is created at exactly three moments:
+
+1. **First write**: the database has no active segment for the day (new database / new day / first block
+   after a restart). The sequence continues from the largest existing one plus 1 (a restart never
+   overwrites existing files); the segment is created exclusively (`wx+`), gets its 32 B header and an
+   fsync.
+2. **Day rollover**: when a block's timestamp enters a new local day, the next day directory and segment
+   are **pre-created synchronously** (mkdir + create, <1 ms) and the old segment is sealed automatically —
+   day boundaries stay complete for day-pruned queries.
+3. **Capacity rollover**: before appending a block, `bytesWritten + estimated block bytes >
+   storage.segment.maxBytes` (default 200 MiB) seals the old segment and creates the next sequence.
+
+Three exceptions where no roll happens:
+
+- **Empty segments never roll**: a segment without any block keeps receiving appends. Otherwise a single
+  block larger than 200 MiB would trigger endless rolling;
+- **A block never spans segments**: it goes entirely into the current segment, or rolling happens and it
+  goes entirely into the next one. `maxBytes` is therefore a **soft limit** — a file may exceed it by at
+  most one block (≤ `blockTargetPoints` points);
+- **Sequence exhausted**: once the day reaches `maxPerDay` (bounded by the format limit 999), rolling
+  stops and appends continue into the current segment — exceeding the soft limit is preferred over
+  losing data.
+
+Sealing terminates a segment; it can never be appended afterwards (copying it out = backup). Triggers:
+capacity rollover, day rollover, shutdown `close()`. Actions: write the footer (16 B, CRC over header +
+index offset) → write the in-segment index region → fsync → close the write handle → atomically rewrite
+the `.idx` mirror. A missing or corrupt `.idx` is rebuilt by startup recovery from a block scan; a process
+killed before sealing still reads fine, but that segment has no `.idx` mirror and its index is rebuilt in
+memory during recovery.
+
 ## 2. The data-root lock
 
 One `dataDir` may be opened by **one process at a time**. Implications:
@@ -144,8 +176,11 @@ On every start (or after `restore`):
 2. Replay the current day's WAL, de-duplicating against the segment tail by timestamp.
 3. Truncate any half block (CRC failure) and log a warning.
 
-**Consistency promise**: sealed segment data is permanently safe; at most the WAL points of the last
-≤5 s can be lost. Clients only need to retry a failed batch — writes are idempotent by
+**Consistency promise**: at any instant a point is either inside a segment file (blocks are `fsync`ed
+before the WAL safe point is advanced) or still inside the WAL (group-`fsync`ed on every append). With
+`fsyncPolicy='wal'` (the default) neither a process crash nor a power loss loses points;
+`fsyncPolicy='none'` is only for scenarios where data can be reloaded. Sealed segment data is permanently
+safe. Clients only need to retry a failed batch — writes are idempotent by
 `(metric, timestamp)`.
 
 Out-of-window writes go to a **backfill sidecar** (`yyyyMMdd.bfill.seg`) instead of mutating a sealed
@@ -246,3 +281,5 @@ rtdbctl archive plant_a            # review cold archives
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Rewrote the consistency promise: a point is either in a segment (segment fsync precedes the WAL safe point) or in the WAL (group fsync per append); with `fsyncPolicy='wal'` neither a crash nor a power loss loses points | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Added §1.1 segment creation and rolling rules: three creation triggers (first write with sequence continuation / day rollover pre-creation / capacity rollover), three no-roll exceptions (empty segment, block never spans segments i.e. soft limit, sequence exhausted keeps appending), sealing actions and `.idx` rebuild wording | DeepSeek-V4.1-Flash |

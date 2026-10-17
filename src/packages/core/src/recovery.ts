@@ -187,7 +187,10 @@ export function recoverDataRoot(options: RecoveryOptions): RecoveryReport {
         discardedTailBytes,
         fileBytes: walReport.fileBytes,
       });
-      databaseReport.replayedEntries.push(...walReport.entries);
+      // Append one by one instead of `push(...entries)`: a 5 s WAL window at a few tens of
+      // thousands of points per second holds 10^5 entries, which overflows the argument limit
+      // (`RangeError: Maximum call stack size exceeded`) and makes recovery fail on startup.
+      for (const entry of walReport.entries) databaseReport.replayedEntries.push(entry);
       report.replayedEntryCount += walReport.entries.length;
       report.discardedWalTailBytes += discardedTailBytes;
     }

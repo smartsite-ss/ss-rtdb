@@ -560,6 +560,24 @@ export class SegmentStore {
   }
 
   /**
+   * Flush the active segment's appended blocks to stable storage (`fsync`), so the write-ahead log may
+   * safely release those points.
+   *
+   * Durability ordering: block bytes reach the OS page cache with `writeAll`; only after `fsync` is the
+   * segment's copy durable. The WAL is truncated to the safe point **after** this call returns (engine: block
+   * append -> segment fsync -> safe point), so the "points not yet in a segment" invariant never leaves the
+   * newest block with page-cache-only copies across a power loss.
+   *
+   * Returns `false` when the database has no active segment (nothing was appended yet / just sealed).
+   */
+  fsyncActiveSegment(database: string): boolean {
+    const handle = this.activeSegments.get(database);
+    if (handle === undefined) return false;
+    fsyncSync(handle.fileDescriptor);
+    return true;
+  }
+
+  /**
    * Seal the active segment: append Footer + in-segment index region -> fsync -> close the write-side handle ->
    * atomically rewrite the `.idx` mirror.
    *

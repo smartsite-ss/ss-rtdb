@@ -561,6 +561,23 @@ describe('启动恢复：WAL 重放与范围', () => {
     assert.equal(replayed.quality, 0);
   });
 
+  it('超大 WAL（15 万行）重放不再触发 push 参数展开上限崩溃', () => {
+    // 20k pts/s + 5 s 兜底成块 ⇒ 崩溃时 WAL 里常驻 10^5 条；旧实现用
+    // `replayedEntries.push(...entries)` 直接展开，会抛 RangeError: Maximum call stack size exceeded，
+    // 导致崩溃后无法启动。
+    const store = createStore('recover-wal-large');
+    const wal = new WriteAheadLog({ store, database: DATABASE });
+    const total = 150_000;
+    for (let written = 0; written < total; written += 50_000) {
+      wal.append(points('m.replay.large', DAY_TIMESTAMP + written * 10, 50_000, 10));
+    }
+    wal.close();
+
+    const report = recoverDataRoot({ store });
+    assert.equal(report.replayedEntryCount, total);
+    assert.equal(report.databases[0]?.replayedEntries.length, total);
+  });
+
   it('空数据根返回空报告且不抛错', () => {
     const store = createStore('recover-empty');
     const report = recoverDataRoot({ store });

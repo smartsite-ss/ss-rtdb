@@ -554,3 +554,53 @@ describe('segment-writer: 跨天与容量段滚动', () => {
     assert.deepStrictEqual(decoded.values, values);
   });
 });
+
+/* ---------- 段文件 fsync 与 WAL 安全点顺序 ---------- */
+
+describe('段写入器: 段文件 fsync 与 WAL 安全点顺序', () => {
+  const DAY_TIMESTAMP = new Date(2026, 5, 5, 10, 0, 0).getTime();
+
+  /** 用实例级包装统计 `store.fsyncActiveSegment` 调用次数（真实 fsync 仍会执行） */
+  function spyFsync(store: SegmentStore): { calls: () => number } {
+    let count = 0;
+    const injectable = store as unknown as { fsyncActiveSegment: (database: string) => boolean };
+    const original = injectable.fsyncActiveSegment.bind(store);
+    injectable.fsyncActiveSegment = (database: string): boolean => {
+      count += 1;
+      return original(database);
+    };
+    return { calls: () => count };
+  }
+
+  it('落块的 append/flush 各 fsync 一次；没有新块就不 fsync', () => {
+    const fixture = createFixture({ blockMinPoints: 64, blockTargetPoints: 1024 });
+    const spy = spyFsync(fixture.store);
+    try {
+      fixture.writer.append(floatPoints('m.fsync.a', DAY_TIMESTAMP, 100));
+      assert.equal(spy.calls(), 0, '缓冲未成块时不应 fsync');
+
+      fixture.writer.flush();
+      assert.equal(spy.calls(), 1, 'flush 落块后应恰好 fsync 一次');
+
+      fixture.writer.append(floatPoints('m.fsync.b', DAY_TIMESTAMP, 4_096));
+      assert.equal(spy.calls(), 2, 'append 内成块同样要在返回前 fsync');
+
+      fixture.writer.flush();
+      assert.equal(spy.calls(), 2, '没有新块时不再 fsync');
+    } finally {
+      fixture.writer.close();
+    }
+  });
+
+  it('fsyncSegments=false 时不调用段 fsync（仅限可重灌场景）', () => {
+    const fixture = createFixture({ blockMinPoints: 64, blockTargetPoints: 1024, fsyncSegments: false });
+    const spy = spyFsync(fixture.store);
+    try {
+      fixture.writer.append(floatPoints('m.fsync.c', DAY_TIMESTAMP, 100));
+      fixture.writer.flush();
+      assert.equal(spy.calls(), 0, '关闭 fsyncSegments 后不应调用段 fsync');
+    } finally {
+      fixture.writer.close();
+    }
+  });
+});

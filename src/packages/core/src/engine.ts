@@ -842,6 +842,9 @@ export class RtdbEngine {
         maxBufferBytes: this.maxBufferBytes,
         maxPendingPoints: this.maxPendingPoints,
         bufferPool: this.bufferPool,
+        // The WAL safe point must not be advanced before the segment's copy is on stable storage;
+        // with `fsyncPolicy='none'` (reloadable scenarios) the extra fsync is skipped.
+        fsyncSegments: this.fsyncPolicy === 'wal',
       }),
       wal: new WriteAheadLog({
         store: this.store,

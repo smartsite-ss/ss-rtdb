@@ -84,6 +84,12 @@ export interface SegmentWriterOptions {
   maxPendingPoints?: number;
   /** Block byte buffer pool; if not provided the writer creates its own and releases it in `close()` (if provided, its lifetime belongs to the caller) */
   bufferPool?: BufferPool;
+  /**
+   * `fsync` the active segment after committed blocks, before the caller may release those points from the
+   * WAL. Default true: the WAL safe point (engine) is only allowed to truncate once the segment's copy is on
+   * stable storage. Set false only together with `fsyncPolicy='none'` (reloadable scenarios).
+   */
+  fsyncSegments?: boolean;
 }
 
 /** The result of one flush action (shared by `append` / `flush` / `flushAll` / `close`) */
@@ -137,6 +143,10 @@ export class SegmentWriter {
 
   /** Whether the buffer pool is self-created (decides whether `close()` disposes it) */
   private readonly ownsBufferPool: boolean;
+  /** `fsync` the active segment after committed blocks (see `SegmentWriterOptions.fsyncSegments`) */
+  private readonly fsyncSegments: boolean;
+  /** Blocks committed since the last segment `fsync` (drives the end-of-operation sync) */
+  private blocksSinceSegmentFsync = 0;
   /** Per-metric unblocked buffer (the entry is removed once the buffer is emptied, avoiding memory growth on long runs) */
   private readonly buffers = new Map<string, MetricBuffer>();
   /** Value type locked on the metric's first write (persists for the writer's lifetime; cross-process locking awaits the S4 recovery flow) */
@@ -147,6 +157,7 @@ export class SegmentWriter {
   constructor(options: SegmentWriterOptions) {
     this.store = options.store;
     this.database = options.database;
+    this.fsyncSegments = options.fsyncSegments ?? true;
     const blockTargetPoints = clampEngineOption(
       'blockTargetPoints',
       options.blockTargetPoints ?? ENGINE_DEFAULTS.blockTargetPoints,
@@ -226,7 +237,9 @@ export class SegmentWriter {
       const buffer = this.buffers.get(metricName);
       if (buffer !== undefined) this.drainBuffer(buffer, false, result);
     }
-
+    // Blocks appended inside this append may already complete a WAL batch on the caller's side, so the
+    // segment must be durable before `append()` returns (engine: append -> safe point).
+    this.syncSegmentsIfNeeded();
     return { ...result, accepted: points.length };
   }
 
@@ -240,6 +253,7 @@ export class SegmentWriter {
       if (buffer.timestamps.length < this.blockMinPoints) continue;
       this.drainBuffer(buffer, true, result);
     }
+    this.syncSegmentsIfNeeded();
     return result;
   }
 
@@ -247,7 +261,19 @@ export class SegmentWriter {
   flushAll(): WriterFlushResult {
     const result: WriterFlushResult = { blockCount: 0, pointCount: 0, sealedSegments: [] };
     for (const buffer of [...this.buffers.values()]) this.drainBuffer(buffer, true, result);
+    this.syncSegmentsIfNeeded();
     return result;
+  }
+
+  /**
+   * Make the blocks appended since the last sync durable. Called once per write/flush operation (not per
+   * block): one `fsync` amortized over all the blocks of a drain keeps the overhead at the WAL's own group
+   * commit level, and the WAL safe point may only be advanced after this returns.
+   */
+  private syncSegmentsIfNeeded(): void {
+    if (!this.fsyncSegments || this.blocksSinceSegmentFsync === 0) return;
+    this.blocksSinceSegmentFsync = 0;
+    this.store.fsyncActiveSegment(this.database);
   }
 
   /**
@@ -480,6 +506,7 @@ export class SegmentWriter {
         timestampMin: block.timestampMin,
         timestampMax: block.timestampMax,
       });
+      this.blocksSinceSegmentFsync += 1;
     } finally {
       this.bufferPool.release(block.blockBytes);
     }

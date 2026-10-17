@@ -25,7 +25,9 @@ await rtdb.close();   // 刷盘、封存活动段、截断 WAL、释放锁
 ```
 
 关闭时务必调用 `close()`（注册 `SIGINT` / `SIGTERM` / `process.on('exit')` 处理器）。
-未调用 `close()` 就崩溃也是安全的 —— 恢复时会重放 WAL —— 但最多会丢失最后 ≤5 秒的点。
+未调用 `close()` 就崩溃也是安全的 —— 恢复时会重放 WAL。`fsyncPolicy='wal'`（默认）下**不丢点**：
+持久化顺序是「块写入段文件 → fsync 段文件 → 推进 WAL 安全点」，因此任意时刻，点要么已在段文件中
+（已 fsync），要么仍在 WAL 中（每次追加后成组 fsync）——WAL 被截断前，它承载的点必然已落段并落盘。
 
 ### 数据根锁
 
@@ -57,7 +59,7 @@ await rtdb.close();   // 刷盘、封存活动段、截断 WAL、释放锁
 | `cacheBlocks` | `256` | 已解码块的 LRU 条目数。 |
 | `cacheFdGroups` | `32` | 打开的段文件句柄的 LRU 条目数。 |
 | `walEnabled` | `true` | 仅当数据可重新生成时才关闭。 |
-| `fsyncPolicy` | `wal` | `wal` = 每次 WAL 追加后成组 fsync；`none` = 依赖操作系统。 |
+| `fsyncPolicy` | `wal` | `wal` = 每次 WAL 追加后成组 fsync，且块落段后先 fsync 段文件再推进 WAL 安全点；`none` = 依赖操作系统（仅限可重灌数据）。 |
 
 越界值会被钳制（钳制表见 [02 — 配置](./02-configuration.md) §3 配置项参考）。
 
@@ -233,3 +235,4 @@ main()
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 修正崩溃丢失口径：`fsyncPolicy='wal'` 下不丢点（块落段 → fsync 段文件 → 才推进 WAL 安全点；原「最多丢失 ≤5 秒」对应修复前的实现） | DeepSeek-V4.1-Flash |

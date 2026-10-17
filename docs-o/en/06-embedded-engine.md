@@ -26,7 +26,11 @@ await rtdb.close();   // flushes, seals the active segment, truncates the WAL, r
 ```
 
 Always `close()` on shutdown (register `SIGINT` / `SIGTERM` / `process.on('exit')` handlers). A crash
-without `close()` is safe — recovery replays the WAL — but you lose at most the last ≤5 s of points.
+without `close()` is safe — recovery replays the WAL. With `fsyncPolicy='wal'` (the default) **no points
+are lost**: the durability order is "blocks written to the segment → `fsync` the segment → advance the WAL
+safe point", so at any instant a point is either inside a segment file (already fsynced) or still inside
+the WAL (group-fsynced on every append) — the WAL is only truncated after the points it carried are durable
+in a segment.
 
 ### Data-root lock
 
@@ -59,7 +63,7 @@ All options are optional except `dataDir`.
 | `cacheBlocks` | `256` | LRU entries for decoded blocks. |
 | `cacheFdGroups` | `32` | LRU entries for open segment handles. |
 | `walEnabled` | `true` | Disable only for reloadable data. |
-| `fsyncPolicy` | `wal` | `wal` = group fsync per WAL append; `none` = rely on the OS. |
+| `fsyncPolicy` | `wal` | `wal` = group fsync per WAL append, plus a segment fsync before the WAL safe point is advanced; `none` = rely on the OS (reloadable data only). |
 
 Out-of-range values are clamped (see [02 — Configuration](./02-configuration.md#3-key-reference) for
 the clamp table).
@@ -237,3 +241,4 @@ main()
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Corrected the crash-loss wording: with `fsyncPolicy='wal'` no points are lost (block append → segment fsync → WAL safe point; the former "lose at most ≤5 s" described the pre-fix behavior) | DeepSeek-V4.1-Flash |
