@@ -37,12 +37,22 @@
 | 启动服务（源码树） | `npm start --workspace @ss/rtdb-server`（等价 `node packages/server/src/main.ts`） |
 | 启动服务（仓库或发布包，推荐） | `bin\start-server.bat` |
 | 生成发布包（输出到 `release\ss-rtdb-<version>\`） | `bin\build-release.bat`（可指定版本：`bin\build-release.bat 0.2.0`） |
+| 生成单文件 exe（Node SEA，输出 `release\sea\rtdb-server.exe`） | `bin\build-sea.bat` |
 | 使用 CLI / rtdbctl 包装脚本 | `node packages/cli/src/main.ts status`、`npx rtdbctl status`、`bin\rtdbctl.bat status` |
 | 控制台开发服务器 | `npm run dev --workspace @ss/rtdb-admin` |
 | Python SDK 测试 | `cd packages/client-python` 后 `python -m pytest tests/` |
 
 注意：`server` 与 `cli` 包**没有 `build` 脚本**（直接运行 `.ts`）；`npm run build` 只构建
 `core`、`client-node`、`admin`。仓库没有 linter / formatter，类型检查 + 测试即为质量门禁。
+
+**SEA 单文件 exe（`bin\build-sea.bat`）要点**
+
+- 单文件只包含代码：`admin\dist`（Web 控制台）与 `rtdb-data\`（数据根）**按设计外置**在 exe 同目录。
+- `server.ts` 用 `import.meta.url` 定位控制台，而 SEA 快照内没有模块 URL：打包时该引用被重写，
+  使默认控制台路径解析为 `<exe 目录>\admin\dist`（因此不要移动 `admin\` 目录）。
+- 首次构建需要联网（`postject` 安装到 `bin\.sea-tools`，已 gitignore）；产物约 89 MB，
+  中间产物保留在 `release\sea\.build\` 便于排查。
+- 已验证：`PATH` 中不含 Node 时 exe 可独立运行，写入 / 查询 / `/admin/` 均正常。
 
 ## 3. 仓库布局与依赖方向
 
@@ -60,8 +70,10 @@ ss-rtdb/
 │   └── scripts/              # check-runtime-dependencies.ts、check-throughput-regression.ts
 ├── bin/                      # 发布 / 启动批处理脚本（.bat 规则见 §4 第 10 条）
 │   ├── build-release.bat     #   构建并打包到 release\ss-rtdb-<version>\
+│   ├── build-sea.bat         #   生成单文件 release\sea\rtdb-server.exe（Node SEA）
 │   ├── start-server.bat      #   前台启动服务（仓库与发布包通用）
-│   └── rtdbctl.bat           #   rtdbctl 包装脚本
+│   ├── rtdbctl.bat           #   rtdbctl 包装脚本
+│   └── sea\build-sea.mjs     #   SEA 实现：esbuild bundle + --experimental-sea-config + postject
 ├── release/                  # 发布产物（build-release.bat 生成，**不入库**）
 └── docs-o/                   # en/ 原始英文文档，zh/ 中文译本（逐页对应）
 ```
@@ -231,7 +243,7 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 - Web 控制台在 `/admin/`（结尾斜杠必需），需先 `npm run build --workspace @ss/rtdb-admin`，
   否则返回 404。
 - 已忽略的本地产物：`node_modules/`、`dist/`、`tsbuildinfo`、`*.log`、`rtdb-data/`、`*.token`、
-  `coverage/`、`bench-out/`、Python 缓存目录、`docs-e/`、`release/`。
+  `coverage/`、`bench-out/`、Python 缓存目录、`docs-e/`、`release/`、`bin/.sea-tools/`。
 
 ---
 
@@ -243,3 +255,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | §4 强化「所有代码文件必须带 Apache-2.0 文件头」；§7 修订记录规则扩展至中英全部文档；补齐 `src/packages/admin/index.html` 文件头 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 §4 第 10 条：`bin/` 下 `.bat` / `.cmd` 必须全英文内容、UTF-8 编码、CRLF 行尾、`REM` 形式的 Apache-2.0 文件头；§3 布局补 `bin/`；§4 第 5 条注释语法补 `REM` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增发布/启动脚本 `bin\build-release.bat`、`bin\start-server.bat`、`bin\rtdbctl.bat`；§2 命令表与 §3 布局同步；§10 忽略清单补 `release/`；`.gitignore` 忽略 `release/` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 SEA 单文件打包 `bin\build-sea.bat` + `bin\sea\build-sea.mjs`（esbuild bundle、`import.meta.url` 重写、`postject` 注入、控制台外置）；§2 补命令与 SEA 要点、§3 布局、§10 忽略 `bin/.sea-tools/` | DeepSeek-V4.1-Flash |

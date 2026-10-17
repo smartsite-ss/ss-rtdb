@@ -17,6 +17,9 @@ docs-e/
 # 发布产物（由 bin\build-release.bat 生成，不入库）
 release/
 
+# SEA 构建工具依赖（bin\build-sea.bat 首次运行时自动安装，不入库）
+bin/.sea-tools/
+
 # Python SDK 产物（packages/client-python）
 __pycache__/
 *.pyc
