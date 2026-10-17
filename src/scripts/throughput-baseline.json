@@ -1,0 +1,13 @@
+{
+  "recordedAt": "2026-10-16T15:48:17.305Z",
+  "scale": "quick",
+  "throughput": 98235,
+  "p99Ms": 9.089,
+  "environment": {
+    "nodeVersion": "v24.18.0",
+    "platform": "win32",
+    "arch": "x64",
+    "cpuModel": "AMD Ryzen 7 4800H with Radeon Graphics",
+    "cpuCount": 16
+  }
+}

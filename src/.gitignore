@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+
+# 运行期数据目录（本地调试产生，不入库）
+rtdb-data/
+*.token
+
+# 基准与临时产物
+coverage/
+bench-out/
+
+# Python SDK 产物（packages/client-python）
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/

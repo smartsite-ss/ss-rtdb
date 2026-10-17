@@ -1,0 +1,387 @@
+# 04 — HTTP API
+
+基础路径：`/api/v1`。默认监听：`http://127.0.0.1:6180`。
+
+## 1. 约定
+
+### 鉴权
+
+| 模式 | 请求头 |
+| ---- | ------ |
+| `token`（默认） | `Authorization: Bearer <token>` |
+| `basic` | `Authorization: Basic base64(username:password)` |
+| `both` | 以上两者皆可 |
+
+令牌可以是静态 `auth.token` / 自动生成的 `rtdb.token`（角色恒为 `admin`），
+也可以是通过 `/api/v1/admin/tokens` 签发的 API 令牌（角色 = 该令牌的角色）。
+
+### 权限域与角色
+
+| 权限域 | 端点 | `admin` | `write` | `readonly` |
+| ------ | ---- | :-----: | :-----: | :--------: |
+| `none` | `/api/v1/status`、`/metrics`、`/healthz` | ✅ | ✅ | ✅ |
+| `query` | `/api/v1/databases`、`/api/v1/metrics/:db`、`/api/v1/query/*` | ✅ | ✅ | ✅ |
+| `write` | `/api/v1/write`、`/api/v1/retention/:db`、`/api/v1/backup/:db` | ✅ | ✅ | ❌ |
+| `admin` | `/api/v1/admin/users*`、`/api/v1/admin/tokens*` | ✅ | ❌ | ❌ |
+
+配置项 `auth.query` / `auth.write` 可以整体关闭查询/写入的凭据要求；
+但只要 `auth.enabled = true`，`admin` 权限域**始终**受保护。
+
+### 内容类型
+
+- 查询类与管理类端点：`application/json`。
+- `POST /api/v1/write`：JSON 点数组用 `application/json`；其他任意类型（如 `text/plain`）表示行协议。
+
+### 错误响应体
+
+所有非 2xx 响应都是 JSON：
+
+```json
+{ "error": "E_METRIC_NOT_FOUND", "message": "Metric not found: foo", "details": [] }
+```
+
+`429` 还会附带 `Retry-After: 1`。
+
+| 错误码 | HTTP | 含义 |
+| ------ | ---- | ---- |
+| `E_INVALID_POINT` | 400 | 点格式错误 / 数据库名非法 / 行协议行非法 |
+| `E_INVALID_RANGE` | 400 | 时间区间非法、`order` 非法、聚合窗口过多 |
+| `E_BAD_METRIC_NAME` | 400 | 指标名缺失或非法 |
+| `E_TYPE_MISMATCH` | 400 | 值类型与该指标首次写入锁定的类型不一致 |
+| `E_AUTH` | 401 | 凭据缺失或无效 |
+| `E_FORBIDDEN` | 403 | 已认证，但角色不具备该权限域 |
+| `E_NOT_FOUND` | 404 | 未知路由 |
+| `E_METHOD_NOT_ALLOWED` | 405 | 已知路由但 HTTP 方法不对 |
+| `E_DB_NOT_FOUND` | 404 | 未知数据库 |
+| `E_METRIC_NOT_FOUND` | 404 | 未知指标 |
+| `E_USER_NOT_FOUND` | 404 | 未知用户 |
+| `E_TOKEN_NOT_FOUND` | 404 | 未知令牌 ID |
+| `E_DB_LOCKED` | 409 | 数据根已被其他进程占用 |
+| `E_USER_EXISTS` | 409 | 用户名已存在 |
+| `E_BATCH_TOO_LARGE` | 413 | 批次点数或请求体字节数超过上限 |
+| `E_RATE_LIMITED` | 429 | 背压（缓冲区 / 未落盘水位）—— 至少 1 秒后重试 |
+| `E_IO` | 500 | 文件系统故障 |
+| `E_CORRUPT_BLOCK` / `E_CORRUPT_SEGMENT` | 500 | 块或段的 CRC / 结构校验失败 |
+| `E_INTERNAL` | 500 | 未归类的内部错误 |
+
+---
+
+## 2. 端点索引
+
+| 方法 | 路径 | 权限域 | 用途 |
+| ---- | ---- | ------ | ---- |
+| `GET` | `/api/v1/status` | none | 运行时指标 |
+| `GET` | `/metrics` | none | Prometheus 暴露格式 |
+| `GET` | `/healthz` | none | 存活探针 |
+| `GET` | `/api/v1/databases` | query | 列出数据库 |
+| `GET` | `/api/v1/metrics/:db` | query | 列出某库的指标 |
+| `POST` | `/api/v1/write?db=<db>` | write | 写入数据点（JSON 或行协议） |
+| `POST` | `/api/v1/query/range` | query | 时间区间内的原始点 |
+| `POST` | `/api/v1/query/last` | query | 某时刻或之前的最新点 |
+| `POST` | `/api/v1/query/count` | query | 点数（估算或精确） |
+| `POST` | `/api/v1/query/aggregate` | query | 窗口聚合 |
+| `PUT` | `/api/v1/retention/:db` | write | 设置按库保留策略 |
+| `POST` | `/api/v1/backup/:db` | write | 触发整库备份 |
+| `GET` `POST` | `/api/v1/admin/users` | admin | 列出 / 创建用户 |
+| `PUT` `DELETE` | `/api/v1/admin/users/:username` | admin | 更新 / 删除用户 |
+| `GET` `POST` | `/api/v1/admin/tokens` | admin | 列出 / 签发 API 令牌 |
+| `DELETE` | `/api/v1/admin/tokens/:tokenId` | admin | 吊销 API 令牌 |
+| `GET` | `/admin/` | none | Web 控制台（静态资源） |
+
+---
+
+## 3. 写入
+
+```
+POST /api/v1/write?db=<database>
+```
+
+`db` 必填，且必须匹配 `^[a-zA-Z][a-zA-Z0-9_]{0,62}$`。数据库在**首次写入时自动创建**。
+
+### 3.1 行协议
+
+`Content-Type: text/plain`（任何非 `application/json` 的类型均可）。
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/write?db=plant_a" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: text/plain" \
+  --data-binary $'station01.powerMeter.kwh 1024.5 1760688000000000000\nstation01.powerMeter.kwh value=1030.25\nstation01.valve.open true\nstation01.pump.state "running"'
+```
+
+语法与规则：
+
+```
+metric[,tag=value...] <value> [timestamp]
+```
+
+- **标签会被解析但随后忽略**（计入 `status.write.tagsIgnored`）。ss-rtdb 是单维度的：
+  标识只有指标名。
+- **时间戳单位为纳秒**，会被截断为毫秒。省略时取服务端接收时间。
+  只接受数字（可带符号）。
+- **值类型判定**：`true`/`false`/`t`/`f` → bool；`"…"` → string（转义 `\"` 与 `\\`）；
+  不含小数点的整数，或带 `i` 后缀的整数 → **i64**；其余 → f64。
+- 也接受行首为 `key=` 的字段集写法，实际取等号右侧的值。
+- 空行与以 `#` 开头的行会被跳过。
+- **任何一行非法都会拒绝整个批次**（`E_INVALID_POINT`，`details` 中带行号）。
+
+### 3.2 JSON 数组
+
+`Content-Type: application/json`；请求体是点的 JSON **数组**：
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/write?db=plant_a" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[
+        {"metricName":"station01.powerMeter.kwh","timestamp":1760688000000,"value":1024.5},
+        {"metricName":"station01.powerMeter.kwh","t":1760688001000,"v":1030.25},
+        {"metricName":"station01.valve.open","t":1760688000000,"v":true},
+        {"metricName":"station01.pump.state","t":1760688000000,"v":"running"},
+        {"metricName":"station01.counter.pulses","t":1760688000000,"v":"9007199254740991","vt":2}
+      ]'
+```
+
+点的字段：
+
+| 字段 | 别名 | 说明 |
+| ---- | ---- | ---- |
+| `metricName` | — | 必填，非空，≤512 字节 UTF-8 |
+| `timestamp` | `t` | 必填，整数毫秒 epoch |
+| `value` | `v` | 必填 |
+| `vt` | — | 可选类型标记：`1`=f64，`2`=i64，`3`=bool，`4`=string |
+| `quality` | `q` | 可选 u8；`0` = 正常（默认值，不存储） |
+
+**何时需要 `vt`**：JSON 数字只能表达 f64，所以要写 i64 值请使用**十进制字符串配合 `"vt": 2`**。
+不写 `vt` 时，类型由 JSON 类型推断（number → f64，boolean → bool，string → string）。
+
+### 3.3 响应
+
+```json
+{ "accepted": 5, "duplicates": 0 }
+```
+
+`(指标, 时间戳)` 已存在的点被计为 `duplicates` —— 写入是**幂等**的，
+客户端可以安全重试失败的批次。
+
+### 3.4 限制
+
+| 条件 | 结果 |
+| ---- | ---- |
+| `points.length > write.maxBatch`（默认 1 000 000） | `413 E_BATCH_TOO_LARGE` |
+| 请求体字节数 > `http.maxBodyBytes`（默认 64 MiB） | `413 E_BATCH_TOO_LARGE` |
+| 超过缓冲区 / 未落盘水位 | `429 E_RATE_LIMITED`（附 `Retry-After: 1`） |
+
+---
+
+## 4. 查询原语
+
+四个原语都是 `POST` + JSON 请求体。每个都必须带 `db` 和 `metricName`；
+数据库和指标必须已存在（否则 `404`）。
+
+### 4.1 `range`
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/range" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricName":"station01.powerMeter.kwh",
+       "start":1760688000000,"end":1760691600000,"limit":1000,"order":"asc"}'
+```
+
+```json
+{
+  "series": {
+    "metricName": "station01.powerMeter.kwh",
+    "points": [
+      { "t": 1760688000000, "v": 1024.5, "vt": 1 },
+      { "t": 1760688001000, "v": 1030.25, "vt": 1 }
+    ]
+  }
+}
+```
+
+`start` / `end` 为**闭区间**毫秒 epoch。`limit` 默认取 `query.defaultLimit`（100 000）；
+`order` 为 `asc`（默认）或 `desc`。
+
+### 4.2 `last`
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricName":"station01.powerMeter.kwh","before":1760691600000}'
+```
+
+```json
+{ "point": { "t": 1760688001000, "v": 1030.25, "vt": 1 } }
+```
+
+`before` 可选（默认取全局最新点）。这是“报表边界时刻或之前的值”这一需求所用的原语。
+
+### 4.3 `count`
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/count" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricName":"station01.powerMeter.kwh",
+       "start":1760688000000,"end":1760691600000,"exact":false}'
+```
+
+```json
+{ "count": 3600 }
+```
+
+`exact: false`（默认）累加索引中的 `pointCount` —— 快，但以块为粒度可能包含区间外的点。
+`exact: true` 会解码并精确计数。
+
+### 4.4 `aggregate`
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/aggregate" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricName":"station01.powerMeter.kwh",
+       "start":1760688000000,"end":1760691600000,"type":"avg","windowMs":60000}'
+```
+
+```json
+{
+  "windows": [
+    { "start": 1760688000000, "end": 1760688060000, "v": 1027.375, "vt": 1, "count": 60 },
+    { "start": 1760688060000, "end": 1760688120000, "v": 1044.5,   "vt": 1, "count": 60 }
+  ]
+}
+```
+
+- `type`：`avg` | `sum` | `min` | `max` | `count` | `last`。
+- 窗口为 `[start + k*windowMs, start + (k+1)*windowMs)`；最后一个窗口会补齐到窗口宽度。
+- `avg` 是**时间加权平均**（工业惯例）：取窗口内的点，加上窗口前后紧邻点的线性插值，
+  按时间积分。若需要等权平均，请在客户端自行计算 `sum / count`。
+- 无数据覆盖的窗口返回 `v` 为 `null`、`count: 0`。
+- 单次调用窗口数超过 100 000 → `400 E_INVALID_RANGE`。
+
+### 4.5 读取值
+
+| `vt` | JSON 中的 `v` |
+| ---- | ------------- |
+| `1` f64 | 数字（非有限值 → `null`） |
+| `2` i64 | **十进制字符串** |
+| `3` bool | 布尔 |
+| `4` string | 字符串 |
+
+只有在写入时带过质量位的点才会出现 `q`。
+
+---
+
+## 5. 数据库与指标
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases
+# {"databases":["plant_a","plant_b"]}
+
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/metrics/plant_a
+# {"metrics":[{"metricName":"station01.powerMeter.kwh","firstTs":1760688000000,"lastTs":1760691600000}]}
+```
+
+---
+
+## 6. 保留策略与备份
+
+```bash
+# 设置保留策略（天；0 = 永久保留）—— 需要 write 权限域
+curl -X PUT "http://127.0.0.1:6180/api/v1/retention/plant_a" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"days":90}'
+# {"ok":true}
+
+# 在服务所在主机上触发整库备份
+curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"targetDir":"/mnt/backups/2026-10-17"}'
+# {"files":42,"totalBytes":1932735283,"database":"plant_a","targetDirectory":"/mnt/backups/2026-10-17/plant_a"}
+```
+
+---
+
+## 7. 用户与 API 令牌（admin 权限域）
+
+### 7.1 用户
+
+```bash
+# 创建（201）
+curl -X POST "http://127.0.0.1:6180/api/v1/admin/users" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"username":"collector","password":"S3cret!","role":"write","enabled":true}'
+# {"user":{"username":"collector","role":"write","enabled":true,"createdAt":...,"updatedAt":...}}
+
+# 列出
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:6180/api/v1/admin/users
+
+# 更新角色 / 口令 / 启用状态
+curl -X PUT "http://127.0.0.1:6180/api/v1/admin/users/collector" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"role":"readonly","enabled":false}'
+
+# 删除
+curl -X DELETE "http://127.0.0.1:6180/api/v1/admin/users/collector" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+# {"ok":true}
+```
+
+用户名匹配 `^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$`。口令只以 scrypt 哈希保存，且永不返回。
+
+### 7.2 API 令牌
+
+```bash
+# 签发（201）—— 明文只返回这一次
+curl -X POST "http://127.0.0.1:6180/api/v1/admin/tokens" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"user":"collector","role":"write","label":"edge-gateway-1","ttlMs":2592000000}'
+# {"token":"<64 位十六进制>","tokenRecord":{"tokenId":"...","user":"collector","role":"write",
+#  "label":"edge-gateway-1","createdAt":...,"expiresAt":...,"revokedAt":null}}
+
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:6180/api/v1/admin/tokens
+curl -X DELETE "http://127.0.0.1:6180/api/v1/admin/tokens/<tokenId>" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+# {"ok":true}
+```
+
+省略 `role` 时默认取所属用户的角色（或 `write`）；省略 `ttlMs` 表示永不过期。
+
+---
+
+## 8. 可观测性端点（无需鉴权）
+
+```bash
+curl http://127.0.0.1:6180/healthz
+# {"status":"ok"}
+
+curl http://127.0.0.1:6180/api/v1/status
+
+curl http://127.0.0.1:6180/metrics      # Prometheus 文本暴露格式
+```
+
+`/api/v1/status` 的结构：
+
+```json
+{
+  "uptimeMs": 12345,
+  "databases": 2,
+  "metrics": 1204,
+  "write":  { "pointsPerSec": 51230, "buffered": 0, "duplicates": 13, "tagsIgnored": 0 },
+  "wal":    { "pendingBytes": 0, "outstandingBatches": 0, "pendingPoints": 0, "lastFsyncMs": 1760691600000 },
+  "segments": { "openFiles": 3, "bytesToday": 610000000 },
+  "cache":  { "blocks": 256, "blockHitRate": 0.93, "heapUsedMb": 180, "externalMb": 64 },
+  "gc":     { "count": 12, "totalMs": 340, "maxMs": 41 },
+  "query":  { "count": 5000, "p50Ms": 2, "p95Ms": 11, "p99Ms": 28, "maxMs": 96 }
+}
+```
+
+## 9. CORS
+
+CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台访问本实例，请设置
+`cors.allowedOrigins`（例如 `["https://rtdb-admin.example.com"]` 或 `["*"]`）。
+预检 `OPTIONS` 的响应为 `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` 与
+`Access-Control-Allow-Headers: Authorization, Content-Type`，缓存 600 秒。
+
+## 10. 下一步
+
+- [05 — 客户端 SDK](./05-client-sdks.md) —— 从 Node 或 Python 使用这些端点。

@@ -1,0 +1,34 @@
+{
+  "name": "@ss/rtdb-cli",
+  "version": "0.1.0",
+  "description": "Management CLI of ss-rtdb (rtdbctl): serve/status/backup/restore/retention/metrics/size/repair",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "rtdbctl": "./src/main.ts"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@ss/rtdb-client": "^0.1.0",
+    "@ss/rtdb-core": "^0.1.0",
+    "@ss/rtdb-server": "^0.1.0"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true })\""
+  }
+}

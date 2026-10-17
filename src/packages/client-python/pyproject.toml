@@ -1,0 +1,33 @@
+# Copyright (c) 2025 Smart Site Team
+# SPDX-License-Identifier: Apache-2.0
+# https://smartsite.top/
+# Contact: zkxxa@qq.com, zcwebms@gmail.com
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ss-rtdb-client"
+version = "0.1.0"
+description = "Python SDK of ss-rtdb (pure HTTP over the Form B protocol; standard library only, zero runtime dependencies)"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+authors = [{ name = "Smart Site Team", email = "zkxxa@qq.com" }]
+keywords = ["ss-rtdb", "time-series", "http", "sdk", "client"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://smartsite.top/"
+
+[tool.setuptools]
+packages = ["ss_rtdb_client"]

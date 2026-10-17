@@ -1,0 +1,28 @@
+{
+  "name": "ss-rtdb-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SS RTDB - 通用轻量级实时数据库（嵌入式库 + 独立 server 双形态）",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"__tests__/*.test.ts\"",
+    "test:primitives": "node --test __tests__/primitives.test.ts",
+    "test:encoder": "node --test __tests__/encoder.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @ss/rtdb-admin",
+    "build": "npm run build --workspaces --if-present",
+    "bench": "node __tests__/benchmark/run-benchmarks.ts",
+    "check:deps": "node scripts/check-runtime-dependencies.ts",
+    "bench:regression": "node scripts/check-throughput-regression.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}
