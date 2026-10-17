@@ -7,6 +7,9 @@ dist/
 rtdb-data/
 *.token
 
+# Demo 运行期数据（bin\start-demo-server.bat，配置见 packages/demo/conf）
+src/packages/demo/data/
+
 # 基准与临时产物
 coverage/
 bench-out/

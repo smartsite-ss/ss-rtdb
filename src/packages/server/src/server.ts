@@ -359,6 +359,17 @@ export class RtdbServer {
       await this.handleBackup(request, response, requireDatabaseName(safeDecode(pathname.slice(BACKUP_PREFIX.length))));
       return;
     }
+    if (pathname === '/') {
+      if (method !== 'GET' && method !== 'HEAD') throw methodNotAllowed('GET');
+      // The console lives under `/admin/`, so a bare-origin visit is redirected instead of returning
+      // the JSON 404 (`E_NOT_FOUND: Unregistered route: /`), which reads like a broken deployment.
+      // 302 (not 301) keeps the hop out of browser caches if `admin.enabled` is switched off later.
+      if (!this.config.admin.enabled) throw routeNotFound(pathname);
+      response.setHeader('Location', `${ADMIN_PATH}/`);
+      response.writeHead(302);
+      response.end();
+      return;
+    }
     if (pathname === ADMIN_PATH) {
       if (method !== 'GET' && method !== 'HEAD') throw methodNotAllowed('GET');
       // `index.html` references its assets relatively (`./assets/...`), so the document URL must end

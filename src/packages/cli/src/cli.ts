@@ -15,7 +15,7 @@
  * `@ss/rtdb-server` through `loadServerConfig`, so `serve` and the offline commands always agree on `dataDir`.
  */
 
-import { RtdbClient, isRtdbClientError } from '../../client-node/src/index.ts';
+import { RtdbClient, isRtdbClientError } from '../../demo/client-node/src/index.ts';
 import { isRtdbError } from '../../core/src/errors.ts';
 import { loadServerConfig } from '../../server/src/config.ts';
 import type { ServerConfig } from '../../server/src/config.ts';

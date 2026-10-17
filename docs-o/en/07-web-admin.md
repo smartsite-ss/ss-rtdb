@@ -32,7 +32,8 @@ Default configuration already enables it:
 
 - `staticDir: ""` → the bundled `packages/admin/dist` directory.
 - Open <http://127.0.0.1:6180/admin/> — **the trailing slash matters**; `/admin` 301-redirects to
-  `/admin/` so the relative asset URLs resolve.
+  `/admin/` so the relative asset URLs resolve. Visiting the bare origin `/` **302-redirects to
+  `/admin/`** (the root path still returns 404 when `admin.enabled=false`).
 - No extra authentication: the console runs in your browser and sends your token with each API call
   (it is the same REST API with the same scopes).
 
@@ -97,6 +98,7 @@ Status data comes from `GET /api/v1/status`; everything else mirrors the endpoin
 | ------- | ----- | --- |
 | `/admin` returns 404 | Admin bundle not built, or `admin.enabled: false` | Build the admin workspace; enable `admin` |
 | Page loads but assets 404 | Opened `/admin` without the trailing slash from a custom proxy | Use `/admin/`; keep the 301 redirect |
+| Root `/` returns `E_NOT_FOUND: Unregistered route: /` | Older server without the root redirect, or `admin.enabled=false` | Upgrade to a build with the root redirect; with the bundled console disabled, open `/admin/` and serve your own static site |
 | Console shows `E_AUTH` / `401` | Missing or wrong token in Settings | Re-enter the token; check `rtdb.token` |
 | Standalone console cannot reach the API | CORS disabled, or the origin is not allow-listed | Set `cors.allowedOrigins` and restart |
 | Access control panel returns 403 | Token role is not `admin` | Issue an `admin`-role token |
@@ -112,3 +114,4 @@ Status data comes from `GET /api/v1/status`; everything else mirrors the endpoin
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Documented the root `/` 302 redirect to `/admin/` and added an `E_NOT_FOUND: Unregistered route: /` troubleshooting row | DeepSeek-V4.1-Flash |

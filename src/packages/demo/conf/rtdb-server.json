@@ -1,0 +1,24 @@
+{
+  "port": 6180,
+  "host": "127.0.0.1",
+  "dataDir": "packages/demo/data",
+  "retentionDays": 0,
+  "auth": {
+    "enabled": true,
+    "mode": "token",
+    "tokenFile": "packages/demo/conf/rtdb.token",
+    "write": true,
+    "query": true
+  },
+  "admin": {
+    "enabled": true,
+    "staticDir": "packages/admin/dist"
+  },
+  "write": {
+    "walEnabled": true,
+    "fsyncPolicy": "wal"
+  },
+  "log": {
+    "level": "info"
+  }
+}

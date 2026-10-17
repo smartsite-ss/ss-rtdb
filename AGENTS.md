@@ -39,6 +39,8 @@
 | 生成发布包（输出到 `release\ss-rtdb-<version>\`） | `bin\build-release.bat`（可指定版本：`bin\build-release.bat 0.2.0`） |
 | 生成单文件 exe（Node SEA，输出 `release\sea\rtdb-server.exe`） | `bin\build-sea.bat` |
 | 使用 CLI / rtdbctl 包装脚本 | `node packages/cli/src/main.ts status`、`npx rtdbctl status`、`bin\rtdbctl.bat status` |
+| 运行 Smart Site 模拟客户端（写入实时数据） | `npm run demo:smart-site -- --once --verify`；Windows 包装：`bin\demo-smart-site.bat list` / `bin\demo-smart-site.bat stream 60`（见文档 10） |
+| 启动演示服务器（读取 `demo/conf` 统一配置） | `bin\start-demo-server.bat`（端口被占用时 `set RTDB_PORT=6190`） |
 | 控制台开发服务器 | `npm run dev --workspace @ss/rtdb-admin` |
 | Python SDK 测试 | `cd packages/client-python` 后 `python -m pytest tests/` |
 
@@ -65,7 +67,8 @@ ss-rtdb/
 │   │   ├── client-node/      # @ss/rtdb-client   纯 HTTP SDK，零依赖
 │   │   ├── client-python/    # ss-rtdb-client    Python SDK，仅标准库
 │   │   ├── cli/              # @ss/rtdb-cli      bin: rtdbctl，依赖 client-node/core/server
-│   │   └── admin/            # @ss/rtdb-admin    Vue 3 + Vite 控制台（private）
+│   │   ├── admin/            # @ss/rtdb-admin    Vue 3 + Vite 控制台（private）
+│   │   └── demo/             # 测试客户端 + conf/ 统一配置（client-smart-site：Smart Site 实时数据模拟）
 │   ├── __tests__/            # node:test 套件（*.test.ts）+ benchmark/
 │   └── scripts/              # check-runtime-dependencies.ts、check-throughput-regression.ts
 ├── bin/                      # 发布 / 启动批处理脚本（.bat 规则见 §4 第 10 条）
@@ -73,6 +76,8 @@ ss-rtdb/
 │   ├── build-sea.bat         #   生成单文件 release\sea\rtdb-server.exe（Node SEA）
 │   ├── start-server.bat      #   前台启动服务（仓库与发布包通用）
 │   ├── rtdbctl.bat           #   rtdbctl 包装脚本
+│   ├── demo-smart-site.bat   #   Smart Site 模拟客户端包装（list/dry/once/stream/run）
+│   ├── start-demo-server.bat #   按 packages/demo/conf/rtdb-server.json 启动演示服务器
 │   └── sea\build-sea.mjs     #   SEA 实现：esbuild bundle + --experimental-sea-config + postject
 ├── release/                  # 发布产物（build-release.bat 生成，**不入库**）
 └── docs-o/                   # en/ 原始英文文档，zh/ 中文译本（逐页对应）
@@ -240,8 +245,8 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
   首次启动会生成令牌文件 `./rtdb.token`（`0600`，所有写入/查询都需要它）。
 - `auth.enabled` 默认开启；非回环监听必须保持鉴权开启，否则启动失败（`E_AUTH`）。
 - 无需鉴权的观测端点：`GET /healthz`、`GET /api/v1/status`、`GET /metrics`（Prometheus）。
-- Web 控制台在 `/admin/`（结尾斜杠必需），需先 `npm run build --workspace @ss/rtdb-admin`，
-  否则返回 404。
+- Web 控制台在 `/admin/`（结尾斜杠必需；根路径 `/` 会 302 跳转过去），需先
+  `npm run build --workspace @ss/rtdb-admin`，否则返回 404。
 - 已忽略的本地产物：`node_modules/`、`dist/`、`tsbuildinfo`、`*.log`、`rtdb-data/`、`*.token`、
   `coverage/`、`bench-out/`、Python 缓存目录、`docs-e/`、`release/`、`bin/.sea-tools/`。
 
@@ -256,3 +261,7 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 新增 §4 第 10 条：`bin/` 下 `.bat` / `.cmd` 必须全英文内容、UTF-8 编码、CRLF 行尾、`REM` 形式的 Apache-2.0 文件头；§3 布局补 `bin/`；§4 第 5 条注释语法补 `REM` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增发布/启动脚本 `bin\build-release.bat`、`bin\start-server.bat`、`bin\rtdbctl.bat`；§2 命令表与 §3 布局同步；§10 忽略清单补 `release/`；`.gitignore` 忽略 `release/` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 SEA 单文件打包 `bin\build-sea.bat` + `bin\sea\build-sea.mjs`（esbuild bundle、`import.meta.url` 重写、`postject` 注入、控制台外置）；§2 补命令与 SEA 要点、§3 布局、§10 忽略 `bin/.sea-tools/` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §10 补充根路径 `/` 302 跳转到 `/admin/`（修复 SEA 发布后访问站点根路径返回 `E_NOT_FOUND: Unregistered route: /`） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 `packages/demo/client-smart-site` Smart Site 实时数据模拟客户端：§2 命令表、§3 布局补充；文档 10 同步 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 `bin\demo-smart-site.bat` 包装脚本（list / dry / once / stream / run）；§2 命令表与 §3 布局同步 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 `packages/demo/conf/` 统一配置（`rtdb-server.json`、`client-smart-site.json`）与 `bin\start-demo-server.bat`；客户端支持 `--config` / `--no-config` | DeepSeek-V4.1-Flash |

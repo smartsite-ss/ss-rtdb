@@ -1,0 +1,365 @@
+// Copyright (c) 2025 Smart Site Team
+// SPDX-License-Identifier: Apache-2.0
+// https://smartsite.top/
+// Contact: zkxxa@qq.com, zcwebms@gmail.com
+
+/**
+ * Deterministic Smart Site signal generator.
+ *
+ * Every tag is simulated the way a Smart Site collector would produce it: analog tags follow a slow
+ * sine wave plus a bounded random walk clamped to the engineering range, counters accumulate from a
+ * rate, booleans/strings/integer states switch with a configurable probability, and a small fraction
+ * of samples can repeat the previous value to mimic a communication fault (stale sample).
+ *
+ * The generator is pure and deterministic for a given seed + timestamp sequence, so it can be tested
+ * without a running server.
+ */
+
+import { DEMO_VALUE_TYPE, buildMetricName, selectDevices, valueTypeOf } from './catalog.ts';
+import type { DemoValueType, SmartSiteDataType, TagDefinition } from './catalog.ts';
+
+export interface SimulatorOptions {
+  /** RNG seed; the same seed always yields the same stream for the same timestamps */
+  seed?: number;
+  /** Per-tick probability that a tag enters a short communication fault (default 0) */
+  glitchProbability?: number;
+  /** Device subset; empty / undefined = every device in the catalog */
+  deviceCodes?: readonly string[];
+}
+
+/** One generated sample, shaped like a core `WritePoint` */
+export interface SimulatedPoint {
+  metricName: string;
+  timestamp: number;
+  value: number | bigint | boolean | string;
+  /**
+   * Local-only marker: the sample repeats the previous value because the tag is inside a simulated
+   * communication fault. It never reaches the wire — rtdb v0.1.0 (M0) only accepts quality 0.
+   */
+  stale?: boolean;
+}
+
+/** Flat description of a metric, used by `--list` and by verification */
+export interface MetricDescriptor {
+  metricName: string;
+  deviceCode: string;
+  deviceName: string;
+  variable: string;
+  name: string;
+  unit?: string;
+  dataType: SmartSiteDataType;
+  type: DemoValueType;
+  min?: number;
+  max?: number;
+}
+
+interface MetricState {
+  /** Bounded random-walk offset of an analog signal */
+  drift: number;
+  /** Fractional carrier of a counter value */
+  counterValue: number;
+  boolValue: boolean;
+  intStateIndex: number;
+  stringIndex: number;
+  glitchTicksLeft: number;
+  lastTimestamp: number | null;
+  lastValue: number | bigint | boolean | string | null;
+}
+
+interface MetricEntry {
+  deviceCode: string;
+  deviceName: string;
+  tag: TagDefinition;
+  metricName: string;
+  type: DemoValueType;
+  phase: number;
+  random: () => number;
+  state: MetricState;
+}
+
+const DEFAULT_SEED = 20261017;
+const DEFAULT_GLITCH_PROBABILITY = 0;
+const STRING_CHANGE_PROBABILITY = 0.02;
+const INT_STATE_CHANGE_PROBABILITY = 0.01;
+const DRIFT_DECAY = 0.9;
+const DRIFT_NOISE_RATIO = 0.0025;
+
+/** FNV-1a 32-bit hash, used to derive independent per-metric RNG streams and wave phases */
+function hashString(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/** Small, fast, seedable PRNG (mulberry32) */
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
+
+function roundTo(value: number, decimals: number): number {
+  if (!Number.isFinite(value)) return 0;
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+function initialStateIndex(states: readonly number[] | undefined): number {
+  if (states === undefined || states.length === 0) return 0;
+  const running = states.indexOf(1);
+  return running >= 0 ? running : 0;
+}
+
+function descriptorOf(entry: MetricEntry): MetricDescriptor {
+  const descriptor: MetricDescriptor = {
+    metricName: entry.metricName,
+    deviceCode: entry.deviceCode,
+    deviceName: entry.deviceName,
+    variable: entry.tag.variable,
+    name: entry.tag.name,
+    dataType: entry.tag.dataType,
+    type: entry.type,
+  };
+  if (entry.tag.unit !== undefined) descriptor.unit = entry.tag.unit;
+  if (entry.tag.min !== undefined) descriptor.min = entry.tag.min;
+  if (entry.tag.max !== undefined) descriptor.max = entry.tag.max;
+  return descriptor;
+}
+
+/** Reject catalog entries the generator cannot simulate, with the metric name in the message */
+function validateTag(tag: TagDefinition, metricName: string): void {
+  const type = valueTypeOf(tag);
+  if (tag.min !== undefined && tag.max !== undefined && tag.min > tag.max) {
+    throw new Error(`Catalog error: ${metricName} has min (${tag.min}) greater than max (${tag.max})`);
+  }
+  if (type === DEMO_VALUE_TYPE.String) {
+    if (tag.sequence === undefined || tag.sequence.length === 0) {
+      throw new Error(`Catalog error: ${metricName} is a string tag without a "sequence"`);
+    }
+    return;
+  }
+  if (type === DEMO_VALUE_TYPE.Bool) return;
+  if (tag.counter !== undefined) {
+    const spec = tag.counter;
+    if (spec.perSecond === undefined && spec.rateFrom === undefined) {
+      throw new Error(`Catalog error: ${metricName} counter needs "perSecond" or "rateFrom"`);
+    }
+    return;
+  }
+  if (tag.signal !== undefined) {
+    if (tag.signal.periodMs <= 0) {
+      throw new Error(`Catalog error: ${metricName} signal period must be positive`);
+    }
+    return;
+  }
+  if (type === DEMO_VALUE_TYPE.Int64 && tag.states !== undefined && tag.states.length > 0) return;
+  throw new Error(`Catalog error: ${metricName} has no signal, counter or states definition`);
+}
+
+/**
+ * Stateful Smart Site simulator. Call `tick(timestamp)` once per sampling instant to obtain one
+ * sample per catalog tag.
+ */
+export class SmartSiteSimulator {
+  private readonly entries: readonly MetricEntry[];
+  private readonly glitchProbability: number;
+
+  constructor(options: SimulatorOptions = {}) {
+    const seed = options.seed ?? DEFAULT_SEED;
+    this.glitchProbability = clampProbability(options.glitchProbability ?? DEFAULT_GLITCH_PROBABILITY);
+    const devices = selectDevices(options.deviceCodes);
+    const known = new Set(devices.map((device) => device.deviceCode));
+    for (const deviceCode of options.deviceCodes ?? []) {
+      if (!known.has(deviceCode)) {
+        throw new Error(`Unknown device code "${deviceCode}" (run with --list to see the catalog)`);
+      }
+    }
+
+    const entries: MetricEntry[] = [];
+    for (const device of devices) {
+      for (const tag of device.tags) {
+        const metricName = buildMetricName(device.deviceCode, tag.variable);
+        validateTag(tag, metricName);
+        const type = valueTypeOf(tag);
+        entries.push({
+          deviceCode: device.deviceCode,
+          deviceName: device.deviceName,
+          tag,
+          metricName,
+          type,
+          phase: (hashString(metricName) % 6283) / 1000,
+          random: mulberry32(hashString(`${seed}:${metricName}`)),
+          state: {
+            drift: 0,
+            counterValue: tag.counter?.initial ?? 0,
+            boolValue: tag.initial ?? true,
+            intStateIndex: initialStateIndex(tag.states),
+            stringIndex: 0,
+            glitchTicksLeft: 0,
+            lastTimestamp: null,
+            lastValue: null,
+          },
+        });
+      }
+    }
+    this.entries = entries;
+  }
+
+  /** Number of simulated devices */
+  get deviceCount(): number {
+    return new Set(this.entries.map((entry) => entry.deviceCode)).size;
+  }
+
+  /** Number of simulated metrics (= tags) */
+  get metricCount(): number {
+    return this.entries.length;
+  }
+
+  /** Every metric name in catalog order */
+  get metricNames(): readonly string[] {
+    return this.entries.map((entry) => entry.metricName);
+  }
+
+  /** Flat catalog view (`--list`) */
+  describe(): readonly MetricDescriptor[] {
+    return this.entries.map(descriptorOf);
+  }
+
+  /** One representative metric per value type, used by `--verify` */
+  representatives(): readonly MetricDescriptor[] {
+    const seen = new Set<DemoValueType>();
+    const result: MetricDescriptor[] = [];
+    for (const entry of this.entries) {
+      if (seen.has(entry.type)) continue;
+      seen.add(entry.type);
+      result.push(descriptorOf(entry));
+    }
+    return result;
+  }
+
+  /** Generate one sample per metric for `timestamp` (ms epoch) */
+  tick(timestamp: number): SimulatedPoint[] {
+    if (!Number.isInteger(timestamp)) {
+      throw new Error(`tick() needs an integer millisecond timestamp, received ${String(timestamp)}`);
+    }
+    const points: SimulatedPoint[] = [];
+    const currentTick = new Map<string, number | bigint | boolean | string>();
+    for (const entry of this.entries) {
+      const point = this.nextPoint(entry, timestamp, currentTick);
+      currentTick.set(`${entry.deviceCode}.${entry.tag.variable}`, point.value);
+      points.push(point);
+    }
+    return points;
+  }
+
+  private nextPoint(
+    entry: MetricEntry,
+    timestamp: number,
+    currentTick: ReadonlyMap<string, number | bigint | boolean | string>,
+  ): SimulatedPoint {
+    const state = entry.state;
+    const seconds = state.lastTimestamp === null ? 0 : Math.max(0, (timestamp - state.lastTimestamp) / 1000);
+    state.lastTimestamp = timestamp;
+
+    let faulty = false;
+    if (state.glitchTicksLeft > 0) {
+      state.glitchTicksLeft -= 1;
+      faulty = true;
+    } else if (this.glitchProbability > 0 && entry.random() < this.glitchProbability) {
+      state.glitchTicksLeft = 2 + Math.floor(entry.random() * 3);
+      faulty = true;
+    }
+
+    // A fault repeats the previous value (stale sample) instead of advancing the signal. The quality
+    // flag stays at 0 because rtdb v0.1.0 (M0) rejects any non-zero quality with E_INVALID_POINT.
+    if (faulty && state.lastValue !== null) {
+      return { metricName: entry.metricName, timestamp, value: state.lastValue, stale: true };
+    }
+
+    const value = this.computeValue(entry, timestamp, seconds, currentTick);
+    state.lastValue = value;
+    return { metricName: entry.metricName, timestamp, value };
+  }
+
+  private computeValue(
+    entry: MetricEntry,
+    timestamp: number,
+    seconds: number,
+    currentTick: ReadonlyMap<string, number | bigint | boolean | string>,
+  ): number | bigint | boolean | string {
+    const tag = entry.tag;
+    const state = entry.state;
+
+    if (entry.type === DEMO_VALUE_TYPE.Bool) {
+      const probability = tag.toggleProbability ?? 0;
+      if (probability > 0 && entry.random() < probability) state.boolValue = !state.boolValue;
+      return state.boolValue;
+    }
+
+    if (entry.type === DEMO_VALUE_TYPE.String) {
+      const sequence = tag.sequence ?? [];
+      const probability = tag.changeProbability ?? STRING_CHANGE_PROBABILITY;
+      if (sequence.length > 1 && entry.random() < probability) {
+        state.stringIndex = Math.floor(entry.random() * sequence.length);
+      }
+      state.stringIndex %= sequence.length;
+      return sequence[state.stringIndex] ?? '';
+    }
+
+    if (entry.type === DEMO_VALUE_TYPE.Int64 && tag.states !== undefined && tag.states.length > 0) {
+      const states = tag.states;
+      const probability = tag.changeProbability ?? INT_STATE_CHANGE_PROBABILITY;
+      if (states.length > 1 && entry.random() < probability) {
+        const offset = 1 + Math.floor(entry.random() * (states.length - 1));
+        state.intStateIndex = (state.intStateIndex + offset) % states.length;
+      }
+      return BigInt(states[state.intStateIndex] ?? 0);
+    }
+
+    if (tag.counter !== undefined) {
+      const spec = tag.counter;
+      let increment = 0;
+      if (spec.perSecond !== undefined) {
+        increment = spec.perSecond * seconds;
+      } else if (spec.rateFrom !== undefined) {
+        const rawRate = currentTick.get(`${entry.deviceCode}.${spec.rateFrom}`);
+        const rate = typeof rawRate === 'number' ? rawRate : 0;
+        increment = rate * seconds * (spec.factor ?? 1);
+      }
+      state.counterValue += increment;
+      if (entry.type === DEMO_VALUE_TYPE.Int64) return BigInt(Math.trunc(state.counterValue));
+      return roundTo(state.counterValue, tag.decimals ?? 2);
+    }
+
+    const signal = tag.signal ?? { base: tag.min ?? 0, amplitude: 0, periodMs: 600_000 };
+    const min = tag.min ?? signal.base - signal.amplitude;
+    const max = tag.max ?? signal.base + signal.amplitude;
+    const noise = (max - min) * DRIFT_NOISE_RATIO;
+    state.drift = state.drift * DRIFT_DECAY + (entry.random() * 2 - 1) * noise;
+    const wave = Math.sin((2 * Math.PI * timestamp) / signal.periodMs + entry.phase) * signal.amplitude;
+    const raw = clamp(signal.base + wave + state.drift, min, max);
+    if (entry.type === DEMO_VALUE_TYPE.Int64) return BigInt(Math.round(raw));
+    return roundTo(raw, tag.decimals ?? 1);
+  }
+}
+
+function clampProbability(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}

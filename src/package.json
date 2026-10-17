@@ -15,8 +15,9 @@
     "test": "node --test \"__tests__/*.test.ts\"",
     "test:primitives": "node --test __tests__/primitives.test.ts",
     "test:encoder": "node --test __tests__/encoder.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @ss/rtdb-admin",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p packages/demo/client-smart-site/tsconfig.json --noEmit && npm run typecheck --workspace @ss/rtdb-admin",
     "build": "npm run build --workspaces --if-present",
+    "demo:smart-site": "node packages/demo/client-smart-site/src/main.ts",
     "bench": "node __tests__/benchmark/run-benchmarks.ts",
     "check:deps": "node scripts/check-runtime-dependencies.ts",
     "bench:regression": "node scripts/check-throughput-regression.ts"

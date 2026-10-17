@@ -1,0 +1,16 @@
+{
+  "name": "@ss/rtdb-demo-client-smart-site",
+  "version": "0.1.0",
+  "description": "Smart Site shaped real-time data generator used to exercise rtdb-server",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {},
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

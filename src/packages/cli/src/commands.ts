@@ -26,8 +26,8 @@
 
 import { join } from 'node:path';
 
-import { RtdbClient } from '../../client-node/src/index.ts';
-import type { StatusReport, UserInfo } from '../../client-node/src/index.ts';
+import { RtdbClient } from '../../demo/client-node/src/index.ts';
+import type { StatusReport, UserInfo } from '../../demo/client-node/src/index.ts';
 import { Logger } from '../../server/src/logger.ts';
 import { RtdbServer } from '../../server/src/server.ts';
 import type { ServerConfig } from '../../server/src/config.ts';

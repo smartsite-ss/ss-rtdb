@@ -87,6 +87,7 @@
 | `GET` `POST` | `/api/v1/admin/tokens` | admin | 列出 / 签发 API 令牌 |
 | `DELETE` | `/api/v1/admin/tokens/:tokenId` | admin | 吊销 API 令牌 |
 | `GET` | `/admin/` | none | Web 控制台（静态资源） |
+| `GET` | `/` | none | 302 跳转到 `/admin/`；`admin.enabled=false` 时仍为 404 |
 
 ---
 
@@ -151,6 +152,9 @@ curl -X POST "http://127.0.0.1:6180/api/v1/write?db=plant_a" \
 | `value` | `v` | 必填 |
 | `vt` | — | 可选类型标记：`1`=f64，`2`=i64，`3`=bool，`4`=string |
 | `quality` | `q` | 可选 u8；`0` = 正常（默认值，不存储） |
+
+> v0.1.0（M0）只接受 `quality` 为 `0`（等同省略）：任何非 0 质量位都会返回
+> `400 E_INVALID_POINT`（避免静默丢失），等质量位枚举确定后再开放。
 
 **何时需要 `vt`**：JSON 数字只能表达 f64，所以要写 i64 值请使用**十进制字符串配合 `"vt": 2`**。
 不写 `vt` 时，类型由 JSON 类型推断（number → f64，boolean → bool，string → string）。
@@ -393,3 +397,5 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 端点索引补充根路径 `GET /` → 302 `/admin/`（`admin.enabled=false` 时仍为 404） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 写入字段说明明确 v0.1.0 仅接受 `quality = 0`，非 0 返回 `400 E_INVALID_POINT` | DeepSeek-V4.1-Flash |

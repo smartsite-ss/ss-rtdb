@@ -19,8 +19,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { CLIENT_ERROR_CODE, RtdbClient, RtdbClientError } from '../packages/client-node/src/index.ts';
-import type { ClientWritePoint } from '../packages/client-node/src/index.ts';
+import { CLIENT_ERROR_CODE, RtdbClient, RtdbClientError } from '../packages/demo/client-node/src/index.ts';
+import type { ClientWritePoint } from '../packages/demo/client-node/src/index.ts';
 import { loadServerConfig } from '../packages/server/src/config.ts';
 import { Logger } from '../packages/server/src/logger.ts';
 import { RtdbServer } from '../packages/server/src/server.ts';

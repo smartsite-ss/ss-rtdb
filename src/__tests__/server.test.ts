@@ -1156,6 +1156,41 @@ describe('server: /admin 静态托管', () => {
     }
   });
 
+  it('根路径 302 跳转到 /admin/；admin 关闭时保持 404', async () => {
+    const adminDirectory = nextDataDir();
+    mkdirSync(adminDirectory, { recursive: true });
+    writeFileSync(join(adminDirectory, 'index.html'), '<!doctype html><title>rtdb-admin</title>', 'utf8');
+
+    const enabled = await startTestServer({ admin: { enabled: true, staticDir: adminDirectory } });
+    try {
+      const root = await fetch(`${enabled.baseUrl}/`, { redirect: 'manual' });
+      assert.equal(root.status, 302);
+      assert.equal(root.headers.get('location'), '/admin/');
+      await root.text();
+
+      // 跟随跳转后应直接落在控制台首页
+      const followed = await fetch(`${enabled.baseUrl}/`);
+      assert.equal(followed.status, 200);
+      assert.match(await followed.text(), /rtdb-admin/);
+
+      const post = await fetch(`${enabled.baseUrl}/`, { method: 'POST' });
+      assert.equal(post.status, 405);
+      assert.equal(post.headers.get('allow'), 'GET');
+      await post.text();
+    } finally {
+      await enabled.server.stop();
+    }
+
+    const disabled = await startTestServer({ admin: { enabled: false } });
+    try {
+      const root = await fetch(`${disabled.baseUrl}/`, { redirect: 'manual' });
+      assert.equal(root.status, 404);
+      assert.equal((await readErrorBody(root)).error, SERVER_ERROR_CODE.RouteNotFound);
+    } finally {
+      await disabled.server.stop();
+    }
+  });
+
   it('admin.enabled=false 时 /admin/* 返回 404', async () => {
     const { server, baseUrl } = await startTestServer({ admin: { enabled: false } });
     try {

@@ -20,7 +20,7 @@ import { after, describe, it } from 'node:test';
 
 import { CLI_VERSION, USAGE_TEXT, runCli } from '../packages/cli/src/index.ts';
 import type { CliIo } from '../packages/cli/src/index.ts';
-import { RtdbClient } from '../packages/client-node/src/index.ts';
+import { RtdbClient } from '../packages/demo/client-node/src/index.ts';
 import { RtdbEngine } from '../packages/core/src/engine.ts';
 import { dateNumberFromTimestamp, formatDateFolderName } from '../packages/core/src/format.ts';
 import { loadServerConfig } from '../packages/server/src/config.ts';

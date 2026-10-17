@@ -44,6 +44,7 @@
 | 07 | [Web 管理控制台](./docs-o/zh/07-web-admin.md) | [Web admin console](./docs-o/en/07-web-admin.md) |
 | 08 | [运维与维护](./docs-o/zh/08-operations.md) | [Operations & maintenance](./docs-o/en/08-operations.md) |
 | 09 | [开发者指南](./docs-o/zh/09-developer-guide.md) | [Developer guide](./docs-o/en/09-developer-guide.md) |
+| 10 | [Smart Site 数据模拟客户端](./docs-o/zh/10-smart-site-demo.md) | [Smart Site demo client](./docs-o/en/10-smart-site-demo.md) |
 
 新用户建议按 **01 → 03 → 04** 阅读；运维人员建议按 **02 → 08** 阅读。
 
@@ -128,3 +129,4 @@ Apache License 2.0 —— 每个源文件都带有标准 Apache-2.0 文件头；
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 由两行占位改写为项目门面：简介与形态对照、能力概览、中英对照文档索引、快速上手、仓库结构、许可与联系 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 文档索引新增 10 — Smart Site 数据模拟客户端（中英对照） | DeepSeek-V4.1-Flash |

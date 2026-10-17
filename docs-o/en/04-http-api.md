@@ -88,6 +88,7 @@ Every non-2xx response is JSON:
 | `GET` `POST` | `/api/v1/admin/tokens` | admin | List / issue API tokens |
 | `DELETE` | `/api/v1/admin/tokens/:tokenId` | admin | Revoke an API token |
 | `GET` | `/admin/` | none | Web console (static) |
+| `GET` | `/` | none | 302 redirect to `/admin/`; still 404 when `admin.enabled=false` |
 
 ---
 
@@ -153,6 +154,9 @@ Point fields:
 | `value` | `v` | required |
 | `vt` | — | optional type marker: `1`=f64, `2`=i64, `3`=bool, `4`=string |
 | `quality` | `q` | optional u8; `0` = good (default, not stored) |
+
+> v0.1.0 (M0) only accepts `quality` `0` (equivalent to omitting it): any non-zero quality flag
+> returns `400 E_INVALID_POINT` (to avoid silent loss) until the flag enumeration is finalized.
 
 **When you need `vt`**: JSON numbers can only express f64, so write i64 values as a **decimal string
 with `"vt": 2`**. Without `vt`, the type is inferred from the JSON type (number → f64, boolean → bool,
@@ -400,3 +404,5 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Endpoint index: documented `GET /` → 302 to `/admin/` (still 404 when `admin.enabled=false`) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Write fields: clarified that v0.1.0 only accepts `quality = 0`; non-zero returns `400 E_INVALID_POINT` | DeepSeek-V4.1-Flash |

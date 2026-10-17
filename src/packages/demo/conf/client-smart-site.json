@@ -1,0 +1,11 @@
+{
+  "url": "http://127.0.0.1:6180",
+  "database": "smartfactory_demo",
+  "tokenFile": "packages/demo/conf/rtdb.token",
+  "intervalMs": 1000,
+  "seed": 20261017,
+  "devices": [],
+  "glitchProbability": 0,
+  "logEvery": 5,
+  "timeoutMs": 10000
+}

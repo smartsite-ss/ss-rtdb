@@ -31,7 +31,8 @@ npm run build --workspace @ss/rtdb-admin
 
 - `staticDir: ""` → 使用内置的 `packages/admin/dist` 目录。
 - 打开 <http://127.0.0.1:6180/admin/> —— **结尾的斜杠很重要**；`/admin` 会 301 跳转到 `/admin/`，
-  这样相对路径的静态资源才能正确解析。
+  这样相对路径的静态资源才能正确解析。直接访问站点根路径 `/` 会 **302 跳转到 `/admin/`**
+  （`admin.enabled=false` 时根路径仍返回 404）。
 - 没有额外鉴权：控制台运行在你的浏览器中，每次 API 调用都会带上你的令牌
   （它就是同一套 REST API，权限域也完全一致）。
 
@@ -93,6 +94,7 @@ npm run build --workspace @ss/rtdb-admin
 | ---- | ---- | ---- |
 | `/admin` 返回 404 | 未构建 admin 产物，或 `admin.enabled: false` | 构建 admin 工作区；启用 `admin` |
 | 页面能打开但静态资源 404 | 通过自定义代理访问时用了不带斜杠的 `/admin` | 使用 `/admin/`；保留 301 跳转 |
+| 访问根路径 `/` 返回 `E_NOT_FOUND: Unregistered route: /` | 旧版本服务端没有根路径跳转，或 `admin.enabled=false` | 升级到带根路径跳转的版本；关闭内建控制台时访问 `/admin/` 并自行提供静态站点 |
 | 控制台显示 `E_AUTH` / `401` | 设置中的令牌缺失或错误 | 重新填入令牌；检查 `rtdb.token` |
 | 独立部署的控制台连不上 API | CORS 未开启，或来源未加入白名单 | 设置 `cors.allowedOrigins` 并重启 |
 | 访问控制面板返回 403 | 令牌角色不是 `admin` | 签发 `admin` 角色的令牌 |
@@ -108,3 +110,4 @@ npm run build --workspace @ss/rtdb-admin
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 补充根路径 `/` 302 跳转到 `/admin/` 的行为，并新增 `E_NOT_FOUND: Unregistered route: /` 排障条目 | DeepSeek-V4.1-Flash |
