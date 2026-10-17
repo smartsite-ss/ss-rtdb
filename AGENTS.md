@@ -56,6 +56,7 @@ ss-rtdb/
 │   │   └── admin/            # @ss/rtdb-admin    Vue 3 + Vite 控制台（private）
 │   ├── __tests__/            # node:test 套件（*.test.ts）+ benchmark/
 │   └── scripts/              # check-runtime-dependencies.ts、check-throughput-regression.ts
+├── bin/                      # 启动 / 运维批处理脚本（.bat 规则见 §4 第 10 条）
 └── docs-o/                   # en/ 原始英文文档，zh/ 中文译本（逐页对应）
 ```
 
@@ -92,7 +93,7 @@ cli ────┼──> server ──> core
    ```
 
    - 语言差异：Python / TOML / YAML 用 `#`；HTML 与 Vue 的 `<template>` 顶部用
-     `<!-- … -->`；CSS 用 `/* … */`。
+     `<!-- … -->`；CSS 用 `/* … */`；Windows 批处理（`.bat` / `.cmd`）用 `REM`。
    - `package.json` 等 JSON 文件不能写注释，但必须在 `license` 字段声明 `Apache-2.0`。
    - 修改既有文件时不得删除或改动该文件头；新增文件必须补上。
    - 提交前自检（应无输出）：
@@ -110,6 +111,30 @@ cli ────┼──> server ──> core
    `restore` / `archive`、以及不带 `days` 的 `retention` 属于离线命令，必须在服务停止后执行，
    否则返回 `E_DB_LOCKED`。
 9. **Python SDK 仅使用标准库**（`urllib`、`json`…），不得引入 `requests` / `numpy`。
+10. **`bin/` 下的批处理脚本（`.bat` / `.cmd`）必须内容全英文 + UTF-8 编码（强制）**：
+    - 注释、`echo`、错误提示、变量名等一律使用英文，**不得出现中文**（cmd 代码页差异会导致
+      输出与解析乱码）。
+    - 文件编码必须为 **UTF-8**（推荐 `UTF-8 with BOM`）；**禁止** GBK / ANSI、
+      UTF-16 / UTF-16LE / UTF-16BE。
+    - 行尾必须为 **CRLF**（不得写为 LF）。
+    - 文件头同样使用 Apache-2.0 注释，关键字为 `REM`：
+
+      ```bat
+      REM Copyright (c) 2025 Smart Site Team
+      REM SPDX-License-Identifier: Apache-2.0
+      REM https://smartsite.top/
+      REM Contact: zkxxa@qq.com, zcwebms@gmail.com
+      ```
+
+    - 提交前自检（`nonASCII` 必须为 0；`BOM` 应为 True 或 False 但编码必须是 UTF-8）：
+
+      ```powershell
+      Get-ChildItem bin/*.bat | ForEach-Object {
+        $b = [IO.File]::ReadAllBytes($_.FullName)
+        $bom = ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+        "{0}: BOM={1} nonASCII={2}" -f $_.Name, $bom, ($b | Where-Object { $_ -gt 0x7F }).Count
+      }
+      ```
 
 ## 5. 代码约定
 
@@ -210,3 +235,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建本文件（面向 AI 编码代理的仓库指南）；同日补充 §7「中文文档更新日志」规则 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §4 强化「所有代码文件必须带 Apache-2.0 文件头」；§7 修订记录规则扩展至中英全部文档；补齐 `src/packages/admin/index.html` 文件头 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 §4 第 10 条：`bin/` 下 `.bat` / `.cmd` 必须全英文内容、UTF-8 编码、CRLF 行尾、`REM` 形式的 Apache-2.0 文件头；§3 布局补 `bin/`；§4 第 5 条注释语法补 `REM` | DeepSeek-V4.1-Flash |
