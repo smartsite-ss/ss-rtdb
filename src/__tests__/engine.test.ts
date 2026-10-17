@@ -211,6 +211,19 @@ describe('引擎: status 指标补全', () => {
       assert.ok(afterWrite.segments.bytesToday > 0, '今日日目录（WAL 文件）占用应被统计');
       assert.ok(afterWrite.write.pointsPerSec >= 0, '会话均值速率非负');
 
+      // 回归：批次台账里的 cumulative 是「进程内累计」而非「本批点数」，最老未完成批次若直接用
+      // 绝对累计计算，会把已落段的历史点数算进 wal.pendingPoints（曾出现 buffered=8 万而
+      // pendingPoints=549 万）。未落段点数恒等于缓冲区点数。
+      const bulkValues = Array.from({ length: 20_000 }, (_unused, index) => index * 0.5);
+      await engine.writeBatch('db', pointsFrom('m.bulk', bulkValues, now - 120_000));
+      const afterBulk = await engine.stats();
+      assert.equal(
+        afterBulk.wal.pendingPoints,
+        afterBulk.write.bufferedPoints,
+        'wal.pendingPoints 必须等于尚未落段的缓冲点数，而不是历史累计',
+      );
+      assert.ok(afterBulk.wal.pendingPoints < 20_000, '已落段部分不得计入 wal.pendingPoints');
+
       await engine.queryRange('db', 'm.today', { start: now - 2000, end: now });
       await engine.queryRange('db', 'm.today', { start: now - 2000, end: now });
       const afterQuery = await engine.stats();

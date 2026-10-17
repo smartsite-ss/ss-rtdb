@@ -22,6 +22,12 @@ export interface DemoClientConfig {
   database?: string;
   tokenFile?: string;
   intervalMs?: number;
+  /** Points written per tick (0 = one sample per metric) */
+  pointsPerTick?: number;
+  /** Target points per second (0 = disabled) */
+  rate?: number;
+  /** Stop after this many points (0 = unlimited) */
+  totalPoints?: number;
   seed?: number;
   devices?: string[];
   glitchProbability?: number;
@@ -35,6 +41,9 @@ export interface DemoClientConfigTarget {
   database: string;
   tokenFile: string;
   intervalMs: number;
+  pointsPerTick: number;
+  rate: number;
+  totalPoints: number;
   seed: number;
   devices: string[];
   glitchProbability: number;
@@ -52,6 +61,9 @@ const KNOWN_KEYS = new Set<string>([
   'database',
   'tokenFile',
   'intervalMs',
+  'pointsPerTick',
+  'rate',
+  'totalPoints',
   'seed',
   'devices',
   'glitchProbability',
@@ -104,6 +116,15 @@ export function readDemoClientConfig(filePath: string): DemoClientConfig {
   if (source.intervalMs !== undefined) {
     config.intervalMs = requireInteger(filePath, 'intervalMs', source.intervalMs, 100);
   }
+  if (source.pointsPerTick !== undefined) {
+    config.pointsPerTick = requireInteger(filePath, 'pointsPerTick', source.pointsPerTick, 0);
+  }
+  if (source.rate !== undefined) {
+    config.rate = requireNumber(filePath, 'rate', source.rate, 0);
+  }
+  if (source.totalPoints !== undefined) {
+    config.totalPoints = requireInteger(filePath, 'totalPoints', source.totalPoints, 0);
+  }
   if (source.seed !== undefined) {
     config.seed = requireInteger(filePath, 'seed', source.seed, 0);
   }
@@ -139,6 +160,9 @@ export function applyDemoClientConfig(target: DemoClientConfigTarget, config: De
   if (config.database !== undefined) target.database = config.database;
   if (config.tokenFile !== undefined) target.tokenFile = config.tokenFile;
   if (config.intervalMs !== undefined) target.intervalMs = config.intervalMs;
+  if (config.pointsPerTick !== undefined) target.pointsPerTick = config.pointsPerTick;
+  if (config.rate !== undefined) target.rate = config.rate;
+  if (config.totalPoints !== undefined) target.totalPoints = config.totalPoints;
   if (config.seed !== undefined) target.seed = config.seed;
   if (config.devices !== undefined) target.devices = [...config.devices];
   if (config.glitchProbability !== undefined) target.glitchProbability = config.glitchProbability;
@@ -156,6 +180,13 @@ function requireString(filePath: string, key: string, value: unknown): string {
 function requireInteger(filePath: string, key: string, value: unknown, min: number): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < min) {
     throw invalid(filePath, `"${key}" must be an integer >= ${min}`);
+  }
+  return value;
+}
+
+function requireNumber(filePath: string, key: string, value: unknown, min: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min) {
+    throw invalid(filePath, `"${key}" must be a number >= ${min}`);
   }
   return value;
 }

@@ -41,6 +41,7 @@
 | 使用 CLI / rtdbctl 包装脚本 | `node packages/cli/src/main.ts status`、`npx rtdbctl status`、`bin\rtdbctl.bat status` |
 | 运行 Smart Site 模拟客户端（写入实时数据） | `npm run demo:smart-site -- --once --verify`；Windows 包装：`bin\demo-smart-site.bat list` / `bin\demo-smart-site.bat stream 60`（见文档 10） |
 | 启动演示服务器（读取 `demo/conf` 统一配置） | `bin\start-demo-server.bat`（端口被占用时 `set RTDB_PORT=6190`） |
+| 压测演示服务（服务端需已启动，脚本不拉服务） | `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]` |
 | 控制台开发服务器 | `npm run dev --workspace @ss/rtdb-admin` |
 | Python SDK 测试 | `cd packages/demo/client-python` 后 `python -m pytest tests/` |
 
@@ -82,7 +83,7 @@ ss-rtdb/
 │   ├── start-server.bat      #   前台启动服务（仓库与发布包通用）
 │   ├── rtdbctl.bat           #   rtdbctl 包装脚本
 │   ├── demo-smart-site.bat   #   Smart Site 模拟客户端包装（list/dry/once/stream/run）
-│   ├── start-demo-server.bat #   按 packages/demo/conf/rtdb-server.json 启动演示服务器
+│   ├── start-demo-server.bat #   启动演示服务器；bench 子命令再起压测客户端
 │   └── sea\build-sea.mjs     #   SEA 实现：esbuild bundle + --experimental-sea-config + postject
 ├── release/                  # 发布产物（build-release.bat 生成，**不入库**）
 └── docs-o/                   # en/ 原始英文文档，zh/ 中文译本（逐页对应）
@@ -142,8 +143,9 @@ cli ────┼──> server ──> core
 10. **`bin/` 下的批处理脚本（`.bat` / `.cmd`）必须内容全英文 + UTF-8 编码（强制）**：
     - 注释、`echo`、错误提示、变量名等一律使用英文，**不得出现中文**（cmd 代码页差异会导致
       输出与解析乱码）。
-    - 文件编码必须为 **UTF-8**（推荐 `UTF-8 with BOM`）；**禁止** GBK / ANSI、
-      UTF-16 / UTF-16LE / UTF-16BE。
+    - 文件编码必须为 **UTF-8 且不带 BOM**（`cmd.exe` 不识别 BOM：带 BOM 时首行会变成
+      `锘緻echo` 并报「不是内部或外部命令」，`@echo off` 失效、整份脚本逐行回显）；
+      **禁止** GBK / ANSI、UTF-16 / UTF-16LE / UTF-16BE。
     - 行尾必须为 **CRLF**（不得写为 LF）。
     - 文件头同样使用 Apache-2.0 注释，关键字为 `REM`：
 
@@ -154,7 +156,7 @@ cli ────┼──> server ──> core
       REM Contact: zkxxa@qq.com, zcwebms@gmail.com
       ```
 
-    - 提交前自检（`nonASCII` 必须为 0；`BOM` 应为 True 或 False 但编码必须是 UTF-8）：
+    - 提交前自检（`nonASCII` 必须为 0 且 `BOM=False`；含 BOM 时 `nonASCII` 会是 3，正好被这条挡下）：
 
       ```powershell
       Get-ChildItem bin/*.bat | ForEach-Object {
@@ -305,3 +307,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | `workspaces` 增加 `packages/demo/*`，`check:deps` 支持嵌套工作区；§2 Python SDK 路径、§3 布局、§4 文件头自检路径同步到 `packages/demo/client-*` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增运行期配置目录 `conf/`（`rtdb-server.json` 默认配置，工作目录存在时自动加载）；§3 布局与 §10 运行时注意事项同步 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §2 SEA 要点补充：重建 exe 前必须停止运行中的实例，`bin/sea/build-sea.mjs` 对 `EBUSY` 覆盖失败给出明确提示 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 演示客户端新增性能模式（`--points-per-tick` / `--rate` / `--total-points`）与 `bin\start-demo-server.bat bench`（**仅跑压测客户端，不启动服务端**，服务端由人工在外部启动）；§2 命令表与 §3 布局同步。同轮修正 §4 第 10 条：`.bat` 必须 **UTF-8 无 BOM**（cmd.exe 不识别 BOM，会导致 `@echo off` 失效） | DeepSeek-V4.1-Flash |

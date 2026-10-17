@@ -678,19 +678,6 @@ export class RtdbEngine {
     return result;
   }
 
-  /** Points held in this database's outstanding (accepted but not yet flushed into segments) batches */
-  private pendingWalPointsOf(context: DatabaseContext): number {
-    let total = 0;
-    const previousByMetric = new Map<string, number>();
-    for (const batch of context.outstandingBatches) {
-      for (const [metricName, cumulativeCount] of batch.cumulativeByMetric) {
-        total += cumulativeCount - (previousByMetric.get(metricName) ?? 0);
-        previousByMetric.set(metricName, cumulativeCount);
-      }
-    }
-    return total;
-  }
-
   /** Runtime metrics snapshot (§3.4) */
   async stats(): Promise<EngineStats> {
     this.requireOpen();
@@ -707,7 +694,11 @@ export class RtdbEngine {
       bufferedPoints += context.writer.pendingPointCount;
       walPendingBytes += context.wal.pendingBytes;
       outstandingBatches += context.wal.outstandingBatchIds.length;
-      walPendingPoints += this.pendingWalPointsOf(context);
+      // Buffered points are exactly the points accepted but not yet flushed into segments: a batch
+      // completes only after every one of its points is in a segment. Deriving this from the batch
+      // ledger's cumulative counters instead would add the oldest outstanding batch's *absolute*
+      // cumulative total (cumulative counters are process-wide, not per batch), inflating the metric.
+      walPendingPoints += context.writer.pendingPointCount;
       if (context.wal.lastFsyncMs > walLastFsyncMs) walLastFsyncMs = context.wal.lastFsyncMs;
     }
 

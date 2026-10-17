@@ -174,6 +174,72 @@ describe('demo: Smart Site catalog 与生成器', () => {
   });
 });
 
+describe('demo: 性能模式（每批多点）', () => {
+  it('tickBatch 在窗口内均分时间戳：点数精确、同指标时间戳唯一', () => {
+    const simulator = new SmartSiteSimulator({ seed: 9 });
+    const metrics = simulator.metricCount;
+    const windowMs = 1_000;
+    const samplesPerMetric = 5;
+    const points = simulator.tickBatch(BASE, windowMs, metrics * samplesPerMetric);
+
+    assert.equal(points.length, metrics * samplesPerMetric);
+
+    const seen = new Set<string>();
+    const perMetric = new Map<string, number[]>();
+    for (const point of points) {
+      const key = `${point.metricName}@${point.timestamp}`;
+      assert.equal(seen.has(key), false, `duplicate (metric, timestamp): ${key}`);
+      seen.add(key);
+      assert.ok(point.timestamp > BASE - windowMs, `${key} before the window`);
+      assert.ok(point.timestamp <= BASE, `${key} after the window`);
+      const bucket = perMetric.get(point.metricName) ?? [];
+      bucket.push(point.timestamp);
+      perMetric.set(point.metricName, bucket);
+    }
+
+    assert.equal(perMetric.size, metrics);
+    for (const [metricName, timestamps] of perMetric) {
+      assert.equal(timestamps.length, samplesPerMetric, `${metricName} sample count`);
+      for (let index = 1; index < timestamps.length; index += 1) {
+        assert.ok((timestamps[index] ?? 0) > (timestamps[index - 1] ?? 0), `${metricName} timestamps must ascend`);
+      }
+    }
+  });
+
+  it('每指标一个采样时与 tick() 完全一致（保持确定性）', () => {
+    const native = new SmartSiteSimulator({ seed: 42 });
+    const batched = new SmartSiteSimulator({ seed: 42 });
+    assert.deepEqual(batched.tickBatch(BASE, 1_000, native.metricCount), native.tick(BASE));
+  });
+
+  it('请求点数超出窗口可容纳的容量时直接报错，而不是静默产生重复时间戳', () => {
+    const simulator = new SmartSiteSimulator({ seed: 9 });
+    assert.throws(
+      () => simulator.tickBatch(BASE, 1_000, simulator.metricCount * 1_001),
+      /without repeating a timestamp/,
+    );
+  });
+
+  it('配置文件接受性能参数（pointsPerTick / rate / totalPoints）并校验类型', () => {
+    const directory = mkdtempSync(join(rootDirectory, 'perf-config-'));
+
+    const valid = join(directory, 'valid.json');
+    writeFileSync(valid, JSON.stringify({ pointsPerTick: 5_000, rate: 0, totalPoints: 100_000 }), 'utf8');
+    const config = readDemoClientConfig(valid);
+    assert.equal(config.pointsPerTick, 5_000);
+    assert.equal(config.rate, 0);
+    assert.equal(config.totalPoints, 100_000);
+
+    const badRate = join(directory, 'bad-rate.json');
+    writeFileSync(badRate, JSON.stringify({ rate: -1 }), 'utf8');
+    assert.throws(() => readDemoClientConfig(badRate), /"rate"/);
+
+    const badPoints = join(directory, 'bad-points.json');
+    writeFileSync(badPoints, JSON.stringify({ pointsPerTick: 1.5 }), 'utf8');
+    assert.throws(() => readDemoClientConfig(badPoints), /"pointsPerTick"/);
+  });
+});
+
 describe('demo: 对 rtdb-server 的端到端写入与查询', () => {
   it('写入 3 个采样批次后 last/range/count/aggregate/metrics 全部可读', async () => {
     const { server, baseUrl } = await startServer();
@@ -286,6 +352,9 @@ describe('demo: demo/conf 配置统一管理', () => {
       database: 'defaults_db',
       tokenFile: '',
       intervalMs: 1000,
+      pointsPerTick: 0,
+      rate: 0,
+      totalPoints: 0,
       seed: 1,
       devices: [] as string[],
       glitchProbability: 0,

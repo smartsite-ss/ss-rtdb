@@ -266,6 +266,64 @@ export class SmartSiteSimulator {
     return points;
   }
 
+  /**
+   * Generate exactly `pointCount` samples whose timestamps are spread evenly over
+   * `[endTimestamp - windowMs, endTimestamp]` (used by the performance modes
+   * `--points-per-tick` / `--rate`).
+   *
+   * The batch size is decoupled from the catalog size, so one HTTP request can carry thousands of
+   * points. Samples of the same metric always receive **distinct** millisecond timestamps (the write
+   * path treats `(metric, timestamp)` as a duplicate and silently drops the later one), therefore the
+   * caller must keep `pointCount <= metricCount * windowMs`.
+   *
+   * `pointCount <= 0`, or exactly one sample per metric, degenerates to `tick(endTimestamp)`.
+   */
+  tickBatch(endTimestamp: number, windowMs: number, pointCount: number): SimulatedPoint[] {
+    if (!Number.isInteger(endTimestamp)) {
+      throw new Error(`tickBatch() needs an integer millisecond timestamp, received ${String(endTimestamp)}`);
+    }
+    const metricTotal = this.entries.length;
+    if (metricTotal === 0) return [];
+    if (!Number.isInteger(pointCount) || pointCount <= 0 || pointCount === metricTotal) {
+      return this.tick(endTimestamp);
+    }
+    if (!Number.isFinite(windowMs) || windowMs < 1) {
+      throw new Error(`tickBatch() needs a positive window in milliseconds, received ${String(windowMs)}`);
+    }
+    const window = Math.max(1, Math.floor(windowMs));
+
+    // Round-robin allocation: the first `remainder` metrics get one extra sample, so the batch size is
+    // exactly `pointCount` and the per-metric load differs by at most one sample.
+    const base = Math.floor(pointCount / metricTotal);
+    const remainder = pointCount % metricTotal;
+    const samplesPerMetric = this.entries.map((_entry, index) => base + (index < remainder ? 1 : 0));
+    const maxSamples = base + (remainder > 0 ? 1 : 0);
+    if (maxSamples > window) {
+      throw new Error(
+        `tickBatch() cannot place ${maxSamples} samples of one metric inside a ${window} ms window ` +
+          'without repeating a timestamp; widen the window or lower the point count',
+      );
+    }
+
+    const points: SimulatedPoint[] = [];
+    const currentValues = new Map<string, number | bigint | boolean | string>();
+    // Sample-major order: every layer covers all metrics at nearly the same instant, which keeps the
+    // derived counters (`counter.rateFrom`) reading values from the same layer.
+    for (let sample = 0; sample < maxSamples; sample += 1) {
+      for (let index = 0; index < metricTotal; index += 1) {
+        const count = samplesPerMetric[index] ?? 0;
+        if (sample >= count) continue;
+        const entry = this.entries[index] as MetricEntry;
+        // Strictly increasing inside the window because `count <= window`.
+        const timestamp = endTimestamp - window + Math.floor(((sample + 1) * window) / count);
+        const point = this.nextPoint(entry, timestamp, currentValues);
+        currentValues.set(`${entry.deviceCode}.${entry.tag.variable}`, point.value);
+        points.push(point);
+      }
+    }
+    return points;
+  }
+
   private nextPoint(
     entry: MetricEntry,
     timestamp: number,

@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 REM Copyright (c) 2025 Smart Site Team
 REM SPDX-License-Identifier: Apache-2.0
 REM https://smartsite.top/

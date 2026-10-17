@@ -26,7 +26,7 @@ rtdb 只有 `database → metric → point` 三层，没有标签（tag）维度
 | `dataType` = `bool` | `bool` |
 | `dataType` = `string` | `string` |
 | 写入 Influx 的 `quality`（0–100） | rtdb v0.1.0 只接受 `q=0`（省略即正常）；非 0 返回 `400 E_INVALID_POINT` |
-| `dev_data_tags.scanRate`（通常 1000 ms） | `--interval`（默认 1000 ms） |
+| `dev_data_tags.scanRate`（通常 1000 ms） | `--interval`（默认 1000 ms）；`--points-per-tick` / `--rate` 可在同一窗口内写入更多点 |
 | `dev_data_tags.unit` / `name` | 仅用于 `--list` 展示（rtdb 不存单位与显示名） |
 
 要点：
@@ -87,6 +87,12 @@ npm run demo:smart-site -- --duration 60 --verify
 
 # 只模拟暖通设备，500 ms 周期，模拟 0.5% 的通信故障
 npm run demo:smart-site -- --devices hvac-chiller,hvac-chw-pump --interval 500 --glitch-rate 0.005
+
+# 性能测试：每 1 s 写入 20000 点（约 20000 pts/s），跑 30 秒
+npm run demo:smart-site -- --rate 20000 --duration 30
+
+# 固定每批 5000 点，写满 10 万点后退出
+npm run demo:smart-site -- --points-per-tick 5000 --total-points 100000
 ```
 
 `npm run` 需要 `--` 分隔脚本名与参数；也可以直接调用 Node：
@@ -102,7 +108,7 @@ node packages/demo/client-smart-site/src/main.ts --once --verify
 | 文件 | 用途 |
 | ---- | ---- |
 | `rtdb-server.json` | 演示服务器运行配置：端口、监听地址、数据目录、令牌文件、控制台目录、WAL 与日志级别 |
-| `client-smart-site.json` | 模拟客户端默认连接与生成参数：`url`、`database`、`tokenFile`、`intervalMs`、`seed`、`devices`、`glitchProbability`、`logEvery`、`timeoutMs` |
+| `client-smart-site.json` | 模拟客户端默认连接与生成参数：`url`、`database`、`tokenFile`、`intervalMs`、`pointsPerTick`、`rate`、`totalPoints`、`seed`、`devices`、`glitchProbability`、`logEvery`、`timeoutMs` |
 | `rtdb.token` | 首次启动时由服务端生成的 Bearer 令牌（`*.token` 已 gitignore） |
 
 - **服务器**：`bin\start-demo-server.bat` 通过 `RTDB_CONFIG` 加载 `rtdb-server.json`；优先级为
@@ -123,7 +129,10 @@ node packages/demo/client-smart-site/src/main.ts --once --verify
 | `--token <token>` | 空 | Bearer 令牌（优先级最高） |
 | `--token-file <path>` | 空 | 显式令牌文件 |
 | `--db <name>` | `smartfactory_demo` | 目标数据库，必须匹配 `^[a-zA-Z][a-zA-Z0-9_]{0,62}$` |
-| `--interval <ms>` | `1000` | 采样周期，最小 100 ms |
+| `--interval <ms>` | `1000` | **写入频度**：每 N ms 一个批次，最小 100 ms |
+| `--points-per-tick <n>` | `0` | **每批点数**，`0` = 每个指标 1 点（最大受窗口容量限制，见 §3.3） |
+| `--rate <points/s>` | `0` | 目标写入速率，由 `--interval` 反推每批点数；与 `--points-per-tick` 互斥 |
+| `--total-points <n>` | `0` | 写满 n 个点后退出，`0` = 不限 |
 | `--duration <seconds>` | `0` | 运行时长，`0` = 直到 Ctrl+C |
 | `--once` | 关 | 只写一个批次后退出 |
 | `--seed <int>` | `20261017` | 随机种子，决定信号序列 |
@@ -135,7 +144,42 @@ node packages/demo/client-smart-site/src/main.ts --once --verify
 | `--log-every <n>` | `5` | 每 n 个批次打印一行进度 |
 | `--timeout <ms>` | `10000` | 单次 HTTP 超时 |
 
-### 3.3 令牌解析顺序
+### 3.3 性能测试模式（写点数量与频度）
+
+默认每个批次写入「每个指标 1 个点」，批大小被 44 个标签的目录固定住，压测写入路径时不够用。
+因此提供三个参数把**批次大小**与**写入频度**解耦：
+
+| 参数 | 作用 | 说明 |
+| ---- | ---- | ---- |
+| `--interval <ms>` | 频度 | 每 N ms 发一个批次（最小 100 ms） |
+| `--points-per-tick <n>` | 每批点数 | 一个批次写入 n 个点；`0`（默认）= 每指标 1 点 |
+| `--rate <points/s>` | 目标速率 | 由 `--interval` 反推每批点数（`n ≈ rate × interval / 1000`），与 `--points-per-tick` 互斥 |
+| `--total-points <n>` | 总量上限 | 写满 n 个点后退出；`0`（默认）= 不限 |
+
+多点批次由 `SmartSiteSimulator.tickBatch()` 生成：
+
+- 点数按指标**轮转分配**，各指标相差至多 1 个点；
+- 同一指标的时间戳在 `[t - interval, t]` 窗口内**均匀分布且互不重复**——写入路径把
+  `(metric, timestamp)` 当作幂等键，重复时间戳会被静默计入 `duplicates`，所以生成器不会制造重复；
+- 计数器（`--points-per-tick` 下的 `rateFrom` 派生量）按同一「采样层」读取速率，避免出现跨层乱序。
+
+容量上限：一个 `interval` 窗口最多容纳 `指标数 × interval` 个点（默认 44 × 1000 = 44 000）。
+超过上限时客户端在启动阶段直接报错，而不是静默丢点；需要更高吞吐时提高 `--interval`
+（容量与窗口长度成正比），或改用多个客户端进程写不同 `--db`。
+
+启动头会打印实际批大小与目标速率，结束汇总给出真实吞吐、延迟分位（p50/p95/p99/max）与目标对比：
+
+```text
+  batch     : 20000 pts/tick (--rate 20000, ~20000 pts/s)
+[t=1s] tick 2 · 20000 pts (accepted 40000, dup 0) · 36232 pts/s · p50 82.8 ms · p95 125.0 ms · stale 0
+  throughput   25591.8 points/s over 3.1 s (target 20000 points/s)
+```
+
+`--dry-run` 同样遵循这些参数，可用较小的点数（如 `--dry-run --points-per-tick 100`）预览多点批次的报文。
+三个参数也可以写进 `client-smart-site.json`（`pointsPerTick` / `rate` / `totalPoints`，`0` 表示关闭）；
+命令行参数仍然优先。
+
+### 3.4 令牌解析顺序
 
 1. `--token <token>`
 2. 环境变量 `RTDB_TOKEN`
@@ -145,7 +189,7 @@ node packages/demo/client-smart-site/src/main.ts --once --verify
 
 都找不到时以匿名身份运行；若服务端要求鉴权，写入会返回 `401 E_AUTH` 并提示补充令牌。
 
-### 3.4 `bin\` 包装脚本
+### 3.5 `bin\` 包装脚本
 
 Windows 下可直接使用 `bin\demo-smart-site.bat`（自动切换到 `src\` 目录并转发参数）：
 
@@ -162,6 +206,23 @@ bin\demo-smart-site.bat run --devices hvac-chiller --interval 500 --duration 10 
   `set RTDB_PORT=6190` 覆盖端口；
 - `list` / `dry` / `once` / `stream` 为预设动作：`once` 等价于 `--once --verify`；`stream`
   默认运行 60 秒并带 `--verify`（秒数可省略）；
+- `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]` 只跑**压测客户端**，
+  **不启动服务端**（服务端需自行在另一个窗口/服务中启动）：
+
+  ```bat
+  :: window 1
+  bin\start-demo-server.bat
+  :: window 2
+  bin\start-demo-server.bat bench 20000 30
+  bin\start-demo-server.bat bench 20000 30 --db perf_demo --interval 500
+  bin\start-demo-server.bat bench 5000 60 --points-per-tick 5000
+  ```
+
+  当前窗口运行客户端（`--rate <pts/s> --duration <seconds> --log-every 1`），额外参数原样转发；
+  服务端未就绪时会**先等待令牌文件**（客户端只在启动时解析一次令牌，最多等 10 s），
+  客户端返回 `3`（连不上服务）时最多重试 3 次、每次间隔 3 s，仍失败则提示先启动服务端；
+  设置 `RTDB_PORT` 时客户端会自动改用该端口；`duration` 很大（如 `3000000000`）等价于一直跑，
+  Ctrl+C 只停客户端、不影响服务端；
 - `run` 原样转发后续参数，`run --help` 可查看客户端完整帮助；
 - 未知动作返回退出码 `1`，其余退出码与客户端一致（`0/2/3`）；
 - 脚本在 `src\` 中运行，因此相对路径按该目录解析：SEA 发布目录的令牌写作
@@ -232,12 +293,15 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 
 | 现象 | 原因 | 处理 |
 | ---- | ---- | ---- |
-| `401 E_AUTH` | 服务端开启鉴权但客户端没有令牌 | 传 `--token` / `RTDB_TOKEN` / `--token-file` |
+| `401 E_AUTH` | 服务端开启鉴权但客户端没有令牌，或令牌与服务端不匹配 | 传 `--token` / `RTDB_TOKEN` / `--token-file` |
+| `401 E_AUTH` 且写成了 `--token rtdb.token` | `--token` 收的是令牌**值**，不是文件路径（会原样作为 Bearer 发出，并**压过**配置里的 `tokenFile`） | 改用 `--token-file rtdb.token`，或用 `--token <64 位令牌值>`；同名令牌文件不等于同一个令牌——demo 服务器用 `packages\demo\conf\rtdb.token`，SEA 发布包（`release\sea\rtdb-server.exe`）用 `release\sea\rtdb.token` |
 | `--url` 连接失败 | 服务未启动或端口不同 | 先启动 `rtdb-server`，再确认端口 |
 | `E_TYPE_MISMATCH` | 目标库中同名指标已用其他类型写入 | 换 `--db`，或清理该库后重跑 |
 | `400 E_INVALID_POINT ... quality=…` | 写入了非 0 质量位（v0.1.0 不支持） | 省略 `q`；本 demo 已默认不发送质量位 |
 | `--db` 被拒绝 | 数据库名不能包含 `-` 等字符 | 使用字母、数字、下划线，如 `smartfactory_demo` |
 | `--list` 报未知设备 | `--devices` 拼写错误 | 先用 `--list` 查看设备编码 |
+| 启动即报 `exceed the catalog capacity` | 每批点数超过 `指标数 × interval` 的容量 | 提高 `--interval`、降低 `--points-per-tick`，或减少 `--devices` |
+| `--rate` 与 `--points-per-tick` 同时报错 | 两者控制同一个旋钮 | 只传其中一个 |
 
 ## 7. 下一步
 
@@ -254,3 +318,6 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-17 | 新建页面：Smart Site 数据模拟客户端（数据映射、目录、运行参数、写入格式、验证与排障） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增加 `bin\demo-smart-site.bat` 包装脚本（list / dry / once / stream / run 预设） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 §3.1 配置统一管理：`packages/demo/conf/`（`rtdb-server.json`、`client-smart-site.json`）与 `bin\start-demo-server.bat`；客户端支持 `--config` / `--no-config` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 §3.3 性能测试模式：`--points-per-tick`（每批点数）、`--rate`（目标 pts/s）、`--total-points`（总量上限）；生成器新增 `tickBatch()`（窗口内均分时间戳、容量校验），进度与汇总补充 pts/s、p99/max 与目标速率对比 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §3.5 新增 `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]`：**只跑压测客户端，不启动服务端**（服务端人工外部启动；等待令牌文件、连不上时重试 3 次后提示先启服务） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §6 补充 `--token rtdb.token` 导致 `401 E_AUTH` 的排障行（`--token` 收令牌值且优先于配置 `tokenFile`；demo 实例与 SEA 发布包令牌文件不同）；客户端对「`--token` 传入路径」新增 `[WARN]` 提示，401 提示语补充优先级说明 | DeepSeek-V4.1-Flash |

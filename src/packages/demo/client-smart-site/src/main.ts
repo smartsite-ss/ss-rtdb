@@ -12,6 +12,11 @@
  *   node packages/demo/client-smart-site/src/main.ts --dry-run     # print one batch, send nothing
  *   node packages/demo/client-smart-site/src/main.ts --list        # print the device/tag catalog
  *
+ * Performance runs (`--points-per-tick` / `--rate` / `--total-points`) decouple the batch size from the
+ * 44-tag catalog so a single client can saturate the write path:
+ *   node packages/demo/client-smart-site/src/main.ts --rate 20000 --duration 30
+ *   node packages/demo/client-smart-site/src/main.ts --points-per-tick 5000 --total-points 100000
+ *
  * Defaults (server URL, token file, database, generation parameters) come from
  * `packages/demo/conf/client-smart-site.json`; command-line arguments always win, and
  * `--no-config` skips the file entirely.
@@ -50,6 +55,12 @@ interface CliOptions {
   database: string;
   intervalMs: number;
   durationMs: number;
+  /** Samples per tick (0 = one sample per metric), for performance runs */
+  pointsPerTick: number;
+  /** Target points per second (0 = disabled; mutually exclusive with `pointsPerTick`) */
+  rate: number;
+  /** Stop after this many points have been sent (0 = unlimited) */
+  totalPoints: number;
   seed: number;
   devices: string[];
   glitchProbability: number;
@@ -108,6 +119,9 @@ function parseArgs(argv: readonly string[]): CliOptions {
     database: DEMO_DATABASE,
     intervalMs: DEFAULT_INTERVAL_MS,
     durationMs: 0,
+    pointsPerTick: 0,
+    rate: 0,
+    totalPoints: 0,
     seed: 20261017,
     devices: [],
     glitchProbability: 0,
@@ -174,6 +188,15 @@ function parseArgs(argv: readonly string[]): CliOptions {
       case 'duration':
         options.durationMs = readFloat(takeValue(), 'duration', 0) * 1000;
         break;
+      case 'points-per-tick':
+        options.pointsPerTick = readInteger(takeValue(), 'points-per-tick', 1);
+        break;
+      case 'rate':
+        options.rate = readFloat(takeValue(), 'rate', 1);
+        break;
+      case 'total-points':
+        options.totalPoints = readInteger(takeValue(), 'total-points', 1);
+        break;
       case 'seed':
         options.seed = readInteger(takeValue(), 'seed', 0);
         break;
@@ -233,6 +256,47 @@ function readFloat(raw: string, name: string, min: number, max = Number.POSITIVE
   return value;
 }
 
+/** Resolved batch shape: how many samples one tick carries */
+interface BatchPlan {
+  /** Samples per tick; 0 = native mode (one sample per metric) */
+  pointsPerTick: number;
+  /** Human readable origin of the plan (printed in the startup header) */
+  source: string;
+}
+
+/**
+ * Turn `--points-per-tick` / `--rate` into a concrete batch size.
+ *
+ * Both options target the same knob, so passing both is an error instead of a silent precedence.
+ * The batch size is capped by the catalog: a metric cannot hold two points with the same millisecond
+ * timestamp (the write path drops the later one as a duplicate), so a tick of `intervalMs` milliseconds
+ * can carry at most `metricCount * intervalMs` samples.
+ */
+function resolveBatchPlan(options: CliOptions, metricCount: number): BatchPlan {
+  if (options.rate > 0 && options.pointsPerTick > 0) {
+    throw new Error('--rate and --points-per-tick are mutually exclusive; pass only one of them');
+  }
+  if (options.rate <= 0 && options.pointsPerTick <= 0) {
+    return { pointsPerTick: 0, source: 'one sample per metric' };
+  }
+
+  const pointsPerTick =
+    options.rate > 0
+      ? Math.max(1, Math.round((options.rate * options.intervalMs) / 1000))
+      : options.pointsPerTick;
+  const source = options.rate > 0 ? `--rate ${options.rate}` : '--points-per-tick';
+
+  const capacity = metricCount * options.intervalMs;
+  if (pointsPerTick > capacity) {
+    throw new Error(
+      `${pointsPerTick} points per ${options.intervalMs} ms batch exceed the catalog capacity ` +
+        `(${metricCount} metrics x ${options.intervalMs} ms = ${capacity} distinct (metric, timestamp) pairs); ` +
+        'raise --interval, lower the point count, or widen --devices',
+    );
+  }
+  return { pointsPerTick, source };
+}
+
 function printUsage(): void {
   console.log(
     [
@@ -247,8 +311,11 @@ function printUsage(): void {
       '  --token <token>        Bearer token (default: RTDB_TOKEN, then rtdb.token)',
       '  --token-file <path>    Explicit token file (read when --token is absent)',
       `  --db <name>            Target database (default ${DEMO_DATABASE})`,
-      `  --interval <ms>        Sampling interval (default ${DEFAULT_INTERVAL_MS}, min ${MIN_INTERVAL_MS})`,
+      `  --interval <ms>        Write frequency: one tick per N ms (default ${DEFAULT_INTERVAL_MS}, min ${MIN_INTERVAL_MS})`,
       '  --duration <seconds>   Stop after N seconds (default 0 = until Ctrl+C)',
+      '  --points-per-tick <n>  Points written per tick (default 0 = one sample per metric)',
+      '  --rate <points/s>      Target write rate; derives the points per tick from --interval',
+      '  --total-points <n>     Stop after N written points (default 0 = unlimited)',
       '  --once                 Write exactly one batch and exit',
       '  --seed <int>           RNG seed (default 20261017)',
       '  --devices <list>       Comma-separated device codes (default: all)',
@@ -264,6 +331,8 @@ function printUsage(): void {
       '  node packages/demo/client-smart-site/src/main.ts --once --verify',
       '  node packages/demo/client-smart-site/src/main.ts --duration 60 --verify',
       '  node packages/demo/client-smart-site/src/main.ts --devices hvac-chiller,sewage-in --interval 500',
+      '  node packages/demo/client-smart-site/src/main.ts --rate 20000 --duration 30',
+      '  node packages/demo/client-smart-site/src/main.ts --points-per-tick 5000 --total-points 100000',
     ].join('\n'),
   );
 }
@@ -274,7 +343,17 @@ interface TokenResolution {
 }
 
 function resolveToken(options: CliOptions): TokenResolution {
-  if (options.token.length > 0) return { token: options.token.trim(), source: '--token' };
+  if (options.token.length > 0) {
+    // `--token` carries the token value, not a path. A mistaken `--token rtdb.token` would win over
+    // the (correct) tokenFile from the config and fail every write with 401 E_AUTH.
+    if (looksLikeTokenFile(options.token)) {
+      console.error(
+        `[WARN] --token receives the token value, not a file path ("${options.token.trim()}"); ` +
+          'use --token-file <path> instead. Sending the value as-is.',
+      );
+    }
+    return { token: options.token.trim(), source: '--token' };
+  }
   const fromEnv = (process.env.RTDB_TOKEN ?? '').trim();
   if (fromEnv.length > 0) return { token: fromEnv, source: 'RTDB_TOKEN' };
 
@@ -296,6 +375,12 @@ function resolveToken(options: CliOptions): TokenResolution {
     throw new Error(`Cannot read the token file: ${resolve(options.tokenFile)}`);
   }
   return { token: '', source: 'anonymous' };
+}
+
+/** Heuristic for the `--token rtdb.token` mistake: a path separator or a `.token` suffix */
+function looksLikeTokenFile(value: string): boolean {
+  const trimmed = value.trim();
+  return /[\\/]/.test(trimmed) || trimmed.toLowerCase().endsWith('.token');
 }
 
 function printCatalog(descriptors: readonly MetricDescriptor[]): void {
@@ -438,7 +523,10 @@ function describeError(error: unknown): string {
 }
 
 function authHint(): string {
-  return 'Hint: pass --token <token>, set RTDB_TOKEN, or point --token-file at the server rtdb.token.';
+  return (
+    'Hint: pass --token <token> (the value, not a file path), set RTDB_TOKEN, or point --token-file at ' +
+    "the server's rtdb.token; --token wins over the config tokenFile."
+  );
 }
 
 async function run(): Promise<number> {
@@ -459,6 +547,8 @@ async function run(): Promise<number> {
     return 0;
   }
 
+  const batchPlan = resolveBatchPlan(options, simulator.metricCount);
+
   const resolution = resolveToken(options);
   const client = new DemoRtdbClient({
     baseUrl: options.url,
@@ -477,11 +567,24 @@ async function run(): Promise<number> {
     `  sampling  : ${options.intervalMs} ms` +
       (options.durationMs > 0 ? `, duration ${(options.durationMs / 1000).toFixed(0)} s` : ', until Ctrl+C'),
   );
+  console.log(
+    `  batch     : ${batchPlan.pointsPerTick > 0 ? `${batchPlan.pointsPerTick} pts/tick` : `${simulator.metricCount} pts/tick`}` +
+      ` (${batchPlan.source}` +
+      (batchPlan.pointsPerTick > 0
+        ? `, ~${Math.round((batchPlan.pointsPerTick / options.intervalMs) * 1000)} pts/s`
+        : '') +
+      ')' +
+      (options.totalPoints > 0 ? `, stop after ${options.totalPoints} pts` : ''),
+  );
   console.log(`  config    : ${options.configPath.length > 0 ? options.configPath : 'none (built-in defaults)'}`);
   console.log(`  auth      : ${resolution.source}`);
 
   if (options.dryRun) {
-    printDryRun(options, simulator.tick(Date.now()));
+    const points =
+      batchPlan.pointsPerTick > 0
+        ? simulator.tickBatch(Date.now(), options.intervalMs, batchPlan.pointsPerTick)
+        : simulator.tick(Date.now());
+    printDryRun(options, points);
     return 0;
   }
 
@@ -514,16 +617,27 @@ async function run(): Promise<number> {
   let failures = 0;
   let consecutiveFailures = 0;
   let lastTimestamp = startedAt;
+  /** Remaining points allowed by `--total-points` (`Infinity` when unlimited) */
+  let remainingPoints = options.totalPoints > 0 ? options.totalPoints : Number.POSITIVE_INFINITY;
 
   while (!stopping) {
     const timestamp = Date.now();
-    const points = simulator.tick(timestamp);
+    // A tick covers the previous interval: multiple samples per metric are spread over that window so
+    // their timestamps stay distinct (the write path drops repeated `(metric, timestamp)` pairs).
+    const batchSize = batchPlan.pointsPerTick > 0 ? batchPlan.pointsPerTick : simulator.metricCount;
+    const wanted = Math.min(batchSize, remainingPoints);
+    const generated =
+      batchPlan.pointsPerTick > 0
+        ? simulator.tickBatch(timestamp, options.intervalMs, wanted)
+        : simulator.tick(timestamp);
+    const points = generated.length > remainingPoints ? generated.slice(0, remainingPoints) : generated;
     const began = performance.now();
     try {
       const result = await client.writeBatch(options.database, points);
       latencies.push(performance.now() - began);
       acceptedTotal += result.accepted;
       duplicatesTotal += result.duplicates;
+      remainingPoints -= points.length;
       consecutiveFailures = 0;
     } catch (error) {
       failures += 1;
@@ -543,14 +657,18 @@ async function run(): Promise<number> {
 
     if (options.logEvery > 0 && tickCount % options.logEvery === 0) {
       const sorted = [...latencies].sort((left, right) => left - right);
+      const elapsedSeconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
       console.log(
         `[t=${((timestamp - startedAt) / 1000).toFixed(0)}s] tick ${tickCount} · ${points.length} pts ` +
           `(accepted ${acceptedTotal}, dup ${duplicatesTotal}) · ` +
-          `p50 ${percentile(sorted, 0.5).toFixed(1)} ms · stale ${faultyTotal}`,
+          `${(acceptedTotal / elapsedSeconds).toFixed(0)} pts/s · ` +
+          `p50 ${percentile(sorted, 0.5).toFixed(1)} ms · p95 ${percentile(sorted, 0.95).toFixed(1)} ms · ` +
+          `stale ${faultyTotal}`,
       );
     }
 
     if (options.once) break;
+    if (remainingPoints <= 0) break;
     if (deadline !== null && Date.now() >= deadline) break;
 
     const nextAt = startedAt + tickCount * options.intervalMs;
@@ -571,12 +689,16 @@ async function run(): Promise<number> {
     console.log(
       `  latency      avg ${average(sortedLatencies).toFixed(1)} ms, ` +
         `p50 ${percentile(sortedLatencies, 0.5).toFixed(1)} ms, ` +
-        `p95 ${percentile(sortedLatencies, 0.95).toFixed(1)} ms`,
+        `p95 ${percentile(sortedLatencies, 0.95).toFixed(1)} ms, ` +
+        `p99 ${percentile(sortedLatencies, 0.99).toFixed(1)} ms, ` +
+        `max ${(sortedLatencies[sortedLatencies.length - 1] ?? 0).toFixed(1)} ms`,
     );
   }
   if (tickCount > 1) {
+    const targetRate = batchPlan.pointsPerTick > 0 ? (batchPlan.pointsPerTick / options.intervalMs) * 1000 : 0;
     console.log(
-      `  throughput   ${((acceptedTotal / elapsedMs) * 1000).toFixed(1)} points/s over ${(elapsedMs / 1000).toFixed(1)} s`,
+      `  throughput   ${((acceptedTotal / elapsedMs) * 1000).toFixed(1)} points/s over ${(elapsedMs / 1000).toFixed(1)} s` +
+        (targetRate > 0 ? ` (target ${targetRate.toFixed(0)} points/s)` : ''),
     );
   }
 
