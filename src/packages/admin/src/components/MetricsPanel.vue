@@ -18,7 +18,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import LineChart from './LineChart.vue';
 import TimeRangePicker from './TimeRangePicker.vue';
-import { RTDB_AGGREGATE_TYPE, RtdbAdminApiClient } from '../api';
+import { RTDB_AGGREGATE_TYPE, RTDB_VALUE_TYPE, RtdbAdminApiClient } from '../api';
 import type { RtdbAggregateType, RtdbAggregateWindow, RtdbJsonPoint, RtdbJsonSeries, RtdbMetricSummary } from '../api';
 import { useAsyncAction } from '../async';
 import { formatDateTime, fromDateTimeLocalValue, toDateTimeLocalValue } from '../format';
@@ -53,12 +53,27 @@ const windowUnit = ref<WindowUnit>('s');
 /** Exactly one of the two previews is non-null after a successful query */
 const rawSeries = ref<RtdbJsonSeries | null>(null);
 const aggregateWindows = ref<RtdbAggregateWindow[] | null>(null);
+/** Elapsed wall time of the last successful query (ms), shown next to the summary line */
+const queryElapsedMs = ref<number | null>(null);
 
 const hasPreview = computed(() => rawSeries.value !== null || aggregateWindows.value !== null);
 
 /** Selected metric's stored span, offered as the "All" preset inside the range control */
 const spanStart = computed(() => metrics.value.find((entry) => entry.metricName === selectedMetric.value)?.firstTs ?? null);
 const spanEnd = computed(() => metrics.value.find((entry) => entry.metricName === selectedMetric.value)?.lastTs ?? null);
+
+/** Distinct string values of the raw series in first-appearance order; a string series is plotted as state levels 1..N */
+const stringLevels = computed<string[]>(() => {
+  const current = rawSeries.value;
+  if (current === null) return [];
+  const levels: string[] = [];
+  for (const point of current.points) {
+    if (typeof point.v === 'string' && point.vt === RTDB_VALUE_TYPE.string && !levels.includes(point.v)) {
+      levels.push(point.v);
+    }
+  }
+  return levels;
+});
 
 const chartPoints = computed<{ t: number; value: number }[]>(() => {
   const points: { t: number; value: number }[] = [];
@@ -72,6 +87,10 @@ const chartPoints = computed<{ t: number; value: number }[]>(() => {
   const current = rawSeries.value;
   if (current === null) return points;
   for (const point of current.points) {
+    if (typeof point.v === 'string' && point.vt === RTDB_VALUE_TYPE.string) {
+      points.push({ t: point.t, value: stringLevels.value.indexOf(point.v) + 1 });
+      continue;
+    }
     const value = RtdbAdminApiClient.toNumericValue(point);
     if (value !== null) points.push({ t: point.t, value });
   }
@@ -106,6 +125,12 @@ function formatInterval(milliseconds: number): string {
   if (milliseconds < 1_000) return `${milliseconds} ms`;
   if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(2)} s`;
   return `${(milliseconds / 60_000).toFixed(2)} min`;
+}
+
+/** Compact query-elapsed label (`12 ms` / `0.85 s`) */
+function formatDuration(milliseconds: number): string {
+  if (milliseconds < 1_000) return `${Math.max(1, Math.round(milliseconds))} ms`;
+  return `${(milliseconds / 1_000).toFixed(2)} s`;
 }
 
 function resetRange(): void {
@@ -174,6 +199,7 @@ async function runQuery(): Promise<void> {
   const limit = Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : DEFAULT_LIMIT;
   const type = aggregateType.value;
   const windowMs = resolveWindowMs();
+  const startedAt = performance.now();
 
   const result = await run(async () => {
     if (database.length === 0) throw new Error(t('metrics.error.selectDatabase'));
@@ -189,6 +215,7 @@ async function runQuery(): Promise<void> {
     return { raw: null as RtdbJsonSeries | null, windows };
   });
   if (result === undefined) return;
+  queryElapsedMs.value = performance.now() - startedAt;
   rawSeries.value = result.raw;
   aggregateWindows.value = result.windows;
 }
@@ -413,6 +440,12 @@ watch(
                   skipped: skippedPointCount,
                 })
           }}
+          <template v-if="queryElapsedMs !== null">
+            {{ t('metrics.elapsed', { duration: formatDuration(queryElapsedMs) }) }}
+          </template>
+        </p>
+        <p v-if="stringLevels.length > 0" class="toolbar-note hint">
+          {{ t('metrics.hint.stringLevels', { levels: stringLevels.map((value, index) => `"${value}"→${index + 1}`).join(', ') }) }}
         </p>
         <LineChart :points="chartPoints" />
       </template>

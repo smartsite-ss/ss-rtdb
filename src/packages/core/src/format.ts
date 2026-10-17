@@ -24,8 +24,8 @@
  *     valueType     u8   1=f64 2=i64 3=bool 4=string
  *     tsCodec       u8
  *     valCodec      u8
- *     tsRawLen      u32  decompressed byte count
- *     valRawLen     u32
+ *     tsRawLen      u32  on-disk payload byte count (splits BlockData on the read side)
+ *     valRawLen     u32  on-disk payload byte count
  *     tsMin         i64
  *     tsMax         i64
  *     flags         u16  bit0=backfill
@@ -291,7 +291,7 @@ export interface BlockHeader {
   valueType: ValueType;
   timestampCodecId: number;
   valueCodecId: number;
-  /** Decompressed byte count (for validation/pre-allocation) */
+  /** On-disk payload byte count (used by the read side to split BlockData) */
   timestampRawLength: number;
   valueRawLength: number;
   /** ms epoch */

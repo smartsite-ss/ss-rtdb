@@ -45,6 +45,7 @@
 | 08 | [运维与维护](./docs-o/zh/08-operations.md) | [Operations & maintenance](./docs-o/en/08-operations.md) |
 | 09 | [开发者指南](./docs-o/zh/09-developer-guide.md) | [Developer guide](./docs-o/en/09-developer-guide.md) |
 | 10 | [Smart Site 数据模拟客户端](./docs-o/zh/10-smart-site-demo.md) | [Smart Site demo client](./docs-o/en/10-smart-site-demo.md) |
+| 11 | [存储格式与写入路径（细化设计）](./docs-o/zh/11-segment-format.md) | [Storage format & write path](./docs-o/en/11-segment-format.md) |
 
 新用户建议按 **01 → 03 → 04** 阅读；运维人员建议按 **02 → 08** 阅读。
 
@@ -146,3 +147,4 @@ Apache License 2.0 —— 每个源文件都带有标准 Apache-2.0 文件头；
 | 2026-10-17 | 文档索引新增 10 — Smart Site 数据模拟客户端（中英对照） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 快速上手补充控制台登录：首启默认管理员 `admin` / `ss-rtdb` 与 `POST /api/v1/auth/login` 示例 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 仓库结构补充 `bin/` 与 `conf/`（服务端默认配置 `conf/rtdb-server.json`，运行时自动加载） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 文档索引新增 11 — 存储格式与写入路径（细化设计，中英对照） | GLM-5.3-Flash |

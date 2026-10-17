@@ -141,6 +141,7 @@ export const zh: Record<MessageKey, string> = {
   'metrics.reset': '重置区间',
   'metrics.summary': '返回 {points} 点 · 绘制 {plotted} 点 · 跳过 {skipped} 个非数值点',
   'metrics.summaryAggregated': '返回 {windows} 个窗口 · 绘制 {plotted} 个 · 跳过 {skipped} 个空窗口',
+  'metrics.elapsed': '查询耗时 {duration}',
   'metrics.emptyPreview': '执行一次查询以预览曲线。',
   'metrics.notSelected': '未选择',
   'metrics.range.label': '时间段',
@@ -163,7 +164,8 @@ export const zh: Record<MessageKey, string> = {
   'metrics.limitNote': '条数上限只对原始点查询生效；一次聚合最多返回 100 000 个窗口。',
   'metrics.exportXls': '导出 XLS',
   'metrics.hint.raw':
-    '原始点按存储时刻直接连线，不做插值：相邻采样点之间是直线，采样间隔很大时看起来会像一段斜坡，长区间建议改用聚合。',
+    '原始点按存储时刻直接连线，不做插值：相邻采样点之间是直线，采样间隔很大时看起来会像一段斜坡，长区间建议改用聚合。布尔值按 0/1 绘制。',
+  'metrics.hint.stringLevels': '字符串序列按状态档位绘制：{levels}',
   'metrics.hint.aggregate':
     'avg 为时间加权平均：窗口内样本按时间积分，窗口外相邻点做线性插值；需要等权平均请用 sum / count。无数据的窗口不产生点。',
   'metrics.hint.intervals': '采样间隔中位 {median}、最大 {max}；超过中位 {factor} 倍的缺口 {gaps} 处。',

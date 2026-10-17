@@ -32,6 +32,10 @@ async function startService(): Promise<RunningService> {
   const config = loadServerConfig();
   const logger = new Logger(config.log.level);
   const server = new RtdbServer({ config, logger });
+  // Printed before the engine opens the data root: recovery over a large/uncached data root
+  // (segment scan + missing .idx mirror rebuild) can take tens of seconds with no other output,
+  // which is easy to mistake for a hung process.
+  logger.info(`opening data root: ${config.dataDir} (recovery may take a while on first start)`);
   const address = await server.start();
   logger.info(`rtdb-server started: http://${address.host}:${address.port} (dataDir=${config.dataDir})`);
   return { config, logger, server };

@@ -221,7 +221,7 @@ cli ────┼──> server ──> core
 ## 7. 文档同步（强制）
 
 - 任何行为、配置项、HTTP 接口、CLI 子命令、SDK 签名变更，都必须**同时**更新
-  `docs-o/en/<页>.md` 与 `docs-o/zh/<页>.md`（两套页码一一对应：`README` + `01`…`09`）。
+  `docs-o/en/<页>.md` 与 `docs-o/zh/<页>.md`（两套页码一一对应：`README` + `01`…`11`）。
 - 新增/删除页面时，同步更新 `docs-o/en/README.md` 与 `docs-o/zh/README.md` 的索引表，
   以及仓库根 `README.md` 的双语文档索引表。
 - **每次修改任何文档都必须在被改页面末尾追加一行修订记录（强制，无例外）**：
@@ -308,3 +308,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 新增运行期配置目录 `conf/`（`rtdb-server.json` 默认配置，工作目录存在时自动加载）；§3 布局与 §10 运行时注意事项同步 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §2 SEA 要点补充：重建 exe 前必须停止运行中的实例，`bin/sea/build-sea.mjs` 对 `EBUSY` 覆盖失败给出明确提示 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 演示客户端新增性能模式（`--points-per-tick` / `--rate` / `--total-points`）与 `bin\start-demo-server.bat bench`（**仅跑压测客户端，不启动服务端**，服务端由人工在外部启动）；§2 命令表与 §3 布局同步。同轮修正 §4 第 10 条：`.bat` 必须 **UTF-8 无 BOM**（cmd.exe 不识别 BOM，会导致 `@echo off` 失效） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增文档 11「存储格式与写入路径（细化设计）」（中英对照，含索引与根 README 同步）；§7 页码范围更新为 `01`…`11` | GLM-5.3-Flash |

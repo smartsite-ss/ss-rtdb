@@ -49,6 +49,7 @@ multi-tenancy beyond directory-per-database isolation.
 | 08 | [Operations & maintenance](./08-operations.md) | Backup, restore, archive, retention, repair, monitoring |
 | 09 | [Developer guide](./09-developer-guide.md) | Repository layout, tests, benchmarks, contributing |
 | 10 | [Smart Site demo client](./10-smart-site-demo.md) | Stream Smart Site shaped real-time data into the server (integration / load / acceptance) |
+| 11 | [Storage format & write path (detailed design)](./11-segment-format.md) | Understand the physical segment layout, block encoding & CRCs, write pipeline, WAL and recovery internals |
 
 New users should read **01 → 03 → 04**; operators should read **02 → 08**.
 
@@ -178,3 +179,4 @@ Apache License 2.0. Every source file carries the standard Apache-2.0 header; se
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Documentation index: added 10 — Smart Site demo client | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Quick start: documented console sign-in (default administrator `admin` / `ss-rtdb`) and the `POST /api/v1/auth/login` example | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Documentation index: added 11 — Storage format & write path (detailed design) | GLM-5.3-Flash |

@@ -140,6 +140,7 @@ export const en = {
   'metrics.reset': 'Reset range',
   'metrics.summary': '{points} point(s) returned · {plotted} plotted · {skipped} non-numeric skipped',
   'metrics.summaryAggregated': '{windows} window(s) returned · {plotted} plotted · {skipped} empty skipped',
+  'metrics.elapsed': 'query took {duration}',
   'metrics.emptyPreview': 'Run a query to preview the series.',
   'metrics.notSelected': 'not selected',
   'metrics.range.label': 'Time range',
@@ -162,7 +163,8 @@ export const en = {
   'metrics.limitNote': 'Limit applies to raw queries only; one aggregation call returns at most 100 000 windows.',
   'metrics.exportXls': 'Export XLS',
   'metrics.hint.raw':
-    'Raw points are plotted exactly as stored: no interpolation, each sample is joined to the next, so a long sampling gap looks like a straight ramp. Use aggregation for long ranges.',
+    'Raw points are plotted exactly as stored: no interpolation, each sample is joined to the next, so a long sampling gap looks like a straight ramp. Use aggregation for long ranges. Booleans are plotted as 0/1.',
+  'metrics.hint.stringLevels': 'String series are plotted as state levels: {levels}',
   'metrics.hint.aggregate':
     'avg is time-weighted: the samples inside the window are integrated over time with linearly interpolated neighbours outside it; for an equal-weight mean use sum / count. A window without data yields no point.',
   'metrics.hint.intervals': 'Sampling interval median {median}, largest {max}; {gaps} gap(s) above {factor}× the median.',

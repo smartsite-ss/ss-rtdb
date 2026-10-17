@@ -314,9 +314,10 @@ export class RtdbAdminApiClient {
     await this.request<{ ok: boolean }>('DELETE', `/api/v1/admin/tokens/${encodeURIComponent(tokenId)}`);
   }
 
-  /** Resolve a numeric value for charting; i64 decimal strings and numbers are accepted, others yield null */
+  /** Resolve a numeric value for charting; i64 decimal strings, numbers and booleans (0/1) are accepted, others yield null */
   static toNumericValue(point: RtdbJsonPoint): number | null {
     if (typeof point.v === 'number') return Number.isFinite(point.v) ? point.v : null;
+    if (typeof point.v === 'boolean') return point.v ? 1 : 0;
     if (typeof point.v === 'string' && point.vt === RTDB_VALUE_TYPE.int64) {
       const parsed = Number(point.v);
       return Number.isFinite(parsed) ? parsed : null;

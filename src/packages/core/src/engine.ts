@@ -167,6 +167,8 @@ export interface MetricSummary {
   firstTs: number;
   /** Latest timestamp (ms epoch) */
   lastTs: number;
+  /** Value type locked on the metric's first write (read from its first block header; null when unknown) */
+  valueType: ValueType | null;
 }
 
 /** Per-metric index statistics (management API; aggregated from `.idx`/rebuilt indexes, no payload decode) */
@@ -924,7 +926,7 @@ export class RtdbEngine {
         context.writer.flush();
         this.tryCompleteBatches(context);
       } catch (error) {
-        console.error('[ss-rtdb] Scheduled block formation failed:', error);
+        console.error('[ss-rtdb] Scheduled block flush failed:', error);
       }
     }
   }
