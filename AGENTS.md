@@ -42,7 +42,7 @@
 | 运行 Smart Site 模拟客户端（写入实时数据） | `npm run demo:smart-site -- --once --verify`；Windows 包装：`bin\demo-smart-site.bat list` / `bin\demo-smart-site.bat stream 60`（见文档 10） |
 | 启动演示服务器（读取 `demo/conf` 统一配置） | `bin\start-demo-server.bat`（端口被占用时 `set RTDB_PORT=6190`） |
 | 控制台开发服务器 | `npm run dev --workspace @ss/rtdb-admin` |
-| Python SDK 测试 | `cd packages/client-python` 后 `python -m pytest tests/` |
+| Python SDK 测试 | `cd packages/demo/client-python` 后 `python -m pytest tests/` |
 
 注意：`server` 与 `cli` 包**没有 `build` 脚本**（直接运行 `.ts`）；`npm run build` 只构建
 `core`、`client-node`、`admin`。仓库没有 linter / formatter，类型检查 + 测试即为质量门禁。
@@ -64,11 +64,13 @@ ss-rtdb/
 │   ├── packages/
 │   │   ├── core/             # @ss/rtdb-core     引擎，零依赖（dependencies: {}）
 │   │   ├── server/           # @ss/rtdb-server   HTTP 外壳，依赖 core；bin: rtdb-server
-│   │   ├── client-node/      # @ss/rtdb-client   纯 HTTP SDK，零依赖
-│   │   ├── client-python/    # ss-rtdb-client    Python SDK，仅标准库
 │   │   ├── cli/              # @ss/rtdb-cli      bin: rtdbctl，依赖 client-node/core/server
 │   │   ├── admin/            # @ss/rtdb-admin    Vue 3 + Vite 控制台（private）
-│   │   └── demo/             # 测试客户端 + conf/ 统一配置（client-smart-site：Smart Site 实时数据模拟）
+│   │   └── demo/             # 演示与测试客户端（npm 工作区）+ conf/ 统一配置
+│   │       ├── client-node/  # @ss/rtdb-client   纯 HTTP SDK，零依赖
+│   │       ├── client-python/# ss-rtdb-client    Python SDK，仅标准库
+│   │       ├── client-smart-site/ # Smart Site 实时数据模拟客户端
+│   │       └── conf/         # rtdb-server.json / client-smart-site.json
 │   ├── __tests__/            # node:test 套件（*.test.ts）+ benchmark/
 │   └── scripts/              # check-runtime-dependencies.ts、check-throughput-regression.ts
 ├── bin/                      # 发布 / 启动批处理脚本（.bat 规则见 §4 第 10 条）
@@ -123,7 +125,7 @@ cli ────┼──> server ──> core
 
      ```bash
      grep -rl --include='*.ts' --include='*.vue' --include='*.py' \
-       -L 'SPDX-License-Identifier: Apache-2.0' packages/*/src __tests__ scripts
+       -L 'SPDX-License-Identifier: Apache-2.0' packages/*/src packages/demo/*/src __tests__ scripts
      ```
 
 6. **错误处理**：抛 `RtdbError` 并携带 `ERROR_CODE`（`packages/core/src/errors.ts`），
@@ -159,12 +161,42 @@ cli ────┼──> server ──> core
       }
       ```
 
+11. **后台代码注释一律英文（强制，无例外）**：
+    - 适用范围：所有非前端代码——`src/packages/{core,server,cli,client-node}/src/**`、
+      `src/packages/demo/**`、`src/__tests__/**`、`src/scripts/**`、`bin/**`、构建配置与 README 之外的
+      代码文件；含注释、JSDoc、日志文案、错误信息、变量/函数/类型命名。
+    - 中文只允许出现在 `docs-o/`、`docs-e/`、根 `README.md`、`AGENTS.md` 与前端语言包
+      `src/packages/admin/src/locales/zh.ts`（以及未来的其它 `locales/zh*.ts`）中。
+    - 提交前自检（应为空；命中即需改写为英文）：
+
+      ```bash
+      grep -rnP '[\x{4e00}-\x{9fff}]' --include='*.ts' src/packages/*/src \
+        | grep -v '/locales/zh' | grep -v '^src/packages/admin/'
+      ```
+
+12. **前端必须支持多语言（强制，无例外）**：
+    - 所有前端界面（当前为 `src/packages/admin`）的**用户可见文案**必须取自 i18n 语言资源，
+      禁止在 `.vue` / `.ts` 中硬编码整句中文或英文（`console` 调试日志、`code`/`mono` 展示的
+      协议字段名、HTTP 路径与错误码除外）。
+    - **默认语言为英文（`en`）**，必须同时提供**中文（`zh`）**；语言选择持久化在浏览器本地
+      （`localStorage`），刷新后保持。
+    - 新增/修改文案时**必须同时补齐 `en` 与 `zh` 两个键**；缺失键回退到英文并保留键名占位，
+      不允许运行时抛错。语言资源按界面域分文件（`locales/en.ts` / `locales/zh.ts`）。
+    - 提交前自检（`.vue` 模板与脚本中不应出现成句中文）：
+
+      ```bash
+      grep -rnP '[\x{4e00}-\x{9fff}]' --include='*.vue' src/packages/admin/src
+      grep -rnP '[\x{4e00}-\x{9fff}]' --include='*.ts' src/packages/admin/src \
+        | grep -v '/locales/zh'
+      ```
+
 ## 5. 代码约定
 
 - 编译选项（`src/tsconfig.base.json`）：`target/lib` ES2023、`module` NodeNext、`strict`、
   `noImplicitOverride`、`noImplicitReturns`、`noFallthroughCasesInSwitch`、`noUnusedLocals`、
   `noUnusedParameters`、`useDefineForClassFields`。
-- 代码中的**注释与标识符为英文**；文档内容放 `docs-o/`。
+- 代码中的**注释与标识符为英文**（强制口径见 §4 第 11 条）；文档内容放 `docs-o/`；
+  前端文案的多语言要求见 §4 第 12 条。
 - 数据类型边界：`i64` 限 ±2^53（安全整数）；`string` 值 ≤256 字节 UTF-8；指标名 ≤512 字节；
   时间戳为毫秒 epoch（行协议纳秒会被截断为毫秒）；数据库名匹配 `^[a-zA-Z][a-zA-Z0-9_]{0,62}$`。
 - 查询只有四个原语：`range` / `last` / `count` / `aggregate`；`aggregate` 的 `avg` 是
@@ -265,3 +297,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 新增 `packages/demo/client-smart-site` Smart Site 实时数据模拟客户端：§2 命令表、§3 布局补充；文档 10 同步 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 `bin\demo-smart-site.bat` 包装脚本（list / dry / once / stream / run）；§2 命令表与 §3 布局同步 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 `packages/demo/conf/` 统一配置（`rtdb-server.json`、`client-smart-site.json`）与 `bin\start-demo-server.bat`；客户端支持 `--config` / `--no-config` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `workspaces` 增加 `packages/demo/*`，`check:deps` 支持嵌套工作区；§2 Python SDK 路径、§3 布局、§4 文件头自检路径同步到 `packages/demo/client-*` | DeepSeek-V4.1-Flash |

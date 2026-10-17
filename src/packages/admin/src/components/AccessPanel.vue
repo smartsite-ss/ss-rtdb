@@ -17,6 +17,7 @@ import { onMounted, ref, watch } from 'vue';
 import type { RtdbAdminApiClient, RtdbPublicToken, RtdbPublicUser } from '../api';
 import { useAsyncAction } from '../async';
 import { formatDateTime } from '../format';
+import { t } from '../i18n';
 
 const props = defineProps<{ client: RtdbAdminApiClient }>();
 
@@ -56,10 +57,10 @@ async function issueToken(): Promise<void> {
   const ttlHoursText = issueTtlHours.value.trim();
 
   const result = await run(async () => {
-    if (user.length === 0) throw new Error('Enter the owner username.');
+    if (user.length === 0) throw new Error(t('access.error.ownerRequired'));
     const ttlMs = ttlHoursText.length === 0 ? null : Math.round(Number(ttlHoursText) * HOURS_TO_MILLISECONDS);
     if (ttlMs !== null && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
-      throw new Error('TTL hours must be a positive number.');
+      throw new Error(t('access.error.ttlPositive'));
     }
     return props.client.issueToken(user, role.length === 0 ? null : role, label, ttlMs);
   });
@@ -67,16 +68,16 @@ async function issueToken(): Promise<void> {
   if (result !== undefined) {
     issuedTokenPlaintext.value = result.token;
     await loadTokens();
-    if (errorMessage.value.length === 0) successMessage.value = 'Token issued. The plaintext is shown once below.';
+    if (errorMessage.value.length === 0) successMessage.value = t('access.success.issued');
   }
 }
 
 async function revokeToken(tokenId: string): Promise<void> {
-  if (!window.confirm(`Revoke token "${tokenId}"? This cannot be undone.`)) return;
+  if (!window.confirm(t('access.confirm.revoke', { tokenId }))) return;
   const revoked = await run(() => props.client.revokeToken(tokenId));
   await loadTokens();
   if (revoked !== undefined && errorMessage.value.length === 0) {
-    successMessage.value = `Token "${tokenId}" revoked.`;
+    successMessage.value = t('access.success.revoked', { tokenId });
   }
 }
 
@@ -101,60 +102,71 @@ watch(
   <section class="panel">
     <div class="card">
       <div class="card-title">
-        <span>Issue token</span>
+        <span>{{ t('access.issueTitle') }}</span>
         <span class="card-title-note">POST /api/v1/admin/tokens (scope: admin)</span>
       </div>
 
       <div class="toolbar">
         <div class="field">
-          <label class="field-label">Owner</label>
-          <input v-model="issueUser" list="admin-owner-candidates" type="text" placeholder="username" :disabled="busy" />
+          <label class="field-label">{{ t('access.owner') }}</label>
+          <input
+            v-model="issueUser"
+            list="admin-owner-candidates"
+            type="text"
+            :placeholder="t('access.ownerPlaceholder')"
+            :disabled="busy"
+          />
           <datalist id="admin-owner-candidates">
             <option v-for="user in users" :key="user.username" :value="user.username" />
           </datalist>
         </div>
         <div class="field">
-          <label class="field-label">Role (empty = owner role)</label>
+          <label class="field-label">{{ t('access.role') }}</label>
           <select v-model="issueRole" :disabled="busy">
-            <option value="">(default)</option>
+            <option value="">{{ t('access.roleDefault') }}</option>
             <option v-for="role in ROLE_OPTIONS" :key="role" :value="role">{{ role }}</option>
           </select>
         </div>
         <div class="field">
-          <label class="field-label">Label</label>
-          <input v-model="issueLabel" type="text" placeholder="e.g. collector-01" :disabled="busy" />
+          <label class="field-label">{{ t('access.label') }}</label>
+          <input
+            v-model="issueLabel"
+            type="text"
+            :placeholder="t('access.labelPlaceholder')"
+            :disabled="busy"
+          />
         </div>
         <div class="field">
-          <label class="field-label">TTL hours (empty = never expires)</label>
+          <label class="field-label">{{ t('access.ttl') }}</label>
           <input v-model="issueTtlHours" type="number" min="1" step="1" style="width: 150px" :disabled="busy" />
         </div>
-        <button class="primary" :disabled="busy" @click="issueToken">Issue</button>
+        <button class="primary" :disabled="busy" @click="issueToken">{{ t('access.issue') }}</button>
       </div>
 
       <p v-if="errorMessage.length > 0" class="alert error">{{ errorMessage }}</p>
       <p v-if="successMessage.length > 0" class="alert success">{{ successMessage }}</p>
 
       <div v-if="issuedTokenPlaintext.length > 0" class="alert">
-        <p>Plaintext token (shown once, copy it now):</p>
+        <p>{{ t('access.plaintextHint') }}</p>
         <p class="mono break-all">{{ issuedTokenPlaintext }}</p>
-        <button class="small danger" @click="dismissPlaintext">Hide</button>
+        <button class="small danger" @click="dismissPlaintext">{{ t('access.hide') }}</button>
       </div>
     </div>
 
     <div class="card">
       <div class="card-title">
-        <span>Users</span>
+        <span>{{ t('access.usersTitle') }}</span>
         <span class="card-title-note">GET /api/v1/admin/users</span>
       </div>
       <div v-if="users.length > 0" class="table-wrap">
         <table class="data-table">
           <thead>
             <tr>
-              <th>Username</th>
-              <th>Role</th>
-              <th>Enabled</th>
-              <th>Created</th>
-              <th>Updated</th>
+              <th>{{ t('access.column.username') }}</th>
+              <th>{{ t('access.column.role') }}</th>
+              <th>{{ t('access.column.enabled') }}</th>
+              <th>{{ t('access.column.created') }}</th>
+              <th>{{ t('access.column.updated') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -163,7 +175,7 @@ watch(
               <td><span class="badge">{{ user.role }}</span></td>
               <td>
                 <span :class="['badge', user.enabled ? 'success' : 'danger']">
-                  {{ user.enabled ? 'enabled' : 'disabled' }}
+                  {{ user.enabled ? t('access.enabledYes') : t('access.enabledNo') }}
                 </span>
               </td>
               <td class="mono">{{ formatDateTime(user.createdAt) }}</td>
@@ -172,25 +184,25 @@ watch(
           </tbody>
         </table>
       </div>
-      <p v-else class="empty-hint">No user defined. User management requires the CLI (`rtdb-cli user add`).</p>
+      <p v-else class="empty-hint">{{ t('access.usersEmpty') }}</p>
     </div>
 
     <div class="card">
       <div class="card-title">
-        <span>Tokens</span>
+        <span>{{ t('access.tokensTitle') }}</span>
         <span class="card-title-note">GET /api/v1/admin/tokens · DELETE /api/v1/admin/tokens/{tokenId}</span>
       </div>
       <div v-if="tokens.length > 0" class="table-wrap">
         <table class="data-table">
           <thead>
             <tr>
-              <th>Token id</th>
-              <th>Owner</th>
-              <th>Role</th>
-              <th>Label</th>
-              <th>Created</th>
-              <th>Expires</th>
-              <th>Status</th>
+              <th>{{ t('access.column.tokenId') }}</th>
+              <th>{{ t('access.column.owner') }}</th>
+              <th>{{ t('access.column.role') }}</th>
+              <th>{{ t('access.column.label') }}</th>
+              <th>{{ t('access.column.created') }}</th>
+              <th>{{ t('access.column.expires') }}</th>
+              <th>{{ t('access.column.status') }}</th>
               <th />
             </tr>
           </thead>
@@ -201,10 +213,14 @@ watch(
               <td><span class="badge">{{ token.role }}</span></td>
               <td>{{ token.label }}</td>
               <td class="mono">{{ formatDateTime(token.createdAt) }}</td>
-              <td class="mono">{{ token.expiresAt === null ? 'never' : formatDateTime(token.expiresAt) }}</td>
+              <td class="mono">{{ token.expiresAt === null ? t('access.never') : formatDateTime(token.expiresAt) }}</td>
               <td>
                 <span :class="['badge', token.revokedAt === null ? 'success' : 'danger']">
-                  {{ token.revokedAt === null ? 'active' : `revoked ${formatDateTime(token.revokedAt)}` }}
+                  {{
+                    token.revokedAt === null
+                      ? t('access.active')
+                      : t('access.revokedAt', { time: formatDateTime(token.revokedAt) })
+                  }}
                 </span>
               </td>
               <td>
@@ -213,14 +229,14 @@ watch(
                   :disabled="busy || token.revokedAt !== null"
                   @click="revokeToken(token.tokenId)"
                 >
-                  Revoke
+                  {{ t('access.revoke') }}
                 </button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p v-else class="empty-hint">No token issued yet.</p>
+      <p v-else class="empty-hint">{{ t('access.tokensEmpty') }}</p>
     </div>
   </section>
 </template>

@@ -26,11 +26,14 @@ ss-rtdb/
 │   │   │       └── encoder/          #   gorilla / int64 / bool / string / timestamp / varint / zlib
 │   │   ├── server/                   # @ss/rtdb-server — HTTP protocol shell
 │   │   │   └── src/{server,config,auth,users,tokens,line-protocol,json-codec,metrics,logger}.ts
-│   │   ├── client-node/              # @ss/rtdb-client — Node SDK (HTTP only)
-│   │   ├── client-python/            # ss-rtdb-client — Python SDK (stdlib only)
 │   │   ├── cli/                      # @ss/rtdb-cli — rtdbctl
 │   │   │   └── src/{cli,args,commands,local,output}.ts
-│   │   └── admin/                    # @ss/rtdb-admin — Vue 3 console (private package)
+│   │   ├── admin/                    # @ss/rtdb-admin — Vue 3 console (private package)
+│   │   └── demo/                     # demo / test clients (npm workspaces) + shared config
+│   │       ├── client-node/          # @ss/rtdb-client — Node SDK (HTTP only)
+│   │       ├── client-python/        # ss-rtdb-client — Python SDK (stdlib only)
+│   │       ├── client-smart-site/    # Smart Site real-time data simulator
+│   │       └── conf/                 # rtdb-server.json / client-smart-site.json
 │   ├── __tests__/                    # node:test suites + benchmarks
 │   └── scripts/{check-runtime-dependencies,check-throughput-regression}.ts
 └── docs-o/en/                        # this documentation
@@ -172,7 +175,7 @@ npm test
 npm run check:deps
 npm run bench:regression
 npm run build                       # core, client-node, admin
-grep -rl --include='*.ts' -L 'SPDX-License-Identifier: Apache-2.0' packages/*/src   # must print nothing
+grep -rl --include='*.ts' -L 'SPDX-License-Identifier: Apache-2.0' packages/*/src packages/demo/*/src   # must print nothing
 ```
 
 Then tag and publish the packages (`@ss/rtdb-core`, `@ss/rtdb-client`, `@ss/rtdb-server`,

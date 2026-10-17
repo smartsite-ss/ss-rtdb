@@ -15,6 +15,10 @@ Base path: `/api/v1`. Default bind: `http://127.0.0.1:6180`.
 The token may be the static `auth.token` / auto-generated `rtdb.token` (always role `admin`) or an API
 token issued through `/api/v1/admin/tokens` (role = the token's role).
 
+Without a token, exchange a **user name + password** for one via `POST /api/v1/auth/login` (see §7.3).
+A fresh instance creates the default administrator `admin` / `ss-rtdb` (override with
+`auth.bootstrapUsername` / `auth.bootstrapPassword`, see [02 — Configuration](./02-configuration.md) §6.4).
+
 ### Scopes and roles
 
 | Scope | Endpoints | `admin` | `write` | `readonly` |
@@ -87,6 +91,9 @@ Every non-2xx response is JSON:
 | `PUT` `DELETE` | `/api/v1/admin/users/:username` | admin | Update / remove a user |
 | `GET` `POST` | `/api/v1/admin/tokens` | admin | List / issue API tokens |
 | `DELETE` | `/api/v1/admin/tokens/:tokenId` | admin | Revoke an API token |
+| `POST` | `/api/v1/auth/login` | none (needs user name + password) | Exchange credentials for an API token |
+| `GET` | `/api/v1/auth/session` | any valid credential | Identity and scopes of the current credential |
+| `POST` | `/api/v1/auth/logout` | any valid credential | Revoke the current API token |
 | `GET` | `/admin/` | none | Web console (static) |
 | `GET` | `/` | none | 302 redirect to `/admin/`; still 404 when `admin.enabled=false` |
 
@@ -357,6 +364,32 @@ curl -X DELETE "http://127.0.0.1:6180/api/v1/admin/tokens/<tokenId>" \
 
 Omitting `role` defaults to the owner's role (or `write`); omitting `ttlMs` means no expiry.
 
+### 7.3 Sign-in and sessions
+
+The login endpoint itself needs no credential: it trades a user-directory user name + password for an API
+token (the plaintext is returned once, then sent as a bearer token).
+
+```bash
+curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"ss-rtdb"}'
+# {"token":"<64 hex chars>","expiresAt":null,"user":{"username":"admin","role":"admin"}}
+```
+
+- `ttlMs` is optional; omitting it means the token never expires (same rule as `POST /api/v1/admin/tokens`).
+- An unknown user and a wrong password both return `401 E_AUTH` (no user enumeration); a missing field
+  returns `400 E_INVALID_POINT`.
+
+```bash
+# Who the credential belongs to, and which scopes its role grants
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/auth/session
+# {"user":{"username":"admin","role":"admin"},"source":"token","scopes":["query","write","admin"]}
+
+# Sign out: revoke the current API token (the static auth.token / basic credentials report revoked=false)
+curl -X POST http://127.0.0.1:6180/api/v1/auth/logout -H "Authorization: Bearer $TOKEN"
+# {"ok":true,"revoked":true}
+```
+
 ---
 
 ## 8. Observability endpoints (no authentication)
@@ -406,3 +439,4 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Endpoint index: documented `GET /` → 302 to `/admin/` (still 404 when `admin.enabled=false`) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Write fields: clarified that v0.1.0 only accepts `quality = 0`; non-zero returns `400 E_INVALID_POINT` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Added §7.3 "Sign-in and sessions" plus three endpoint-index rows: `POST /api/v1/auth/login`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout` | DeepSeek-V4.1-Flash |

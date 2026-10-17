@@ -80,6 +80,17 @@ cat rtdb.token          # Linux / macOS
 type rtdb.token         # Windows cmd
 ```
 
+The console at `/admin/` opens on a sign-in form: a fresh instance creates the default administrator
+`admin` / `ss-rtdb` when the user directory is empty (see
+[02 — Configuration](./02-configuration.md) §6.4) and trades those credentials for an API token. The
+login endpoint can also be called directly (see [04 — HTTP API](./04-http-api.md) §7.3):
+
+```bash
+curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"ss-rtdb"}'
+```
+
 Write two points (Line Protocol), then read them back:
 
 ```bash
@@ -117,10 +128,13 @@ ss-rtdb/
 │   ├── packages/
 │   │   ├── core/                # @ss/rtdb-core      — engine, zero dependencies
 │   │   ├── server/              # @ss/rtdb-server    — Form B HTTP service (rtdb-server)
-│   │   ├── client-node/         # @ss/rtdb-client    — Node.js SDK
-│   │   ├── client-python/       # ss-rtdb-client     — Python SDK (stdlib only)
 │   │   ├── cli/                 # @ss/rtdb-cli       — rtdbctl
-│   │   └── admin/               # @ss/rtdb-admin     — Vue 3 Web console (private)
+│   │   ├── admin/               # @ss/rtdb-admin     — Vue 3 Web console (private)
+│   │   └── demo/                # demo / test clients (npm workspaces) + shared config
+│   │       ├── client-node/     # @ss/rtdb-client    — Node.js SDK
+│   │       ├── client-python/   # ss-rtdb-client     — Python SDK (stdlib only)
+│   │       ├── client-smart-site/ # Smart Site real-time data simulator
+│   │       └── conf/            # rtdb-server.json / client-smart-site.json
 │   ├── __tests__/               # unit / integration tests
 │   ├── scripts/                 # dependency audit, throughput regression gate
 │   └── package.json             # workspace root scripts
@@ -163,3 +177,4 @@ Apache License 2.0. Every source file carries the standard Apache-2.0 header; se
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Documentation index: added 10 — Smart Site demo client | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Quick start: documented console sign-in (default administrator `admin` / `ss-rtdb`) and the `POST /api/v1/auth/login` example | DeepSeek-V4.1-Flash |

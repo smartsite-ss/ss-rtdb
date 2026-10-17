@@ -84,6 +84,15 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 无需凭据的健康检查：`/healthz`、`/api/v1/status`、`/metrics`（Prometheus）。
 Web 控制台：<http://127.0.0.1:6180/admin/>（需先构建 `admin` 包，见文档 07）。
 
+控制台首次打开即为登录页：首启且用户目录为空时会自动创建默认管理员 `admin` / `ss-rtdb`
+（见文档 02 §6.4），登录后即用其换取 API 令牌；也可以直接调登录端点：
+
+```bash
+curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"ss-rtdb"}'
+```
+
 嵌入式用法（形态 A）：
 
 ```ts
@@ -105,10 +114,13 @@ ss-rtdb/
 │   └── packages/
 │       ├── core/                # @ss/rtdb-core      — 引擎，零运行时依赖
 │       ├── server/              # @ss/rtdb-server    — 形态 B 的 HTTP 服务（rtdb-server）
-│       ├── client-node/         # @ss/rtdb-client    — Node.js SDK
-│       ├── client-python/       # ss-rtdb-client     — Python SDK（仅标准库）
 │       ├── cli/                 # @ss/rtdb-cli       — rtdbctl
-│       └── admin/               # @ss/rtdb-admin     — Vue 3 Web 控制台
+│       ├── admin/               # @ss/rtdb-admin     — Vue 3 Web 控制台
+│       └── demo/                # 演示与测试客户端（npm 工作区）+ 统一配置
+│           ├── client-node/     # @ss/rtdb-client    — Node.js SDK
+│           ├── client-python/   # ss-rtdb-client     — Python SDK（仅标准库）
+│           ├── client-smart-site/ # Smart Site 实时数据模拟客户端
+│           └── conf/            # rtdb-server.json / client-smart-site.json
 └── docs-o/
     ├── en/                      # 英文文档
     └── zh/                      # 中文文档
@@ -130,3 +142,4 @@ Apache License 2.0 —— 每个源文件都带有标准 Apache-2.0 文件头；
 | ---- | ---- | -------- |
 | 2026-10-17 | 由两行占位改写为项目门面：简介与形态对照、能力概览、中英对照文档索引、快速上手、仓库结构、许可与联系 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 文档索引新增 10 — Smart Site 数据模拟客户端（中英对照） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 快速上手补充控制台登录：首启默认管理员 `admin` / `ss-rtdb` 与 `POST /api/v1/auth/login` 示例 | DeepSeek-V4.1-Flash |

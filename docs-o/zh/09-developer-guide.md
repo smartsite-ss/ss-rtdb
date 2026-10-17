@@ -26,11 +26,14 @@ ss-rtdb/
 │   │   │       └── encoder/          #   gorilla / int64 / bool / string / timestamp / varint / zlib
 │   │   ├── server/                   # @ss/rtdb-server —— HTTP 协议外壳
 │   │   │   └── src/{server,config,auth,users,tokens,line-protocol,json-codec,metrics,logger}.ts
-│   │   ├── client-node/              # @ss/rtdb-client —— Node SDK（纯 HTTP）
-│   │   ├── client-python/            # ss-rtdb-client —— Python SDK（仅标准库）
 │   │   ├── cli/                      # @ss/rtdb-cli —— rtdbctl
 │   │   │   └── src/{cli,args,commands,local,output}.ts
-│   │   └── admin/                    # @ss/rtdb-admin —— Vue 3 控制台（私有包）
+│   │   ├── admin/                    # @ss/rtdb-admin —— Vue 3 控制台（私有包）
+│   │   └── demo/                     # 演示与测试客户端（npm 工作区）+ 统一配置
+│   │       ├── client-node/          # @ss/rtdb-client —— Node SDK（纯 HTTP）
+│   │       ├── client-python/        # ss-rtdb-client —— Python SDK（仅标准库）
+│   │       ├── client-smart-site/    # Smart Site 实时数据模拟客户端
+│   │       └── conf/                 # rtdb-server.json / client-smart-site.json
 │   ├── __tests__/                    # node:test 测试套件 + 基准
 │   └── scripts/{check-runtime-dependencies,check-throughput-regression}.ts
 └── docs-o/
@@ -172,7 +175,7 @@ npm test
 npm run check:deps
 npm run bench:regression
 npm run build                       # core、client-node、admin
-grep -rl --include='*.ts' -L 'SPDX-License-Identifier: Apache-2.0' packages/*/src   # 必须无输出
+grep -rl --include='*.ts' -L 'SPDX-License-Identifier: Apache-2.0' packages/*/src packages/demo/*/src   # 必须无输出
 ```
 
 然后打标签并发布各包（`@ss/rtdb-core`、`@ss/rtdb-client`、`@ss/rtdb-server`、`@ss/rtdb-cli`）

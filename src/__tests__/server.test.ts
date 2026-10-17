@@ -919,6 +919,193 @@ describe('server: 多用户管理（admin/users）', () => {
   });
 });
 
+/* ---------- 登录与会话（auth/login · session · logout） ---------- */
+
+interface LoginBody {
+  token: string;
+  expiresAt: number | null;
+  user: { username: string; role: string };
+}
+
+interface SessionBody {
+  user: { username: string; role: string };
+  source: string;
+  scopes: string[];
+}
+
+describe('server: 登录与会话（auth/login）', () => {
+  it('首启空用户目录自动创建默认管理员 admin/ss-rtdb；登录换令牌后可写可查可管理，登出后令牌失效', async () => {
+    const dataDir = nextDataDir();
+    const config = loadServerConfig({
+      env: {},
+      overrides: {
+        port: 0,
+        host: '127.0.0.1',
+        dataDir,
+        admin: { enabled: false },
+        log: { level: 'error' },
+        auth: { enabled: true, mode: 'token', token: TOKEN, tokenFile: join(dataDir, 'rtdb.token') },
+      },
+    });
+    const server = new RtdbServer({ config, logger: new Logger('error') });
+    const address = await server.start();
+    const baseUrl = `http://${address.host}:${address.port}`;
+    try {
+      // 默认管理员已落盘，且只存 scrypt 哈希（不含明文口令）
+      const usersFile = join(dataDir, 'rtdb-users.json');
+      assert.equal(existsSync(usersFile), true);
+      const usersText = readFileSync(usersFile, 'utf8');
+      assert.match(usersText, /"username":\s*"admin"/);
+      assert.doesNotMatch(usersText, /ss-rtdb/);
+
+      const login = await postJson(baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'ss-rtdb' });
+      assert.equal(login.status, 200);
+      const body = (await login.json()) as LoginBody;
+      assert.equal(body.user.username, 'admin');
+      assert.equal(body.user.role, 'admin');
+      assert.equal(body.expiresAt, null);
+      assert.ok(body.token.length >= 16);
+
+      const headers = { Authorization: `Bearer ${body.token}` };
+
+      const session = await fetch(`${baseUrl}/api/v1/auth/session`, { headers });
+      assert.equal(session.status, 200);
+      const sessionBody = (await session.json()) as SessionBody;
+      assert.deepEqual(sessionBody.user, { username: 'admin', role: 'admin' });
+      assert.equal(sessionBody.source, 'token');
+      assert.deepEqual(sessionBody.scopes, ['query', 'write', 'admin']);
+
+      // 该令牌覆盖写入 / 查询 / 管理三个域
+      const write = await postJson(
+        baseUrl,
+        '/api/v1/write?db=demo',
+        [{ metricName: 'login', t: BASE, v: 1 }],
+        headers,
+      );
+      assert.equal(write.status, 200);
+      const read = await postJson(
+        baseUrl,
+        '/api/v1/query/range',
+        { db: 'demo', metricName: 'login', start: BASE - 1, end: BASE + 1 },
+        headers,
+      );
+      assert.equal(read.status, 200);
+      const listing = await fetch(`${baseUrl}/api/v1/admin/users`, { headers });
+      assert.equal(listing.status, 200);
+
+      // 登出吊销令牌
+      const logout = await fetch(`${baseUrl}/api/v1/auth/logout`, { method: 'POST', headers });
+      assert.equal(logout.status, 200);
+      assert.deepEqual(await logout.json(), { ok: true, revoked: true });
+
+      const afterLogout = await fetch(`${baseUrl}/api/v1/auth/session`, { headers });
+      assert.equal(afterLogout.status, 401);
+      assert.equal((await readErrorBody(afterLogout)).error, ERROR_CODE.Auth);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('错误口令与未知用户统一 401 E_AUTH；缺字段 400；失败不签发令牌', async () => {
+    const { server, baseUrl } = await startTestServer({
+      auth: { enabled: true, mode: 'token', token: TOKEN, tokenFile: join(rootDirectory, 'login-fail.token') },
+    });
+    try {
+      const wrong = await postJson(baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'nope' });
+      assert.equal(wrong.status, 401);
+      assert.equal((await readErrorBody(wrong)).error, ERROR_CODE.Auth);
+
+      const ghost = await postJson(baseUrl, '/api/v1/auth/login', { username: 'ghost', password: 'ss-rtdb' });
+      assert.equal(ghost.status, 401);
+      assert.equal((await readErrorBody(ghost)).error, ERROR_CODE.Auth);
+
+      const missing = await postJson(baseUrl, '/api/v1/auth/login', { username: 'admin' });
+      assert.equal(missing.status, 400);
+      assert.equal((await readErrorBody(missing)).error, ERROR_CODE.InvalidPoint);
+
+      // 令牌目录仍为空：失败的登录不会留下可用凭据
+      const tokens = await fetch(`${baseUrl}/api/v1/admin/tokens`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      assert.deepEqual(((await tokens.json()) as AdminTokensBody).tokens, []);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('用户目录非空时不再创建默认管理员；改密后旧口令失效、新口令可登录', async () => {
+    const dataDir = nextDataDir();
+    const start = async (): Promise<TestServer> => {
+      const config = loadServerConfig({
+        env: {},
+        overrides: {
+          port: 0,
+          host: '127.0.0.1',
+          dataDir,
+          admin: { enabled: false },
+          log: { level: 'error' },
+          auth: { enabled: true, mode: 'token', token: TOKEN, tokenFile: join(dataDir, 'rtdb.token') },
+        },
+      });
+      const server = new RtdbServer({ config, logger: new Logger('error') });
+      const address = await server.start();
+      return { server, baseUrl: `http://${address.host}:${address.port}`, dataDir };
+    };
+
+    const first = await start();
+    try {
+      const login = await postJson(first.baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'ss-rtdb' });
+      assert.equal(login.status, 200);
+      const token = ((await login.json()) as LoginBody).token;
+      const changed = await putJson(
+        first.baseUrl,
+        '/api/v1/admin/users/admin',
+        { password: 'n3w-password' },
+        { Authorization: `Bearer ${token}` },
+      );
+      assert.equal(changed.status, 200);
+    } finally {
+      await first.server.stop();
+    }
+
+    const second = await start();
+    try {
+      const withOld = await postJson(second.baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'ss-rtdb' });
+      assert.equal(withOld.status, 401);
+      const withNew = await postJson(second.baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'n3w-password' });
+      assert.equal(withNew.status, 200);
+      // bootstrap 只在空目录生效：重启后仍只有这一个用户
+      const users = await fetch(`${second.baseUrl}/api/v1/admin/users`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(((await users.json()) as AdminUsersBody).users.length, 1);
+    } finally {
+      await second.server.stop();
+    }
+  });
+
+  it('登录/登出路由：方法不允许返回 405；静态令牌登出报告 revoked=false', async () => {
+    const { server, baseUrl } = await startTestServer({
+      auth: { enabled: true, mode: 'token', token: TOKEN, tokenFile: join(rootDirectory, 'logout.token') },
+    });
+    try {
+      const getLogin = await fetch(`${baseUrl}/api/v1/auth/login`);
+      assert.equal(getLogin.status, 405);
+      assert.equal(getLogin.headers.get('allow'), 'POST');
+
+      const getSession = await fetch(`${baseUrl}/api/v1/auth/session`, { method: 'POST' });
+      assert.equal(getSession.status, 405);
+
+      const logout = await fetch(`${baseUrl}/api/v1/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(logout.status, 200);
+      assert.deepEqual(await logout.json(), { ok: true, revoked: false });
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
 /* ---------- 角色 scope 授权（401 / 403） ---------- */
 
 describe('server: 角色 scope 授权（401 / 403）', () => {

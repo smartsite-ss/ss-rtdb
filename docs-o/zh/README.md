@@ -79,6 +79,16 @@ cat rtdb.token          # Linux / macOS
 type rtdb.token         # Windows cmd
 ```
 
+控制台（`/admin/`）首次打开即为登录页：首启且用户目录为空时会自动创建默认管理员
+`admin` / `ss-rtdb`（见 [02 — 配置](./02-configuration.md) §6.4），登录后即用其换取 API 令牌。
+也可以直接调登录端点（详见 [04 — HTTP API](./04-http-api.md) §7.3）：
+
+```bash
+curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"ss-rtdb"}'
+```
+
 写入两个点（行协议），再读回来：
 
 ```bash
@@ -116,10 +126,13 @@ ss-rtdb/
 │   ├── packages/
 │   │   ├── core/                # @ss/rtdb-core      — 引擎，零依赖
 │   │   ├── server/              # @ss/rtdb-server    — 形态 B 的 HTTP 服务（rtdb-server）
-│   │   ├── client-node/         # @ss/rtdb-client    — Node.js SDK
-│   │   ├── client-python/       # ss-rtdb-client     — Python SDK（仅标准库）
 │   │   ├── cli/                 # @ss/rtdb-cli       — rtdbctl
-│   │   └── admin/               # @ss/rtdb-admin     — Vue 3 Web 控制台（私有包）
+│   │   ├── admin/               # @ss/rtdb-admin     — Vue 3 Web 控制台（私有包）
+│   │   └── demo/                # 演示与测试客户端（npm 工作区）+ 统一配置
+│   │       ├── client-node/     # @ss/rtdb-client    — Node.js SDK
+│   │       ├── client-python/   # ss-rtdb-client     — Python SDK（仅标准库）
+│   │       ├── client-smart-site/ # Smart Site 实时数据模拟客户端
+│   │       └── conf/            # rtdb-server.json / client-smart-site.json
 │   ├── __tests__/               # 单元 / 集成测试
 │   ├── scripts/                 # 依赖审计、吞吐回归门禁
 │   └── package.json             # 工作区根脚本
@@ -164,3 +177,4 @@ Apache License 2.0。每个源文件都带有标准 Apache-2.0 文件头；提�
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文文档索引；补齐 09 开发者指南链接，修正许可章节引用 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 文档索引新增 10 — Smart Site 数据模拟客户端 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 快速上手补充控制台登录（首启默认管理员 `admin` / `ss-rtdb`）与 `POST /api/v1/auth/login` 示例 | DeepSeek-V4.1-Flash |

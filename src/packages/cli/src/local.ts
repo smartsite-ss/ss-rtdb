@@ -40,25 +40,8 @@ import { SegmentStore } from '../../core/src/segment-store.ts';
 
 /* ---------- Public types ---------- */
 
-export interface DaySizeEntry {
-  dateNumber: number;
-  /** `yyyyMMdd` label */
-  dayLabel: string;
-  fileCount: number;
-  totalBytes: number;
-}
-
-export interface DatabaseSizeReport {
-  database: string;
-  /** Absolute database directory */
-  directory: string;
-  fileCount: number;
-  totalBytes: number;
-  /** Database-level retention override from `retention.json`; `null` = absent (global default applies) */
-  retentionDays: number | null;
-  /** Per-day detail (`yyyyMMdd` ascending) */
-  days: DaySizeEntry[];
-}
+/* `DatabaseSizeReport` / `DaySizeEntry` live in `core/size.ts` (shared with the server management API) */
+export type { DatabaseSizeReport, DaySizeEntry } from '../../core/src/size.ts';
 
 export interface RepairSummary {
   database: string;
@@ -118,36 +101,8 @@ export interface RestoreDaySummary {
 
 /* ---------- size ---------- */
 
-/** Measure the on-disk footprint of a database (recursive; the whole database directory plus the per-day detail) */
-export function measureDatabaseSize(dataDir: string, database: string): DatabaseSizeReport {
-  const store = new SegmentStore({ dataDir });
-  const directory = store.databaseDirectoryPath(database);
-  if (!directoryExists(directory)) {
-    throw new RtdbError(ERROR_CODE.DatabaseNotFound, `Database does not exist: ${directory}`);
-  }
-  try {
-    const total = measureDirectory(directory);
-    const days: DaySizeEntry[] = store.listDayDirectories(database).map((dateNumber) => {
-      const measured = measureDirectory(store.dayDirectoryPath(database, dateNumber));
-      return {
-        dateNumber,
-        dayLabel: formatDateFolderName(dateNumber),
-        fileCount: measured.fileCount,
-        totalBytes: measured.totalBytes,
-      };
-    });
-    return {
-      database,
-      directory,
-      fileCount: total.fileCount,
-      totalBytes: total.totalBytes,
-      retentionDays: readRetentionDaysFromDirectory(directory),
-      days,
-    };
-  } finally {
-    store.close();
-  }
-}
+/* Implemented in core so the server management API can reuse it without a `server -> cli` dependency */
+export { measureDatabaseSize } from '../../core/src/size.ts';
 
 /* ---------- repair ---------- */
 
@@ -356,27 +311,4 @@ export function restoreDatabaseDayFromArchive(
 /* ---------- retention (read-only) ---------- */
 
 /** Read the database-level retention override from `{dataDir}/{database}/retention.json`; `null` when absent */
-export function readRetentionDays(dataDir: string, database: string): number | null {
-  return readRetentionDaysFromDirectory(join(resolve(dataDir), database));
-}
-
-function readRetentionDaysFromDirectory(directory: string): number | null {
-  let text: string;
-  try {
-    text = readFileSync(join(directory, RETENTION_FILE_NAME), 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw new RtdbError(
-      ERROR_CODE.Io,
-      `Failed to read the retention policy file under ${directory}: ${(error as Error).message}`,
-    );
-  }
-  try {
-    const parsed = JSON.parse(text) as { retentionDays?: unknown };
-    const days = parsed.retentionDays;
-    if (typeof days !== 'number' || !Number.isInteger(days)) return null;
-    return days;
-  } catch {
-    return null;
-  }
-}
+export { readDatabaseRetentionDays as readRetentionDays } from '../../core/src/size.ts';

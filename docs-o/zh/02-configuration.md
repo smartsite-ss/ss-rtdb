@@ -40,6 +40,8 @@
     "username": "admin",
     "password": "",
     "passwordHash": "",
+    "bootstrapUsername": "admin",
+    "bootstrapPassword": "ss-rtdb",
     "write": true,
     "query": true,
     "usersFile": "",
@@ -94,6 +96,8 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `auth.username` | `admin` | Basic 认证用户名，同时也是静态令牌所归属的身份。 |
 | `auth.password` | `""` | Basic 认证口令（配置中明文；建议用 `passwordHash`）。 |
 | `auth.passwordHash` | `""` | scrypt 哈希 `scrypt$N$r$p$saltHex$hashHex`，由 `auth.hashPassword()` 生成。 |
+| `auth.bootstrapUsername` | `admin` | 首次启动（用户目录为空）时自动创建的默认管理员用户名；置空则关闭引导。 |
+| `auth.bootstrapPassword` | `ss-rtdb` | 上述默认管理员的口令（只以 scrypt 哈希落盘）；置空则关闭引导。 |
 | `auth.write` | `true` | 写入接口要求凭据。 |
 | `auth.query` | `true` | 查询接口要求凭据。 |
 | `auth.usersFile` | `""` | 用户目录 JSON；留空 = `{dataDir}/rtdb-users.json`。 |
@@ -145,6 +149,8 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `RTDB_TOKEN` | `auth.token` |
 | `RTDB_AUTH_USERNAME` | `auth.username` |
 | `RTDB_AUTH_PASSWORD` | `auth.password` |
+| `RTDB_AUTH_BOOTSTRAP_USERNAME` | `auth.bootstrapUsername` |
+| `RTDB_AUTH_BOOTSTRAP_PASSWORD` | `auth.bootstrapPassword` |
 | `RTDB_AUTH_USERS_FILE` | `auth.usersFile` |
 | `RTDB_AUTH_TOKENS_FILE` | `auth.tokensFile` |
 | `RTDB_ADMIN_ENABLED` | `admin.enabled` |
@@ -227,6 +233,27 @@ console.log(hashPassword('your-strong-password'));
 }
 ```
 
+### 6.4 首次启动的默认管理员与登录
+
+`auth.enabled = true`（默认）且用户目录（`rtdb-users.json`）**为空**时，服务启动会创建一名默认管理员：
+
+- 用户名 `admin`、口令 `ss-rtdb`（可用 `auth.bootstrapUsername` / `auth.bootstrapPassword` 覆盖，置空即关闭引导）。
+- 口令只以 scrypt 哈希落盘，日志会提示“已创建默认管理员”。
+- 引导**只在空目录时生效**：已有用户（或已改过口令）的实例重启不会被重置。
+
+拿到账号后可用用户名 + 口令换取 API 令牌（见 [04 — HTTP API](./04-http-api.md) §7.3），
+Web 控制台的 **Sign in** 表单走的就是同一条路径：
+
+```bash
+curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"ss-rtdb"}'
+# {"token":"<64 位十六进制>","expiresAt":null,"user":{"username":"admin","role":"admin"}}
+```
+
+> 首次登录后请立即在控制台“访问控制”面板修改口令。生产部署建议把 `auth.bootstrapPassword` 置空，
+> 由运维预先写入用户目录（哈希）后再启动。
+
 ## 7. 运行时状态文件
 
 | 文件 | 位置 | 用途 |
@@ -248,3 +275,4 @@ console.log(hashPassword('your-strong-password'));
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本；随英文版更新同步 §2 启动参数说明、§6.2 口令哈希生成方式 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 `auth.bootstrapUsername` / `auth.bootstrapPassword`（默认 `admin` / `ss-rtdb`）、对应环境变量与 §6.4「首次启动的默认管理员与登录」 | DeepSeek-V4.1-Flash |

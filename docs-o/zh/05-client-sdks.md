@@ -5,8 +5,8 @@
 
 | SDK | 包 | 语言 | 说明 |
 | --- | -- | ---- | ---- |
-| `@ss/rtdb-client` | `packages/client-node` | TypeScript / JavaScript（Node ≥ 24） | 完整能力，含管理面（用户与令牌） |
-| `ss-rtdb-client` | `packages/client-python` | Python ≥ 3.9 | 数据面 + `status` + 行协议辅助方法 |
+| `@ss/rtdb-client` | `packages/demo/client-node` | TypeScript / JavaScript（Node ≥ 24） | 完整能力，含管理面（用户与令牌） |
+| `ss-rtdb-client` | `packages/demo/client-python` | Python ≥ 3.9 | 数据面 + `status` + 行协议辅助方法 |
 
 两个 SDK 在六个数据方法上契约完全一致；三处有意保留的运行时差异见 §2.6。
 
@@ -42,7 +42,7 @@ npm install @ss/rtdb-client
 在本仓库内也可以直接导入工作区源码：
 
 ```ts
-import { RtdbClient } from './packages/client-node/src/index.ts';
+import { RtdbClient } from './packages/demo/client-node/src/index.ts';
 ```
 
 ### 1.2 构造
@@ -153,8 +153,8 @@ try {
 ### 2.1 安装
 
 ```bash
-pip install ./packages/client-python     # 从检出目录安装
-pip install -e ./packages/client-python  # 可编辑 / 开发模式
+pip install ./packages/demo/client-python     # 从检出目录安装
+pip install -e ./packages/demo/client-python  # 可编辑 / 开发模式
 ```
 
 仅依赖标准库（`urllib`），Python ≥ 3.9，零运行时依赖。
@@ -269,3 +269,4 @@ except RtdbClientError as error:
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本；随英文版更新同步「值类型映射」、长字段名、`aggregate_type` 参数等 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 更正 SDK 目录为 `packages/demo/client-node` / `packages/demo/client-python`（含工作区源码导入路径与 `pip install` 命令） | DeepSeek-V4.1-Flash |

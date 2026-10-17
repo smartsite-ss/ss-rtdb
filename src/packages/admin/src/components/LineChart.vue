@@ -15,6 +15,7 @@
  */
 
 import { computed } from 'vue';
+import { t } from '../i18n';
 
 const props = withDefaults(
   defineProps<{
@@ -122,7 +123,7 @@ function formatDateTime(milliseconds: number): string {
       </span>
       <span class="line-chart-marker" :style="lastMarkerStyle" />
     </template>
-    <div v-else class="line-chart-empty">No numeric data in the selected range</div>
+    <div v-else class="line-chart-empty">{{ t('chart.empty') }}</div>
   </div>
 </template>
 

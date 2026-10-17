@@ -33,8 +33,14 @@ npm run build --workspace @ss/rtdb-admin
 - 打开 <http://127.0.0.1:6180/admin/> —— **结尾的斜杠很重要**；`/admin` 会 301 跳转到 `/admin/`，
   这样相对路径的静态资源才能正确解析。直接访问站点根路径 `/` 会 **302 跳转到 `/admin/`**
   （`admin.enabled=false` 时根路径仍返回 404）。
-- 没有额外鉴权：控制台运行在你的浏览器中，每次 API 调用都会带上你的令牌
-  （它就是同一套 REST API，权限域也完全一致）。
+- 打开控制台后先**登录**：`auth.enabled = true`（默认）时页面顶部显示 **Sign in** 表单，
+  输入用户名 + 口令即可（`POST /api/v1/auth/login` 换取 API 令牌）。首次启动的服务会自动创建
+  默认管理员 `admin` / `ss-rtdb`（见 [02 — 配置](./02-configuration.md) §6.4），表单已预填这两个值，
+  点一次 **Sign in** 即可登录。
+- 右上角恒有入口：未登录显示 **Sign in**（跳到登录表单），登录后显示账号（如 `admin · admin`）与 **Sign out**。
+- 浏览器只保存令牌（`localStorage`），**口令不会被存储**；已有令牌时也可以点
+  **Use an existing token** 直接粘贴，或点右上角 **Sign out** 吊销令牌。
+- 控制台没有独立鉴权：它调用的是同一套 REST API，每次请求都带同一个令牌，权限域完全一致。
 
 如需关闭（例如改用独立部署形态）：
 
@@ -52,12 +58,13 @@ npm run build --workspace @ss/rtdb-admin
 
 1. 构建（`npm run build --workspace @ss/rtdb-admin`），并把 `packages/admin/dist/` 上传到你的
    静态主机（nginx、带静态网站托管的对象存储等）。
-2. 打开站点，填写 **设置**：
-   - **API 基址** —— 例如 `https://rtdb.example.com`。**留空**表示与页面同源（即内置模式的行为）。
-   - **访问令牌** —— 具备所需权限域的令牌（使用“访问控制”面板需要 `admin`）。
-3. 点击 **测试连接**，然后 **保存**。设置只保存在浏览器本地存储中 —— 从不上传服务端 ——
+2. 打开站点，填写 **API 基址** —— 例如 `https://rtdb.example.com`。**留空**表示与页面同源
+   （即内置模式的行为）。
+3. 用 **Sign in** 登录（用户名 + 口令 → 令牌），或点 **Use an existing token** 粘贴在别处签发的
+   令牌（使用“访问控制”面板需要 `admin` 权限域）。
+4. 点击 **Test connection** 确认连通；基址与令牌会自动保存在浏览器本地存储中 —— 从不上传服务端 ——
    因此每位运维人员各自保管自己的凭据。
-4. 在服务实例上允许控制台所在来源：
+5. 在服务实例上允许控制台所在来源：
 
 ```json
 {
@@ -88,18 +95,36 @@ npm run build --workspace @ss/rtdb-admin
 
 ---
 
-## 5. 故障排查
+## 5. 界面语言
+
+控制台内置两种语言，默认 **英文**：
+
+| 语言 | 覆盖范围 | 说明 |
+| ---- | -------- | ---- |
+| `en`（默认） | 全部界面文案 | 词条基准（`packages/admin/src/locales/en.ts`） |
+| `zh` | 全部界面文案 | 按 `Record<MessageKey, string>` 约束（`packages/admin/src/locales/zh.ts`），漏译会导致构建失败 |
+
+- 页头按钮在英文界面显示 `中文`、在中文界面显示 `EN`，点击即切换。
+- 选择保存在 `localStorage` 的 `rtdbAdminLocale` 键中，刷新后保持；`<html lang>` 与页面标题同步切换。
+- 切换语言完全在本地完成：不会向服务端发送任何请求，已经显示在界面上的提示会按新语言重新渲染。
+- 新增界面文案必须同时补齐两份词典（AGENTS.md §4 第 12 条）：只有英文键、没有中文键时，
+  `npm run typecheck --workspace @ss/rtdb-admin`（`npm run build` 也会执行）会直接报错，两份词典不会漂移。
+- 词条中可包含 `{placeholder}` 占位段（如 `{database}`、`{days}`、`{time}`），由 `t()` 用面板传入的值填充。
+
+## 6. 故障排查
 
 | 现象 | 原因 | 处理 |
 | ---- | ---- | ---- |
 | `/admin` 返回 404 | 未构建 admin 产物，或 `admin.enabled: false` | 构建 admin 工作区；启用 `admin` |
 | 页面能打开但静态资源 404 | 通过自定义代理访问时用了不带斜杠的 `/admin` | 使用 `/admin/`；保留 301 跳转 |
 | 访问根路径 `/` 返回 `E_NOT_FOUND: Unregistered route: /` | 旧版本服务端没有根路径跳转，或 `admin.enabled=false` | 升级到带根路径跳转的版本；关闭内建控制台时访问 `/admin/` 并自行提供静态站点 |
-| 控制台显示 `E_AUTH` / `401` | 设置中的令牌缺失或错误 | 重新填入令牌；检查 `rtdb.token` |
+| 控制台显示 `E_AUTH` / `401` | 未登录、令牌失效，或匿名访问需要凭据的端点 | 用 **Sign in** 登录；或粘贴有效令牌；检查 `rtdb.token` |
+| 登录返回 `401 E_AUTH` | 用户名 / 口令错误，或该实例的用户目录非空且无此用户 | 首启实例用 `admin` / `ss-rtdb`；其余用运维提供的账号 |
+| 忘记默认管理员口令 | 口令只存 scrypt 哈希，无法找回 | 用管理员令牌 `PUT /api/v1/admin/users/admin` 改密；或停服后删除 `rtdb-users.json` 再启动（空目录会重建默认管理员） |
 | 独立部署的控制台连不上 API | CORS 未开启，或来源未加入白名单 | 设置 `cors.allowedOrigins` 并重启 |
 | 访问控制面板返回 403 | 令牌角色不是 `admin` | 签发 `admin` 角色的令牌 |
 
-## 6. 下一步
+## 7. 下一步
 
 - [08 — 运维与维护](./08-operations.md)
 
@@ -111,3 +136,6 @@ npm run build --workspace @ss/rtdb-admin
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 补充根路径 `/` 302 跳转到 `/admin/` 的行为，并新增 `E_NOT_FOUND: Unregistered route: /` 排障条目 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增控制台登录说明（默认管理员 `admin` / `ss-rtdb`、Sign in / Sign out、令牌仍可手工粘贴）与两条登录排障条目 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 登录表单改为置顶并预填 `admin` / `ss-rtdb`；右上角恒显示 Sign in / Sign out 入口 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 控制台支持中英双语（默认英文，页头按钮切换，选择存 `localStorage`）；新增 §5「界面语言」并顺延后续小节编号 | DeepSeek-V4.1-Flash |

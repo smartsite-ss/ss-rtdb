@@ -193,7 +193,18 @@ export {
 
 /* ---------- Engine facade (§2.2) ---------- */
 export { MAX_AGGREGATE_WINDOWS, RETENTION_FILE_NAME, RtdbEngine } from './engine.ts';
-export type { BackupResult, EngineStats, MetricSummary, RestoreResult } from './engine.ts';
+export type {
+  BackupResult,
+  DatabaseMetricStats,
+  DatabaseRuntimeStats,
+  EngineStats,
+  MetricSummary,
+  RestoreResult,
+} from './engine.ts';
+
+/* ---------- On-disk measurement (management API + `rtdbctl size`) ---------- */
+export { measureDatabaseSize, readDatabaseRetentionDays } from './size.ts';
+export type { DatabaseSizeBreakdown, DatabaseSizeReport, DaySizeEntry } from './size.ts';
 
 /* ---------- Retention and operations (§2.9) ---------- */
 export {

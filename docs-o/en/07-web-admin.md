@@ -34,8 +34,16 @@ Default configuration already enables it:
 - Open <http://127.0.0.1:6180/admin/> — **the trailing slash matters**; `/admin` 301-redirects to
   `/admin/` so the relative asset URLs resolve. Visiting the bare origin `/` **302-redirects to
   `/admin/`** (the root path still returns 404 when `admin.enabled=false`).
-- No extra authentication: the console runs in your browser and sends your token with each API call
-  (it is the same REST API with the same scopes).
+- **Sign in** first: with `auth.enabled = true` (the default) the page shows a sign-in form — enter a user
+  name + password (`POST /api/v1/auth/login` trades them for an API token). A fresh instance creates the
+  default administrator `admin` / `ss-rtdb` (see [02 — Configuration](./02-configuration.md) §6.4); the form
+  is pre-filled with both, so a first sign-in is one click.
+- The top-right corner always carries the entry point: **Sign in** while anonymous (jumps to the form), and
+  the account (e.g. `admin · admin`) plus **Sign out** once signed in.
+- The browser stores only the token (`localStorage`); **the password is never stored**. Use
+  **Use an existing token** to paste a token issued elsewhere, and **Sign out** to revoke it.
+- No separate authentication layer: the console calls the same REST API and sends that token with each
+  request, with exactly the same scopes.
 
 To disable it (for example when you deploy the standalone form instead):
 
@@ -53,13 +61,13 @@ To serve your own build from another location:
 
 1. Build (`npm run build --workspace @ss/rtdb-admin`) and upload `packages/admin/dist/` to your static
    host (nginx, object storage with website hosting, …).
-2. Open the site and fill in **Settings**:
-   - **API base URL** — e.g. `https://rtdb.example.com`. Leave it **empty** to talk to the origin that
-     served the page (the bundled mode behaviour).
-   - **Access token** — a token with the scopes you need (`admin` for the Access control panel).
-3. Press **Test connection**, then **Save**. Settings are stored in the browser's local storage only —
-   never on the server — so each operator keeps their own credentials.
-4. On the server instance, allow the console's origin:
+2. Open the site and fill in **API base URL** — e.g. `https://rtdb.example.com`. Leave it **empty** to talk
+   to the origin that served the page (the bundled mode behaviour).
+3. **Sign in** with a user name + password, or press **Use an existing token** and paste a token issued
+   elsewhere (`admin` scope for the Access control panel).
+4. Press **Test connection** to confirm connectivity; the base URL and token are stored in the browser's
+   local storage only — never on the server — so each operator keeps their own credentials.
+5. On the server instance, allow the console's origin:
 
 ```json
 {
@@ -92,18 +100,41 @@ Status data comes from `GET /api/v1/status`; everything else mirrors the endpoin
 
 ---
 
-## 5. Troubleshooting
+## 5. Languages
+
+The console ships two locales and starts in **English**:
+
+| Locale | Coverage | Notes |
+| ------ | -------- | ----- |
+| `en` (default) | Every user-visible string | Source of truth for the key set (`packages/admin/src/locales/en.ts`) |
+| `zh` | Every user-visible string | Typed as `Record<MessageKey, string>` (`packages/admin/src/locales/zh.ts`), so a missing translation fails the build |
+
+- The header button shows `中文` while the UI is English and `EN` while it is Chinese; pressing it switches
+  the locale.
+- The choice is persisted in `localStorage` under `rtdbAdminLocale` and survives a reload; `<html lang>`
+  and the document title follow it.
+- Switching language is purely local: nothing is sent to the server, and already displayed notices are
+  re-rendered in the new language.
+- Adding UI text means adding the key to **both** dictionaries (AGENTS.md §4 rule 12). `npm run typecheck
+  --workspace @ss/rtdb-admin` (also part of `npm run build`) reports an English key that has no Chinese
+  counterpart, so the two dictionaries cannot drift.
+- Messages may contain `{placeholder}` segments (`{database}`, `{days}`, `{time}`, …) that `t()` fills from
+  the values passed by the panel.
+
+## 6. Troubleshooting
 
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
 | `/admin` returns 404 | Admin bundle not built, or `admin.enabled: false` | Build the admin workspace; enable `admin` |
 | Page loads but assets 404 | Opened `/admin` without the trailing slash from a custom proxy | Use `/admin/`; keep the 301 redirect |
 | Root `/` returns `E_NOT_FOUND: Unregistered route: /` | Older server without the root redirect, or `admin.enabled=false` | Upgrade to a build with the root redirect; with the bundled console disabled, open `/admin/` and serve your own static site |
-| Console shows `E_AUTH` / `401` | Missing or wrong token in Settings | Re-enter the token; check `rtdb.token` |
+| Console shows `E_AUTH` / `401` | Not signed in, token expired, or anonymous access to a protected endpoint | Sign in; paste a valid token; check `rtdb.token` |
+| Sign-in returns `401 E_AUTH` | Wrong user name / password, or the instance has a non-empty user directory without that user | Use `admin` / `ss-rtdb` on a fresh instance, otherwise the credentials your operator provisioned |
+| Default administrator password forgotten | Only the scrypt hash is stored, so it cannot be recovered | Change it with an admin token (`PUT /api/v1/admin/users/admin`), or stop the server, delete `rtdb-users.json` and restart (an empty directory recreates the default administrator) |
 | Standalone console cannot reach the API | CORS disabled, or the origin is not allow-listed | Set `cors.allowedOrigins` and restart |
 | Access control panel returns 403 | Token role is not `admin` | Issue an `admin`-role token |
 
-## 6. Next steps
+## 7. Next steps
 
 - [08 — Operations & maintenance](./08-operations.md)
 
@@ -115,3 +146,6 @@ Status data comes from `GET /api/v1/status`; everything else mirrors the endpoin
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Documented the root `/` 302 redirect to `/admin/` and added an `E_NOT_FOUND: Unregistered route: /` troubleshooting row | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Documented console sign-in (default administrator `admin` / `ss-rtdb`, Sign in / Sign out, pasting an existing token) and added two sign-in troubleshooting rows | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Sign-in form moved to the top and pre-filled with `admin` / `ss-rtdb`; the header always shows a Sign in / Sign out entry point | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Console internationalised (English default + Chinese) with a header language switch persisted in `localStorage`; added §5 "Languages" and renumbered the following sections | DeepSeek-V4.1-Flash |

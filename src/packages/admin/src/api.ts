@@ -84,6 +84,20 @@ export interface IssueTokenResult {
   tokenRecord: RtdbPublicToken;
 }
 
+/** `POST /api/v1/auth/login` result: the plaintext token is returned once, then kept by the browser only */
+export interface RtdbLoginResult {
+  token: string;
+  expiresAt: number | null;
+  user: { username: string; role: string };
+}
+
+/** `GET /api/v1/auth/session` result: who the current token belongs to and which scopes its role grants */
+export interface RtdbSessionInfo {
+  user: { username: string; role: string };
+  source: string;
+  scopes: string[];
+}
+
 /** Error raised for a non-2xx REST response; `status` / `code` mirror the §3.3 error table */
 export class RtdbAdminApiError extends Error {
   readonly status: number;
@@ -118,6 +132,24 @@ export class RtdbAdminApiClient {
   /** Liveness probe; useful as a connection test for a remote server */
   getHealth(): Promise<{ status: string }> {
     return this.request<{ status: string }>('GET', '/healthz');
+  }
+
+  /**
+   * `POST /api/v1/auth/login` — exchange a user name + password for an API token. Sent without the current
+   * `Authorization` header so a stale / invalid token cannot interfere with signing in.
+   */
+  login(username: string, password: string): Promise<RtdbLoginResult> {
+    return this.request<RtdbLoginResult>('POST', '/api/v1/auth/login', { username, password }, false);
+  }
+
+  /** `GET /api/v1/auth/session` — identity and scopes of the token currently in use */
+  getSession(): Promise<RtdbSessionInfo> {
+    return this.request<RtdbSessionInfo>('GET', '/api/v1/auth/session');
+  }
+
+  /** `POST /api/v1/auth/logout` — revoke the token in use (`revoked: false` for the static config token) */
+  logout(): Promise<{ ok: boolean; revoked: boolean }> {
+    return this.request<{ ok: boolean; revoked: boolean }>('POST', '/api/v1/auth/logout');
   }
 
   async listDatabases(): Promise<string[]> {
@@ -184,9 +216,14 @@ export class RtdbAdminApiClient {
     return null;
   }
 
-  private async request<TResponse>(method: string, path: string, body?: unknown): Promise<TResponse> {
+  private async request<TResponse>(
+    method: string,
+    path: string,
+    body?: unknown,
+    withAuth = true,
+  ): Promise<TResponse> {
     const headers: Record<string, string> = { Accept: 'application/json' };
-    if (this.accessToken.length > 0) headers.Authorization = `Bearer ${this.accessToken}`;
+    if (withAuth && this.accessToken.length > 0) headers.Authorization = `Bearer ${this.accessToken}`;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
     const response = await fetch(`${this.apiBaseUrl}${path}`, {

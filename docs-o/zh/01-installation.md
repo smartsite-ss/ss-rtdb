@@ -41,7 +41,7 @@ Node 在加载时剥离类型。只有以下场景才需要构建：
 | 包 | 输出 | 需要它的场景 |
 | -- | ---- | ------------ |
 | `@ss/rtdb-core` | `packages/core/dist/` | 发布引擎，或被其他包消费 |
-| `@ss/rtdb-client` | `packages/client-node/dist/` | 发布 Node SDK，或消费它 |
+| `@ss/rtdb-client` | `packages/demo/client-node/dist/` | 发布 Node SDK，或消费它 |
 | `@ss/rtdb-admin` | `packages/admin/dist/` | 在 `/admin` 提供的 Web 控制台 |
 
 ```bash
@@ -103,7 +103,7 @@ npm install @ss/rtdb-core
 
 ```bash
 npm install @ss/rtdb-client        # Node
-pip install ./packages/client-python   # Python；也可直接拷贝 ss_rtdb_client/ 包目录
+pip install ./packages/demo/client-python   # Python；也可直接拷贝 ss_rtdb_client/ 包目录
 ```
 
 两个 SDK 都是纯 HTTP 客户端，不接触数据目录，因此可以运行在完全独立的进程、容器或主机上。
@@ -113,7 +113,7 @@ pip install ./packages/client-python   # Python；也可直接拷贝 ss_rtdb_cli
 Python SDK **仅依赖标准库**（不用 `requests`，不用 `numpy`），支持 CPython ≥ 3.9。
 
 ```bash
-cd packages/client-python
+cd packages/demo/client-python
 pip install -e .                                  # 可编辑安装
 python -c "import ss_rtdb_client; print(ss_rtdb_client.__version__)"   # -> 0.1.0
 ```
@@ -132,3 +132,4 @@ python -c "import ss_rtdb_client; print(ss_rtdb_client.__version__)"   # -> 0.1.
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本；随英文版更新同步 §4 构建流程、§6 运行方式、§8 Python SDK 版本输出 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 更正客户端 SDK 路径为 `packages/demo/client-node`、`packages/demo/client-python`（产物目录表、`pip install`、`cd` 三处） | DeepSeek-V4.1-Flash |

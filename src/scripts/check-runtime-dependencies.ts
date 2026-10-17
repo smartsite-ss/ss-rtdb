@@ -11,7 +11,8 @@
  * `@ss/rtdb-admin` is build-time only (Vue3 + Vite): its Vite/Rollup/esbuild
  * toolchain lives in `devDependencies` and its output is static assets served
  * by rtdb-server, so it never reaches a production `node_modules`.
- * `packages/client-python` is a Python package (stdlib only, no npm install).
+ * `packages/demo/client-python` is a Python package (stdlib only, no npm install); the demo clients
+ * live under `packages/demo/*` (also npm workspaces) and must stay dependency-free as well.
  *
  * Assertions:
  *   1. the runtime closure declares zero third-party dependency (every
@@ -87,16 +88,25 @@ function readJsonIfExists(filePath: string): PackageManifest | null {
   }
 }
 
-/** 列出工作区包（`packages/*`，按目录名排序保证输出稳定） */
+/**
+ * 列出工作区包（`packages/*` 与 `packages/demo/*`，按包名排序保证输出稳定）。
+ * 与根 `package.json` 的 `workspaces` 保持一致：`demo` 目录本身没有 manifest 时继续下钻一层。
+ */
 function listWorkspacePackages(): WorkspacePackage[] {
   const packages: WorkspacePackage[] = [];
-  for (const entry of readdirSync(PACKAGES_DIRECTORY, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const directory = join(PACKAGES_DIRECTORY, entry.name);
-    const manifest = readJsonIfExists(join(directory, 'package.json'));
-    if (!manifest?.name) continue;
-    packages.push({ name: manifest.name, directory, manifest });
-  }
+  const visit = (directory: string, depth: number): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === 'node_modules') continue;
+      const child = join(directory, entry.name);
+      const manifest = readJsonIfExists(join(child, 'package.json'));
+      if (manifest?.name) {
+        packages.push({ name: manifest.name, directory: child, manifest });
+        continue;
+      }
+      if (depth < 2) visit(child, depth + 1);
+    }
+  };
+  visit(PACKAGES_DIRECTORY, 1);
   return packages.sort((left, right) => left.name.localeCompare(right.name));
 }
 

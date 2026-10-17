@@ -180,6 +180,20 @@ export class SegmentReader {
   }
 
   /**
+   * Read only a block header and return its value type (management statistics: avoids decoding the payload).
+   *
+   * Reads at most the fixed header plus a metric-name window, so the cost is one small read per metric rather
+   * than one block decode. Returns `null` when the header cannot be parsed (the caller then reports `unknown`).
+   */
+  readBlockValueType(descriptor: SegmentFileDescriptor, entry: SegmentBlockIndexEntry): ValueType | null {
+    const probeLength = Math.min(entry.length, BLOCK_HEADER_FIXED_SIZE + 1024);
+    if (probeLength <= 0) return null;
+    const bytes = this.store.readSegmentSlice(descriptor.segmentFilePath, entry.offset, probeLength);
+    const header = tryParseBlockHeader(bytes, 0, bytes.length);
+    return header === null ? null : header.valueType;
+  }
+
+  /**
    * Block location: index entries of the same metric are located by binary search on `timestampMin` + linear
    * tail (intersect blocks with the range); the result is ascending by time
    *

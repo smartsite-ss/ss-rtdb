@@ -15,6 +15,10 @@
 令牌可以是静态 `auth.token` / 自动生成的 `rtdb.token`（角色恒为 `admin`），
 也可以是通过 `/api/v1/admin/tokens` 签发的 API 令牌（角色 = 该令牌的角色）。
 
+没有令牌时，可用**用户名 + 口令**换取一个（`POST /api/v1/auth/login`，见 §7.3）。
+首次启动的服务会自动创建默认管理员 `admin` / `ss-rtdb`（可用 `auth.bootstrapUsername` /
+`auth.bootstrapPassword` 覆盖，见 [02 — 配置](./02-configuration.md) §6.4）。
+
 ### 权限域与角色
 
 | 权限域 | 端点 | `admin` | `write` | `readonly` |
@@ -86,6 +90,9 @@
 | `PUT` `DELETE` | `/api/v1/admin/users/:username` | admin | 更新 / 删除用户 |
 | `GET` `POST` | `/api/v1/admin/tokens` | admin | 列出 / 签发 API 令牌 |
 | `DELETE` | `/api/v1/admin/tokens/:tokenId` | admin | 吊销 API 令牌 |
+| `POST` | `/api/v1/auth/login` | none（需用户名 + 口令） | 换取 API 令牌 |
+| `GET` | `/api/v1/auth/session` | 任意有效凭据 | 当前凭据的身份与权限域 |
+| `POST` | `/api/v1/auth/logout` | 任意有效凭据 | 吊销当前 API 令牌 |
 | `GET` | `/admin/` | none | Web 控制台（静态资源） |
 | `GET` | `/` | none | 302 跳转到 `/admin/`；`admin.enabled=false` 时仍为 404 |
 
@@ -350,6 +357,30 @@ curl -X DELETE "http://127.0.0.1:6180/api/v1/admin/tokens/<tokenId>" \
 
 省略 `role` 时默认取所属用户的角色（或 `write`）；省略 `ttlMs` 表示永不过期。
 
+### 7.3 登录与会话
+
+登录端点本身不需要凭据：用用户目录中的用户名 + 口令换一个 API 令牌（明文只返回一次，之后按 Bearer 使用）。
+
+```bash
+curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"ss-rtdb"}'
+# {"token":"<64 位十六进制>","expiresAt":null,"user":{"username":"admin","role":"admin"}}
+```
+
+- `ttlMs` 可选；省略表示永不过期，与服务端 `POST /api/v1/admin/tokens` 一致。
+- 未知用户与错误口令返回同一个 `401 E_AUTH`（不泄露用户是否存在）；字段缺失返回 `400 E_INVALID_POINT`。
+
+```bash
+# 当前凭据是谁、具备哪些权限域
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/auth/session
+# {"user":{"username":"admin","role":"admin"},"source":"token","scopes":["query","write","admin"]}
+
+# 登出：吊销当前 API 令牌（静态 auth.token / Basic 凭据不可吊销，返回 revoked=false）
+curl -X POST http://127.0.0.1:6180/api/v1/auth/logout -H "Authorization: Bearer $TOKEN"
+# {"ok":true,"revoked":true}
+```
+
 ---
 
 ## 8. 可观测性端点（无需鉴权）
@@ -399,3 +430,4 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 端点索引补充根路径 `GET /` → 302 `/admin/`（`admin.enabled=false` 时仍为 404） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 写入字段说明明确 v0.1.0 仅接受 `quality = 0`，非 0 返回 `400 E_INVALID_POINT` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 §7.3「登录与会话」与端点索引三行：`POST /api/v1/auth/login`、`GET /api/v1/auth/session`、`POST /api/v1/auth/logout` | DeepSeek-V4.1-Flash |

@@ -44,7 +44,7 @@ required for:
 | Package | Output | Needed for |
 | ------- | ------ | ---------- |
 | `@ss/rtdb-core` | `packages/core/dist/` | publishing / consuming the engine from another package |
-| `@ss/rtdb-client` | `packages/client-node/dist/` | publishing / consuming the Node SDK |
+| `@ss/rtdb-client` | `packages/demo/client-node/dist/` | publishing / consuming the Node SDK |
 | `@ss/rtdb-admin` | `packages/admin/dist/` | the Web console served at `/admin` |
 
 ```bash
@@ -106,7 +106,7 @@ npm install @ss/rtdb-core
 
 ```bash
 npm install @ss/rtdb-client        # Node
-pip install ./packages/client-python   # Python, or copy the ss_rtdb_client/ package
+pip install ./packages/demo/client-python   # Python, or copy the ss_rtdb_client/ package
 ```
 
 Both SDKs are pure HTTP and never touch the data directory, so they can live in a completely separate
@@ -117,7 +117,7 @@ process, container or host.
 The Python SDK is **stdlib-only** (no `requests`, no `numpy`) and works on CPython ≥ 3.9.
 
 ```bash
-cd packages/client-python
+cd packages/demo/client-python
 pip install -e .                                  # editable install
 python -c "import ss_rtdb_client; print(ss_rtdb_client.__version__)"   # -> 0.1.0
 ```
@@ -137,3 +137,4 @@ has no runtime dependencies).
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Corrected client SDK paths to `packages/demo/client-node` and `packages/demo/client-python` (artifact table, `pip install`, `cd`) | DeepSeek-V4.1-Flash |

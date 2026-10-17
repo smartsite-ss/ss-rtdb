@@ -16,7 +16,7 @@ REM   bin\demo-smart-site.bat run [client options]     Forward any client option
 REM
 REM Examples:
 REM   bin\demo-smart-site.bat list
-REM   bin\demo-smart-site.bat once --token-file ..\release\sea\rtdb.token
+REM   bin\demo-smart-site.bat once --token-file rtdb.token
 REM   bin\demo-smart-site.bat stream 60 --glitch-rate 0.002 --token-file ..\release\sea\rtdb.token
 REM   bin\demo-smart-site.bat run --devices hvac-chiller --interval 500 --duration 10 --verify
 REM   bin\demo-smart-site.bat run --help

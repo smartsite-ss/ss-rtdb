@@ -12,6 +12,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import type { RtdbAdminApiClient, RtdbStatusReport } from '../api';
 import { useAsyncAction } from '../async';
 import { formatBytes, formatDateTime, formatDuration, formatNumber, formatPercent } from '../format';
+import { t } from '../i18n';
 
 const props = defineProps<{ client: RtdbAdminApiClient }>();
 
@@ -32,34 +33,42 @@ const stats = computed<StatEntry[]>(() => {
   const report = statusReport.value;
   if (report === null) return [];
   return [
-    { label: 'Uptime', value: formatDuration(report.uptimeMs) },
-    { label: 'Databases', value: formatNumber(report.databases) },
-    { label: 'Metrics', value: formatNumber(report.metrics) },
-    { label: 'Write throughput', value: formatNumber(report.write.pointsPerSec), unit: 'points/s' },
-    { label: 'Buffered points', value: formatNumber(report.write.buffered) },
-    { label: 'Duplicate points', value: formatNumber(report.write.duplicates) },
-    { label: 'Ignored line-protocol tags', value: formatNumber(report.write.tagsIgnored) },
-    { label: 'WAL pending bytes', value: formatNumber(report.wal.pendingBytes), unit: 'B' },
-    { label: 'WAL outstanding batches', value: formatNumber(report.wal.outstandingBatches) },
-    { label: 'WAL pending points', value: formatNumber(report.wal.pendingPoints) },
+    { label: t('status.label.uptime'), value: formatDuration(report.uptimeMs) },
+    { label: t('status.label.databases'), value: formatNumber(report.databases) },
+    { label: t('status.label.metrics'), value: formatNumber(report.metrics) },
     {
-      label: 'Last fsync',
-      value: report.wal.lastFsyncMs === 0 ? 'not yet' : formatDateTime(report.wal.lastFsyncMs),
+      label: t('status.label.writeThroughput'),
+      value: formatNumber(report.write.pointsPerSec),
+      unit: t('status.unit.pointsPerSecond'),
     },
-    { label: 'Open segment files', value: formatNumber(report.segments.openFiles) },
-    { label: 'Bytes written today', value: formatBytes(report.segments.bytesToday) },
-    { label: 'Decoded cache blocks', value: formatNumber(report.cache.blocks) },
-    { label: 'Cache hit rate', value: formatPercent(report.cache.blockHitRate) },
-    { label: 'Heap used', value: formatNumber(report.cache.heapUsedMb), unit: 'MiB' },
-    { label: 'External memory', value: formatNumber(report.cache.externalMb), unit: 'MiB' },
-    { label: 'GC cycles', value: formatNumber(report.gc.count) },
-    { label: 'GC pause total', value: formatNumber(report.gc.totalMs), unit: 'ms' },
-    { label: 'GC longest pause', value: formatNumber(report.gc.maxMs), unit: 'ms' },
-    { label: 'Successful queries', value: formatNumber(report.query.count) },
-    { label: 'Query latency p50', value: formatNumber(report.query.p50Ms), unit: 'ms' },
-    { label: 'Query latency p95', value: formatNumber(report.query.p95Ms), unit: 'ms' },
-    { label: 'Query latency p99', value: formatNumber(report.query.p99Ms), unit: 'ms' },
-    { label: 'Query latency max', value: formatNumber(report.query.maxMs), unit: 'ms' },
+    { label: t('status.label.bufferedPoints'), value: formatNumber(report.write.buffered) },
+    { label: t('status.label.duplicatePoints'), value: formatNumber(report.write.duplicates) },
+    { label: t('status.label.tagsIgnored'), value: formatNumber(report.write.tagsIgnored) },
+    { label: t('status.label.walPendingBytes'), value: formatNumber(report.wal.pendingBytes), unit: t('status.unit.bytes') },
+    { label: t('status.label.walOutstandingBatches'), value: formatNumber(report.wal.outstandingBatches) },
+    { label: t('status.label.walPendingPoints'), value: formatNumber(report.wal.pendingPoints) },
+    {
+      label: t('status.label.lastFsync'),
+      value: report.wal.lastFsyncMs === 0 ? t('status.notYet') : formatDateTime(report.wal.lastFsyncMs),
+    },
+    { label: t('status.label.openSegments'), value: formatNumber(report.segments.openFiles) },
+    { label: t('status.label.bytesToday'), value: formatBytes(report.segments.bytesToday) },
+    { label: t('status.label.cacheBlocks'), value: formatNumber(report.cache.blocks) },
+    { label: t('status.label.cacheHitRate'), value: formatPercent(report.cache.blockHitRate) },
+    { label: t('status.label.heapUsed'), value: formatNumber(report.cache.heapUsedMb), unit: t('status.unit.mib') },
+    {
+      label: t('status.label.externalMemory'),
+      value: formatNumber(report.cache.externalMb),
+      unit: t('status.unit.mib'),
+    },
+    { label: t('status.label.gcCycles'), value: formatNumber(report.gc.count) },
+    { label: t('status.label.gcPauseTotal'), value: formatNumber(report.gc.totalMs), unit: t('status.unit.ms') },
+    { label: t('status.label.gcPauseMax'), value: formatNumber(report.gc.maxMs), unit: t('status.unit.ms') },
+    { label: t('status.label.queryCount'), value: formatNumber(report.query.count) },
+    { label: t('status.label.queryP50'), value: formatNumber(report.query.p50Ms), unit: t('status.unit.ms') },
+    { label: t('status.label.queryP95'), value: formatNumber(report.query.p95Ms), unit: t('status.unit.ms') },
+    { label: t('status.label.queryP99'), value: formatNumber(report.query.p99Ms), unit: t('status.unit.ms') },
+    { label: t('status.label.queryMax'), value: formatNumber(report.query.maxMs), unit: t('status.unit.ms') },
   ];
 });
 
@@ -107,18 +116,20 @@ watch(
 <template>
   <section class="panel">
     <div class="card-title">
-      <span>Status</span>
-      <span class="card-title-note">GET /api/v1/status · {{ busy ? 'refreshing…' : 'idle' }}</span>
+      <span>{{ t('status.title') }}</span>
+      <span class="card-title-note">
+        {{ t('status.note', { state: busy ? t('status.refreshing') : t('status.idle') }) }}
+      </span>
     </div>
 
     <div class="toolbar">
-      <button :disabled="busy" @click="refresh">Refresh now</button>
+      <button :disabled="busy" @click="refresh">{{ t('status.refresh') }}</button>
       <label class="toolbar-note">
         <input v-model="autoRefresh" type="checkbox" />
-        Auto refresh every 5s
+        {{ t('status.autoRefresh') }}
       </label>
       <span v-if="statusReport !== null" class="toolbar-note">
-        Last sampled: {{ formatDateTime(Date.now()) }}
+        {{ t('status.lastSampled', { time: formatDateTime(Date.now()) }) }}
       </span>
     </div>
 
@@ -132,6 +143,6 @@ watch(
         </div>
       </div>
     </div>
-    <p v-else class="empty-hint">Waiting for the first status sample…</p>
+    <p v-else class="empty-hint">{{ t('status.waiting') }}</p>
   </section>
 </template>

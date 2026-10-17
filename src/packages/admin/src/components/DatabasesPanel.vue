@@ -17,6 +17,7 @@
 import { onMounted, ref, watch } from 'vue';
 import type { RtdbAdminApiClient } from '../api';
 import { useAsyncAction } from '../async';
+import { t } from '../i18n';
 
 const props = defineProps<{ client: RtdbAdminApiClient }>();
 
@@ -39,10 +40,10 @@ async function applyRetention(database: string): Promise<void> {
   const days = Number((retentionDraft.value[database] ?? '').trim());
   await run(async () => {
     if (!Number.isInteger(days) || days <= 0) {
-      throw new Error('Retention days must be a positive integer.');
+      throw new Error(t('databases.error.retentionPositive'));
     }
     await props.client.setRetentionDays(database, days);
-  }, `Retention of "${database}" is now ${days} day(s).`);
+  }, t('databases.success.retention', { database, days }));
 }
 
 onMounted(() => {
@@ -61,13 +62,13 @@ watch(
   <section class="panel">
     <div class="card">
       <div class="card-title">
-        <span>Databases</span>
-        <span class="card-title-note">GET /api/v1/databases · PUT /api/v1/retention/{database}</span>
+        <span>{{ t('databases.title') }}</span>
+        <span class="card-title-note">{{ t('databases.note') }}</span>
       </div>
 
       <div class="toolbar">
-        <button :disabled="busy" @click="loadDatabases">Reload</button>
-        <span class="toolbar-note">The retention policy cannot be read back: the protocol only exposes a write.</span>
+        <button :disabled="busy" @click="loadDatabases">{{ t('databases.reload') }}</button>
+        <span class="toolbar-note">{{ t('databases.writeOnlyHint') }}</span>
       </div>
 
       <p v-if="errorMessage.length > 0" class="alert error">{{ errorMessage }}</p>
@@ -77,8 +78,8 @@ watch(
         <table class="data-table">
           <thead>
             <tr>
-              <th>Database</th>
-              <th>Retention days (write-only)</th>
+              <th>{{ t('databases.column.database') }}</th>
+              <th>{{ t('databases.column.retention') }}</th>
               <th />
             </tr>
           </thead>
@@ -91,19 +92,21 @@ watch(
                   type="number"
                   min="1"
                   step="1"
-                  placeholder="e.g. 30"
+                  :placeholder="t('databases.retentionPlaceholder')"
                   style="width: 120px"
                   :disabled="busy"
                 />
               </td>
               <td>
-                <button class="small" :disabled="busy" @click="applyRetention(database)">Apply</button>
+                <button class="small" :disabled="busy" @click="applyRetention(database)">
+                  {{ t('databases.apply') }}
+                </button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p v-else class="empty-hint">No database reported. Create one by writing at least one point.</p>
+      <p v-else class="empty-hint">{{ t('databases.empty') }}</p>
     </div>
   </section>
 </template>

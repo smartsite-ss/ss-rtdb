@@ -5,8 +5,8 @@ different process, container or host from the database, and they have **zero run
 
 | SDK | Package | Language | Notes |
 | --- | ------- | -------- | ----- |
-| `@ss/rtdb-client` | `packages/client-node` | TypeScript / JavaScript (Node ≥ 24) | Full surface incl. admin (users & tokens) |
-| `ss-rtdb-client` | `packages/client-python` | Python ≥ 3.9 | Data plane + `status` + Line Protocol helper |
+| `@ss/rtdb-client` | `packages/demo/client-node` | TypeScript / JavaScript (Node ≥ 24) | Full surface incl. admin (users & tokens) |
+| `ss-rtdb-client` | `packages/demo/client-python` | Python ≥ 3.9 | Data plane + `status` + Line Protocol helper |
 
 The two SDKs are contract-identical for the six data methods; the three deliberate runtime differences
 are listed in §2.6.
@@ -43,7 +43,7 @@ npm install @ss/rtdb-client
 Or, inside this repository, import the workspace source directly:
 
 ```ts
-import { RtdbClient } from './packages/client-node/src/index.ts';
+import { RtdbClient } from './packages/demo/client-node/src/index.ts';
 ```
 
 ### 1.2 Construct
@@ -155,8 +155,8 @@ try {
 ### 2.1 Install
 
 ```bash
-pip install ./packages/client-python     # from a checkout
-pip install -e ./packages/client-python  # editable / development
+pip install ./packages/demo/client-python     # from a checkout
+pip install -e ./packages/demo/client-python  # editable / development
 ```
 
 Stdlib only (`urllib`), Python ≥ 3.9, zero runtime dependencies.
@@ -271,3 +271,4 @@ Same retry policy as the Node SDK: only `429` and transport failures are retried
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Corrected SDK directories to `packages/demo/client-node` / `packages/demo/client-python` (workspace source import path and `pip install` commands) | DeepSeek-V4.1-Flash |

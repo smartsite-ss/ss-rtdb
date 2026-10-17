@@ -50,6 +50,12 @@ const ADMIN_USERS_PATH = '/api/v1/admin/users';
 const ADMIN_USERS_PREFIX = '/api/v1/admin/users/';
 const ADMIN_TOKENS_PATH = '/api/v1/admin/tokens';
 const ADMIN_TOKENS_PREFIX = '/api/v1/admin/tokens/';
+/** Sign-in surface (§3.2): exchange a user name + password for an API token, inspect / revoke it */
+const AUTH_LOGIN_PATH = '/api/v1/auth/login';
+const AUTH_LOGOUT_PATH = '/api/v1/auth/logout';
+const AUTH_SESSION_PATH = '/api/v1/auth/session';
+/** Scopes reported by `GET /api/v1/auth/session`, in a stable order */
+const SESSION_SCOPES: readonly AuthScope[] = ['query', 'write', 'admin'];
 const METRICS_PREFIX = '/api/v1/metrics/';
 /** Prometheus scrape endpoint (§3.4 exposition, S14); always exempt from authentication */
 const PROMETHEUS_METRICS_PATH = '/metrics';
@@ -134,6 +140,7 @@ export class RtdbServer {
     this.userStore = this.buildUserStore();
     this.tokenStore = this.buildTokenStore();
     this.auth = this.buildAuthVerifier();
+    this.ensureBootstrapUser();
 
     const server = createServer((request, response) => {
       void this.handle(request, response);
@@ -246,6 +253,31 @@ export class RtdbServer {
     });
   }
 
+  /**
+   * Create the bootstrap administrator when the user directory is **empty** and authentication is enabled, so a
+   * fresh instance can be signed into with a user name + password right away (`auth.bootstrapUsername` /
+   * `auth.bootstrapPassword`, defaults `admin` / `ss-rtdb`). An existing directory is never touched, and an
+   * empty bootstrap user name or password simply disables the bootstrap.
+   */
+  private ensureBootstrapUser(): void {
+    const auth = this.config.auth;
+    const store = this.requireUserStore();
+    if (!auth.enabled || store.count() > 0) return;
+    const username = auth.bootstrapUsername.trim();
+    const password = auth.bootstrapPassword;
+    if (username.length === 0 || password.length === 0) return;
+    if (!USER_NAME_PATTERN.test(username)) {
+      this.logger.warn(
+        `auth.bootstrapUsername is not a valid user name; the default administrator was not created: ${username}`,
+      );
+      return;
+    }
+    store.create({ username, password, role: USER_ROLE.Admin });
+    this.logger.warn(
+      `User directory was empty: created the default administrator "${username}" (change its password after signing in)`,
+    );
+  }
+
   /* ---------- Request dispatch ---------- */
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -301,6 +333,21 @@ export class RtdbServer {
     if (pathname === '/api/v1/databases') {
       if (method !== 'GET') throw methodNotAllowed('GET');
       await this.handleDatabases(request, response);
+      return;
+    }
+    if (pathname === AUTH_LOGIN_PATH) {
+      if (method !== 'POST') throw methodNotAllowed('POST');
+      await this.handleAuthLogin(request, response);
+      return;
+    }
+    if (pathname === AUTH_LOGOUT_PATH) {
+      if (method !== 'POST') throw methodNotAllowed('POST');
+      await this.handleAuthLogout(request, response);
+      return;
+    }
+    if (pathname === AUTH_SESSION_PATH) {
+      if (method !== 'GET') throw methodNotAllowed('GET');
+      this.handleAuthSession(request, response);
       return;
     }
     if (pathname === '/api/v1/write') {
@@ -700,6 +747,73 @@ export class RtdbServer {
     return this.tokenStore;
   }
 
+  private requireAuthVerifier(): AuthVerifier {
+    if (this.auth === null) throw new RtdbError(ERROR_CODE.Internal, 'Authenticator not initialized');
+    return this.auth;
+  }
+
+  /* ---------- Sign-in: user name + password → API token (§3.2) ---------- */
+
+  /**
+   * `POST /api/v1/auth/login` — verify `{ username, password }` against the user directory and issue an API
+   * token carrying that user's role. The plaintext token is returned exactly once (only its hash is persisted),
+   * so the caller keeps it and sends `Authorization: Bearer <token>` afterwards. `ttlMs` is optional; without it
+   * the token never expires (same rule as `POST /api/v1/admin/tokens`).
+   */
+  private async handleAuthLogin(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'auth/login'), 'auth/login');
+    const username = requireNonEmptyString(body.username, 'username');
+    const password = requireNonEmptyString(body.password, 'password');
+    const ttlMs =
+      body.ttlMs === undefined || body.ttlMs === null ? null : requirePositiveIntegerField(body.ttlMs, 'ttlMs');
+    const user = this.requireUserStore().verify(username, password);
+    if (user === null) {
+      // One message for "unknown user" and "wrong password" so the endpoint cannot be used to enumerate users.
+      throw new RtdbError(ERROR_CODE.Auth, 'Invalid user name or password');
+    }
+    const issued = this.requireTokenStore().issue({
+      user: user.username,
+      role: user.role,
+      label: 'console login',
+      ttlMs,
+    });
+    this.sendJson(response, 200, {
+      token: issued.token,
+      expiresAt: issued.record.expiresAt,
+      user: { username: user.username, role: user.role },
+    });
+  }
+
+  /** `GET /api/v1/auth/session` — who the presented credential belongs to, plus the scopes its role grants. */
+  private handleAuthSession(request: IncomingMessage, response: ServerResponse): void {
+    const auth = this.requireAuthVerifier();
+    const principal = auth.authenticate(request.headers);
+    if (principal === null) throw new RtdbError(ERROR_CODE.Auth, 'Authentication failed (scope=session)');
+    this.sendJson(response, 200, {
+      user: { username: principal.username, role: principal.role },
+      source: principal.source,
+      scopes: SESSION_SCOPES.filter((scope) => auth.roleAllows(principal.role, scope)),
+    });
+  }
+
+  /**
+   * `POST /api/v1/auth/logout` — revoke the presented API token. The static `auth.token` and the configured
+   * basic credentials are not revocable, so they report `revoked: false` instead of failing.
+   */
+  private handleAuthLogout(request: IncomingMessage, response: ServerResponse): void {
+    const auth = this.requireAuthVerifier();
+    const principal = auth.authenticate(request.headers);
+    if (principal === null) throw new RtdbError(ERROR_CODE.Auth, 'Authentication failed (scope=session)');
+    let revoked = false;
+    const credential = readBearerCredential(request);
+    if (principal.source === 'token' && credential !== null) {
+      const store = this.requireTokenStore();
+      const record = store.resolve(credential);
+      if (record !== null) revoked = store.revoke(record.tokenId);
+    }
+    this.sendJson(response, 200, { ok: true, revoked });
+  }
+
   private async handleAdmin(pathname: string, response: ServerResponse): Promise<void> {
     if (!this.config.admin.enabled) throw routeNotFound(pathname);
     const rootDirectory = this.resolveAdminRoot();
@@ -853,6 +967,17 @@ function requireDatabaseName(value: string | null): string {
 
 function readOptionalString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+/** Bearer credential of a request; `null` when the header is absent or uses another scheme */
+function readBearerCredential(request: IncomingMessage): string | null {
+  const header = request.headers.authorization;
+  const raw = typeof header === 'string' ? header : Array.isArray(header) ? (header[0] ?? '') : '';
+  const spaceIndex = raw.indexOf(' ');
+  if (spaceIndex < 0) return null;
+  if (raw.slice(0, spaceIndex).trim().toLowerCase() !== 'bearer') return null;
+  const credential = raw.slice(spaceIndex + 1).trim();
+  return credential.length === 0 ? null : credential;
 }
 
 function requireMetricName(value: unknown): string {

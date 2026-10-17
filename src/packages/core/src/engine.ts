@@ -169,6 +169,36 @@ export interface MetricSummary {
   lastTs: number;
 }
 
+/** Per-metric index statistics (management API; aggregated from `.idx`/rebuilt indexes, no payload decode) */
+export interface DatabaseMetricStats {
+  metricName: string;
+  /** Earliest timestamp (ms epoch); `0` when the metric only exists in the unflushed write buffer */
+  firstTs: number;
+  /** Latest timestamp (ms epoch); `0` when the metric only exists in the unflushed write buffer */
+  lastTs: number;
+  /** Value type locked by the first write; `null` when no block could be probed (buffered-only metric) */
+  valueType: ValueType | null;
+  /** Stored points (sum of index entry point counts; excludes the unflushed buffer) */
+  points: number;
+  /** Block count (index entries) */
+  blocks: number;
+  /** Whole-block byte count (index entry lengths) */
+  bytes: number;
+}
+
+/** Per-database runtime snapshot used by the management console (`GET /api/v1/databases/{db}`) */
+export interface DatabaseRuntimeStats {
+  /** Ascending by metric name */
+  metrics: DatabaseMetricStats[];
+  /** Sum of `metrics[].points` */
+  points: number;
+  range: { firstTs: number | null; lastTs: number | null };
+  segments: { count: number; sealed: number; active: number };
+  wal: { pendingBytes: number; outstandingBatches: number };
+  /** Database override (`days`) and the effective policy (`days ?? global default`); `0` = keep forever */
+  retention: { days: number | null; effectiveDays: number };
+}
+
 /** Backup result (`backup` output, §2.9) */
 export interface BackupResult {
   database: string;
@@ -575,6 +605,43 @@ export class RtdbEngine {
     this.store.ensureDatabase(database);
     this.writeRetentionFile(database, clamped);
     this.retentionByDatabase.set(database, clamped);
+  }
+
+  /**
+   * Per-database index/WAL/retention snapshot for the management console.
+   *
+   * Cost: O(segments + index entries); no block payload is decoded (the value type is probed from the first
+   * block header of each metric). Disk footprint is measured separately by `measureDatabaseSize` (core/size.ts).
+   */
+  async databaseStats(database: string): Promise<DatabaseRuntimeStats> {
+    this.requireOpen();
+    const metrics = this.databaseMetricStatsSync(database);
+
+    let points = 0;
+    let firstTs: number | null = null;
+    let lastTs: number | null = null;
+    for (const metric of metrics) {
+      points += metric.points;
+      if (metric.points === 0) continue;
+      if (firstTs === null || metric.firstTs < firstTs) firstTs = metric.firstTs;
+      if (lastTs === null || metric.lastTs > lastTs) lastTs = metric.lastTs;
+    }
+
+    const descriptors = this.reader.listSegments(database);
+    const sealed = descriptors.filter((descriptor) => descriptor.sealed).length;
+    const context = this.contexts.get(database);
+    const override = this.retentionByDatabase.get(database) ?? null;
+    return {
+      metrics,
+      points,
+      range: { firstTs, lastTs },
+      segments: { count: descriptors.length, sealed, active: descriptors.length - sealed },
+      wal: {
+        pendingBytes: context === undefined ? 0 : context.wal.pendingBytes,
+        outstandingBatches: context === undefined ? 0 : context.wal.outstandingBatches.length,
+      },
+      retention: { days: override, effectiveDays: override ?? this.retentionDays },
+    };
   }
 
   /* ---------- Status instrumentation (§3.4) ---------- */
@@ -1130,6 +1197,60 @@ export class RtdbEngine {
     const names = new Set(this.store.listDatabases());
     for (const database of this.contexts.keys()) names.add(database);
     return [...names].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  }
+
+  /**
+   * Aggregate per-metric statistics from the segment indexes (mirror `.idx` when present, otherwise a rebuilt
+   * scan of the block region), plus metrics that currently exist only in the unflushed buffer.
+   */
+  private databaseMetricStatsSync(database: string): DatabaseMetricStats[] {
+    const byMetric = new Map<string, DatabaseMetricStats>();
+    for (const descriptor of this.reader.listSegments(database)) {
+      const entries = this.reader.loadIndexEntries(database, descriptor.dateNumber, descriptor.sequence);
+      for (const entry of entries) {
+        let stats = byMetric.get(entry.metricName);
+        if (stats === undefined) {
+          stats = {
+            metricName: entry.metricName,
+            firstTs: entry.timestampMin,
+            lastTs: entry.timestampMax,
+            valueType: null,
+            points: 0,
+            blocks: 0,
+            bytes: 0,
+          };
+          byMetric.set(entry.metricName, stats);
+        }
+        stats.points += entry.pointCount;
+        stats.blocks += 1;
+        stats.bytes += entry.length;
+        if (entry.timestampMin < stats.firstTs) stats.firstTs = entry.timestampMin;
+        if (entry.timestampMax > stats.lastTs) stats.lastTs = entry.timestampMax;
+        if (stats.valueType === null) stats.valueType = this.reader.readBlockValueType(descriptor, entry);
+      }
+    }
+
+    // A metric written but not flushed yet has no index entry; still list it so the console does not "lose" it
+    // for a few seconds (counts stay 0 until the block lands).
+    const context = this.contexts.get(database);
+    if (context !== undefined) {
+      for (const metricName of context.writer.bufferedMetricNames()) {
+        if (byMetric.has(metricName)) continue;
+        byMetric.set(metricName, {
+          metricName,
+          firstTs: 0,
+          lastTs: 0,
+          valueType: null,
+          points: 0,
+          blocks: 0,
+          bytes: 0,
+        });
+      }
+    }
+
+    return [...byMetric.values()].sort((left, right) =>
+      left.metricName < right.metricName ? -1 : left.metricName > right.metricName ? 1 : 0,
+    );
   }
 
   private listMetricsSync(database: string): MetricSummary[] {

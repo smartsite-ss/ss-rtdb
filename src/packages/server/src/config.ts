@@ -30,6 +30,13 @@ export interface AuthConfig {
   username: string;
   password: string;
   passwordHash: string;
+  /**
+   * Bootstrap administrator created at startup **only when the user directory is empty** (first start), so a
+   * fresh instance can be signed into with a user name + password; an empty value disables the bootstrap.
+   */
+  bootstrapUsername: string;
+  /** Password of the bootstrap administrator (hashed on creation, never stored in plaintext); empty disables it */
+  bootstrapPassword: string;
   write: boolean;
   query: boolean;
   /** Multi-user directory JSON path; empty = `{dataDir}/rtdb-users.json` (§3.2) */
@@ -42,6 +49,14 @@ export interface AdminConfig {
   enabled: boolean;
   /** Empty = bundled `packages/admin/dist` */
   staticDir: string;
+  /**
+   * Expose absolute server paths (`directory`) in `GET /api/v1/databases/{db}`.
+   *
+   * On for the default single-tenant deployment (the field is what makes the console usable for locating
+   * data); turn it off when the API is exposed to users who must not learn the server layout — the endpoint
+   * then reports `{dataDir}/{db}` instead of the resolved absolute path.
+   */
+  exposePaths: boolean;
 }
 
 export interface CorsConfig {
@@ -118,12 +133,14 @@ export const SERVER_CONFIG_DEFAULTS: ServerConfig = {
     username: 'admin',
     password: '',
     passwordHash: '',
+    bootstrapUsername: 'admin',
+    bootstrapPassword: 'ss-rtdb',
     write: true,
     query: true,
     usersFile: '',
     tokensFile: '',
   },
-  admin: { enabled: true, staticDir: '' },
+  admin: { enabled: true, staticDir: '', exposePaths: true },
   cors: { allowedOrigins: [] },
   write: {
     walEnabled: true,
@@ -193,9 +210,12 @@ function applyEnvironment(raw: JsonObject, env: NodeJS.ProcessEnv): void {
   setStringAt(raw, ['auth', 'token'], env.RTDB_TOKEN);
   setStringAt(raw, ['auth', 'username'], env.RTDB_AUTH_USERNAME);
   setStringAt(raw, ['auth', 'password'], env.RTDB_AUTH_PASSWORD);
+  setStringAt(raw, ['auth', 'bootstrapUsername'], env.RTDB_AUTH_BOOTSTRAP_USERNAME);
+  setStringAt(raw, ['auth', 'bootstrapPassword'], env.RTDB_AUTH_BOOTSTRAP_PASSWORD);
   setStringAt(raw, ['auth', 'usersFile'], env.RTDB_AUTH_USERS_FILE);
   setStringAt(raw, ['auth', 'tokensFile'], env.RTDB_AUTH_TOKENS_FILE);
   setBooleanAt(raw, ['admin', 'enabled'], env.RTDB_ADMIN_ENABLED);
+  setBooleanAt(raw, ['admin', 'exposePaths'], env.RTDB_ADMIN_EXPOSE_PATHS);
   setStringListAt(raw, ['cors', 'allowedOrigins'], env.RTDB_CORS_ALLOWED_ORIGINS);
   if (env.RTDB_LOG_LEVEL !== undefined && isLogLevel(env.RTDB_LOG_LEVEL)) {
     setAtPath(raw, ['log', 'level'], env.RTDB_LOG_LEVEL);
@@ -232,6 +252,8 @@ function normalizeServerConfig(raw: JsonObject): ServerConfig {
       username: asString(auth.username, defaults.auth.username),
       password: asString(auth.password, defaults.auth.password),
       passwordHash: asString(auth.passwordHash, defaults.auth.passwordHash),
+      bootstrapUsername: asString(auth.bootstrapUsername, defaults.auth.bootstrapUsername),
+      bootstrapPassword: asString(auth.bootstrapPassword, defaults.auth.bootstrapPassword),
       write: asBoolean(auth.write, defaults.auth.write),
       query: asBoolean(auth.query, defaults.auth.query),
       usersFile: asString(auth.usersFile, defaults.auth.usersFile),
@@ -240,6 +262,7 @@ function normalizeServerConfig(raw: JsonObject): ServerConfig {
     admin: {
       enabled: asBoolean(admin.enabled, defaults.admin.enabled),
       staticDir: asString(admin.staticDir, defaults.admin.staticDir),
+      exposePaths: asBoolean(admin.exposePaths, defaults.admin.exposePaths),
     },
     cors: { allowedOrigins: asStringList(cors.allowedOrigins, defaults.cors.allowedOrigins) },
     write: {

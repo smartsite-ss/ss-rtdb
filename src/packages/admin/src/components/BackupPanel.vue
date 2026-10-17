@@ -17,6 +17,7 @@ import { onMounted, ref, watch } from 'vue';
 import type { RtdbAdminApiClient, RtdbBackupResult } from '../api';
 import { useAsyncAction } from '../async';
 import { formatBytes, formatNumber } from '../format';
+import { t } from '../i18n';
 
 const props = defineProps<{ client: RtdbAdminApiClient }>();
 
@@ -39,10 +40,10 @@ async function startBackup(): Promise<void> {
   const database = selectedDatabase.value;
   const target = targetDirectory.value.trim();
   const result = await run(async () => {
-    if (database.length === 0) throw new Error('Select a database first.');
-    if (target.length === 0) throw new Error('Enter a target directory; the server requires a non-empty targetDir.');
+    if (database.length === 0) throw new Error(t('backup.error.selectDatabase'));
+    if (target.length === 0) throw new Error(t('backup.error.targetRequired'));
     return props.client.backup(database, target);
-  }, 'Backup finished.');
+  }, t('backup.success.done'));
   if (result !== undefined) backupResult.value = result;
 }
 
@@ -63,23 +64,28 @@ watch(
   <section class="panel">
     <div class="card">
       <div class="card-title">
-        <span>Backup</span>
+        <span>{{ t('backup.title') }}</span>
         <span class="card-title-note">POST /api/v1/backup/{database}</span>
       </div>
 
       <div class="toolbar">
         <div class="field">
-          <label class="field-label">Database</label>
+          <label class="field-label">{{ t('backup.database') }}</label>
           <select v-model="selectedDatabase" :disabled="busy">
             <option v-for="database in databases" :key="database" :value="database">{{ database }}</option>
           </select>
         </div>
         <div class="field field-wide">
-          <label class="field-label">Target directory (server-side path)</label>
-          <input v-model="targetDirectory" type="text" placeholder="/var/backups/ss-rtdb" :disabled="busy" />
+          <label class="field-label">{{ t('backup.target') }}</label>
+          <input
+            v-model="targetDirectory"
+            type="text"
+            :placeholder="t('backup.targetPlaceholder')"
+            :disabled="busy"
+          />
         </div>
-        <button class="primary" :disabled="busy" @click="startBackup">Start backup</button>
-        <button :disabled="busy" @click="loadDatabases">Reload databases</button>
+        <button class="primary" :disabled="busy" @click="startBackup">{{ t('backup.start') }}</button>
+        <button :disabled="busy" @click="loadDatabases">{{ t('backup.reload') }}</button>
       </div>
 
       <p v-if="errorMessage.length > 0" class="alert error">{{ errorMessage }}</p>
@@ -88,25 +94,25 @@ watch(
 
     <div v-if="backupResult !== null" class="card">
       <div class="card-title">
-        <span>Last backup result</span>
+        <span>{{ t('backup.lastResult') }}</span>
       </div>
       <div class="table-wrap">
         <table class="data-table">
           <tbody>
             <tr>
-              <th>Database</th>
+              <th>{{ t('backup.database') }}</th>
               <td class="mono">{{ backupResult.database }}</td>
             </tr>
             <tr>
-              <th>Target directory</th>
+              <th>{{ t('backup.column.target') }}</th>
               <td class="mono break-all">{{ backupResult.targetDirectory }}</td>
             </tr>
             <tr>
-              <th>Files</th>
+              <th>{{ t('backup.files') }}</th>
               <td class="mono">{{ formatNumber(backupResult.fileCount) }}</td>
             </tr>
             <tr>
-              <th>Total bytes</th>
+              <th>{{ t('backup.totalBytes') }}</th>
               <td class="mono">{{ formatBytes(backupResult.totalBytes) }}</td>
             </tr>
           </tbody>
