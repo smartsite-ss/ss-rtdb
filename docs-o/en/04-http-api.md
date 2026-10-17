@@ -296,8 +296,12 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases
 # {"databases":["plant_a","plant_b"]}
 
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/metrics/plant_a
-# {"metrics":[{"metricName":"station01.powerMeter.kwh","firstTs":1760688000000,"lastTs":1760691600000}]}
+# {"metrics":[{"metricName":"station01.powerMeter.kwh","firstTs":1760688000000,"lastTs":1760691600000,"valueType":1}]}
 ```
+
+`valueType` is the value-type marker locked on the metric's first write (same encoding as the `vt` field
+of writes/queries: `1=f64 2=i64 3=bool 4=string`), read from the metric's first block header; it is
+`null` while the database has no committed block for the metric and it has not been written this session.
 
 ### 5.1 Database detail
 
@@ -498,3 +502,4 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 | 2026-10-17 | `directory` in §5.1 is now documented as relative to the server working directory by default (`admin.exposePaths=true` for the absolute path) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `GET /api/v1/admin/tokens` now returns per-token runtime usage (`lastUsedAt`, `lastDatabase`, `pointsPerSec`, `bytesPerSec`); §7.2 documents the fields and the "credential, not session" rule | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §7.2 adds `configToken`: the static `auth.token` (`rtdb.token`) has no token-store record, so its usage is returned separately instead of being dropped | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `GET /api/v1/metrics/:db` response now carries `valueType` (value-type marker locked on first write, from the first block header, `null` when unknown); §5 example updated | GLM-5.3-Flash |

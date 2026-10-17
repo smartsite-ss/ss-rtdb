@@ -108,7 +108,7 @@ for (const w of windows) console.log(w.start, w.end, w.value, w.count);
 ```ts
 const status = await client.status();                       // 完整 StatusReport
 const databases = await client.listDatabases();              // string[]
-const metrics = await client.listMetrics('plant_a');         // [{ metricName, firstTs, lastTs }]
+const metrics = await client.listMetrics('plant_a');         // [{ metricName, firstTs, lastTs, valueType }]
 await client.setRetention('plant_a', 90);                    // 天；0 = 永久
 await client.backup('plant_a', '/mnt/backups/2026-10-17');   // 服务端侧拷贝
 ```
@@ -270,3 +270,5 @@ except RtdbClientError as error:
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本；随英文版更新同步「值类型映射」、长字段名、`aggregate_type` 参数等 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 更正 SDK 目录为 `packages/demo/client-node` / `packages/demo/client-python`（含工作区源码导入路径与 `pip install` 命令） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Node SDK `listMetrics` 返回项增加 `valueType`（与服务端 `GET /api/v1/metrics/:db` 同步） | GLM-5.3-Flash |
+

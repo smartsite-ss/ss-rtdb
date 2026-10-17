@@ -290,8 +290,11 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases
 # {"databases":["plant_a","plant_b"]}
 
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/metrics/plant_a
-# {"metrics":[{"metricName":"station01.powerMeter.kwh","firstTs":1760688000000,"lastTs":1760691600000}]}
+# {"metrics":[{"metricName":"station01.powerMeter.kwh","firstTs":1760688000000,"lastTs":1760691600000,"valueType":1}]}
 ```
+
+`valueType` 是指标首次写入锁定的值类型标记（与写入/查询的 `vt` 一致：`1=f64 2=i64 3=bool 4=string`），
+取自该指标第一个块的块头；库里尚无已落段块且本会话未写过该指标时为 `null`。
 
 ### 5.1 数据库详情
 
@@ -487,3 +490,5 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 | 2026-10-17 | §5.1 明确 `directory` 默认为相对服务工作目录的路径（`admin.exposePaths=true` 时为绝对路径） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `GET /api/v1/admin/tokens` 增加逐令牌运行期统计（`lastUsedAt`、`lastDatabase`、`pointsPerSec`、`bytesPerSec`）；§7.2 补充字段说明与「凭据而非会话」规则 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §7.2 新增 `configToken`：静态 `auth.token`（`rtdb.token`）不在令牌存储中，其用量单独返回，演示客户端等静态令牌写入不再被丢弃 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `GET /api/v1/metrics/:db` 响应增加 `valueType`（指标首次写入锁定的值类型标记，取自第一个块头，未知为 `null`）；§5 示例同步 | GLM-5.3-Flash |
+

@@ -249,6 +249,7 @@ describe('client: 六方法与 i64 vt 双向编解码', () => {
       assert.equal(metrics.length, 1);
       assert.equal(metrics[0].metricName, 'm1');
       assert.equal(metrics[0].firstTs, BASE);
+      assert.equal(metrics[0].valueType, 1);
 
       await client.setRetention('alpha', 30);
       const backup = await client.backup('alpha', join(dataDir, 'backup'));

@@ -39,6 +39,8 @@ export interface RtdbMetricSummary {
   metricName: string;
   firstTs: number;
   lastTs: number;
+  /** Value type marker locked on the metric's first write (mirrors the JSON `vt` marker; null when unknown) */
+  valueType: number | null;
 }
 
 /** `POST /api/v1/query/aggregate` window: `[start, end)` with the aggregated value and its sample count */

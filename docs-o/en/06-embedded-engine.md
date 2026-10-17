@@ -127,7 +127,7 @@ More than 100 000 windows in a single `queryAggregate` throws `E_INVALID_RANGE`.
 
 ```ts
 await rtdb.listDatabases();                  // string[]
-await rtdb.listMetrics('plant_a');           // MetricSummary[] — { metricName, firstTs, lastTs }
+await rtdb.listMetrics('plant_a');           // MetricSummary[] — { metricName, firstTs, lastTs, valueType }
 await rtdb.setRetention('plant_a', 90);      // persists {dataDir}/plant_a/retention.json
 await rtdb.runRetention();                   // sweep now (also runs on a timer)
 await rtdb.backup('plant_a', '/mnt/backups/2026-10-17');
@@ -242,3 +242,4 @@ main()
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Corrected the crash-loss wording: with `fsyncPolicy='wal'` no points are lost (block append → segment fsync → WAL safe point; the former "lose at most ≤5 s" described the pre-fix behavior) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `MetricSummary` returned by `listMetrics` now includes the `valueType` field | GLM-5.3-Flash |

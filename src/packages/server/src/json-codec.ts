@@ -45,6 +45,8 @@ export interface JsonMetricSummary {
   metricName: string;
   firstTs: number;
   lastTs: number;
+  /** Value type marker locked on the metric's first write (`ValueType`; null when unknown) */
+  valueType: ValueType | null;
 }
 
 interface EncodedValue {
@@ -171,5 +173,6 @@ export function encodeMetricSummaries(summaries: readonly JsonMetricSummary[]): 
     metricName: summary.metricName,
     firstTs: summary.firstTs,
     lastTs: summary.lastTs,
+    valueType: summary.valueType,
   }));
 }

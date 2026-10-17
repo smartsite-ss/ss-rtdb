@@ -505,10 +505,13 @@ describe('server: 管理路由', () => {
 
       const metrics = await fetch(`${baseUrl}/api/v1/metrics/alpha`);
       assert.equal(metrics.status, 200);
-      const metricsBody = (await metrics.json()) as { metrics: { metricName: string; firstTs: number; lastTs: number }[] };
+      const metricsBody = (await metrics.json()) as {
+        metrics: { metricName: string; firstTs: number; lastTs: number; valueType: number | null }[];
+      };
       assert.equal(metricsBody.metrics.length, 1);
       assert.equal(metricsBody.metrics[0].metricName, 'm1');
       assert.equal(metricsBody.metrics[0].firstTs, BASE);
+      assert.equal(metricsBody.metrics[0].valueType, 1);
     } finally {
       await server.stop();
     }

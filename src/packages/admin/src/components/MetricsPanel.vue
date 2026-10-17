@@ -36,6 +36,19 @@ const GAP_FACTOR = 3;
 
 const AGGREGATE_TYPES: RtdbAggregateType[] = Object.values(RTDB_AGGREGATE_TYPE);
 
+/** `vt` marker → display name, mirroring the engine's `VALUE_TYPE_NAME` */
+const VALUE_TYPE_NAMES: Record<number, string> = {
+  [RTDB_VALUE_TYPE.float64]: 'f64',
+  [RTDB_VALUE_TYPE.int64]: 'i64',
+  [RTDB_VALUE_TYPE.bool]: 'bool',
+  [RTDB_VALUE_TYPE.string]: 'string',
+};
+
+/** Display name of a metric's locked value type (`—` when unknown) */
+function valueTypeName(valueType: number | null): string {
+  return valueType === null ? '—' : VALUE_TYPE_NAMES[valueType] ?? '—';
+}
+
 const WINDOW_UNITS = { s: 1, m: 60, h: 3_600 } as const;
 type WindowUnit = keyof typeof WINDOW_UNITS;
 
@@ -316,6 +329,7 @@ watch(
           <thead>
             <tr>
               <th>{{ t('metrics.column.metric') }}</th>
+              <th>{{ t('metrics.column.type') }}</th>
               <th>{{ t('metrics.column.first') }}</th>
               <th>{{ t('metrics.column.last') }}</th>
               <th />
@@ -328,6 +342,7 @@ watch(
               :class="{ selected: metric.metricName === selectedMetric }"
             >
               <td class="mono">{{ metric.metricName }}</td>
+              <td class="mono">{{ valueTypeName(metric.valueType) }}</td>
               <td class="mono">{{ formatDateTime(metric.firstTs) }}</td>
               <td class="mono">{{ formatDateTime(metric.lastTs) }}</td>
               <td>

@@ -122,7 +122,7 @@ const windows = await rtdb.queryAggregate('plant_a', 'station01.powerMeter.kwh',
 
 ```ts
 await rtdb.listDatabases();                  // string[]
-await rtdb.listMetrics('plant_a');           // MetricSummary[] — { metricName, firstTs, lastTs }
+await rtdb.listMetrics('plant_a');           // MetricSummary[] — { metricName, firstTs, lastTs, valueType }
 await rtdb.setRetention('plant_a', 90);      // 持久化到 {dataDir}/plant_a/retention.json
 await rtdb.runRetention();                   // 立即执行清理（也会按定时器运行）
 await rtdb.backup('plant_a', '/mnt/backups/2026-10-17');
@@ -236,3 +236,5 @@ main()
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 修正崩溃丢失口径：`fsyncPolicy='wal'` 下不丢点（块落段 → fsync 段文件 → 才推进 WAL 安全点；原「最多丢失 ≤5 秒」对应修复前的实现） | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `listMetrics` 返回的 `MetricSummary` 增加 `valueType` 字段 | GLM-5.3-Flash |
+

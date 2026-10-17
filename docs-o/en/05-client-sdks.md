@@ -110,7 +110,7 @@ for (const w of windows) console.log(w.start, w.end, w.value, w.count);
 ```ts
 const status = await client.status();                       // full StatusReport
 const databases = await client.listDatabases();              // string[]
-const metrics = await client.listMetrics('plant_a');         // [{ metricName, firstTs, lastTs }]
+const metrics = await client.listMetrics('plant_a');         // [{ metricName, firstTs, lastTs, valueType }]
 await client.setRetention('plant_a', 90);                    // days; 0 = forever
 await client.backup('plant_a', '/mnt/backups/2026-10-17');   // server-side copy
 ```
@@ -272,3 +272,4 @@ Same retry policy as the Node SDK: only `429` and transport failures are retried
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Corrected SDK directories to `packages/demo/client-node` / `packages/demo/client-python` (workspace source import path and `pip install` commands) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Node SDK `listMetrics` items now include `valueType` (in sync with the server `GET /api/v1/metrics/:db`) | GLM-5.3-Flash |

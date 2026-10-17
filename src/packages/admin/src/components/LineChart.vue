@@ -7,15 +7,28 @@
 
 <script setup lang="ts">
 /**
- * Dependency-free line chart.
+ * ECharts-based line chart for the range preview.
  *
- * The console intentionally ships without a charting library: the series rendered here are plain
- * numeric samples produced by `POST /api/v1/query/range`, so a normalised `<svg>` plus two HTML
- * overlay labels is enough. Non-numeric values are filtered out by the caller before they get here.
+ * Renders numeric samples produced by `POST /api/v1/query/range` (non-numeric values are converted
+ * by the caller before they get here). The x axis is a time axis with an ECharts `dataZoom`
+ * (mouse wheel / pinch inside the plot plus a slider bar below), so a dense 1-hour series can be
+ * zoomed into seconds and panned. A new dataset resets the zoom back to the full range.
  */
 
-import { computed } from 'vue';
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import {
+  DataZoomInsideComponent,
+  DataZoomSliderComponent,
+  GridComponent,
+  TooltipComponent,
+} from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { t } from '../i18n';
+
+// Tree-shaken ECharts: only the pieces this chart needs (v6 registers axes with the grid component)
+echarts.use([LineChart, GridComponent, TooltipComponent, DataZoomInsideComponent, DataZoomSliderComponent, CanvasRenderer]);
 
 const props = withDefaults(
   defineProps<{
@@ -23,117 +36,116 @@ const props = withDefaults(
     height?: number;
     color?: string;
   }>(),
-  { height: 240, color: '#2f7cf6' },
+  { height: 340, color: '#2f7cf6' },
 );
 
-/** Both axes are mapped into a fixed 0..1000 space so a single `viewBox` fits any rendered size */
-const VIEW_SIZE = 1000;
-const CHART_INSET = 24;
-
-interface ChartGeometry {
-  polyline: string;
-  lastPoint: { x: number; y: number };
-  minValue: number;
-  maxValue: number;
-  minTime: number;
-  maxTime: number;
-}
-
-const geometry = computed<ChartGeometry | null>(() => {
-  const points = props.points;
-  if (points.length === 0) return null;
-
-  let minTime = points[0].t;
-  let maxTime = points[0].t;
-  let minValue = points[0].value;
-  let maxValue = points[0].value;
-  for (const point of points) {
-    if (point.t < minTime) minTime = point.t;
-    if (point.t > maxTime) maxTime = point.t;
-    if (point.value < minValue) minValue = point.value;
-    if (point.value > maxValue) maxValue = point.value;
-  }
-
-  const timeSpan = maxTime - minTime;
-  let valueSpan = maxValue - minValue;
-  if (valueSpan === 0) {
-    const padding = Math.abs(maxValue) > 0 ? Math.abs(maxValue) * 0.05 : 1;
-    minValue -= padding;
-    maxValue += padding;
-    valueSpan = maxValue - minValue;
-  }
-
-  const usableSpan = VIEW_SIZE - CHART_INSET * 2;
-  const coordinates = points.map((point) => {
-    const xRatio = timeSpan === 0 ? 0.5 : (point.t - minTime) / timeSpan;
-    const yRatio = (maxValue - point.value) / valueSpan;
-    return { x: CHART_INSET + xRatio * usableSpan, y: CHART_INSET + yRatio * usableSpan };
-  });
-
-  return {
-    polyline: coordinates.map((coordinate) => `${coordinate.x.toFixed(2)},${coordinate.y.toFixed(2)}`).join(' '),
-    lastPoint: coordinates[coordinates.length - 1],
-    minValue,
-    maxValue,
-    minTime,
-    maxTime,
-  };
-});
-
-const lastMarkerStyle = computed(() => {
-  const point = geometry.value?.lastPoint;
-  if (point === undefined) return {};
-  return {
-    left: `${point.x / 10}%`,
-    top: `${point.y / 10}%`,
-    background: props.color,
-  };
-});
-
-function formatValue(value: number): string {
-  if (!Number.isFinite(value)) return String(value);
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
-}
+const container = ref<HTMLDivElement | null>(null);
+let chart: echarts.ECharts | null = null;
+let resizeObserver: ResizeObserver | null = null;
 
 function formatDateTime(milliseconds: number): string {
   const date = new Date(milliseconds);
   const pad = (input: number): string => String(input).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
+
+/** Full option; rebuilt (not merged) whenever the dataset changes, which also resets the zoom */
+function buildOption(): echarts.EChartsCoreOption {
+  const seriesData = props.points.map((point) => [point.t, point.value] as [number, number]);
+  return {
+    animation: false,
+    grid: { left: 64, right: 20, top: 18, bottom: 56 },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      formatter: (parameters: unknown): string => {
+        const list = Array.isArray(parameters) ? parameters : [parameters];
+        const first = list[0] as { value?: [number, number] } | undefined;
+        const value = first?.value?.[1];
+        if (value === undefined) return '';
+        const time = first?.value?.[0] ?? 0;
+        return `${formatDateTime(time)}<br/><b>${Number.isFinite(value) ? value : String(value)}</b>`;
+      },
+    },
+    xAxis: {
+      type: 'time',
+      axisLabel: { hideOverlap: true },
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: { formatter: (value: number): string => `${value}` },
+    },
+    dataZoom: [
+      { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+      { type: 'slider', xAxisIndex: 0, filterMode: 'none', height: 18, bottom: 10 },
+    ],
+    series: [
+      {
+        type: 'line',
+        showSymbol: false,
+        sampling: 'lttb',
+        data: seriesData,
+        lineStyle: { color: props.color, width: 1.5 },
+        itemStyle: { color: props.color },
+      },
+    ],
+  };
+}
+
+function render(): void {
+  if (chart === null) return;
+  if (props.points.length === 0) {
+    chart.clear();
+    return;
+  }
+  // notMerge: a new query replaces everything and the zoom resets to the full range
+  chart.setOption(buildOption(), true);
+}
+
+onMounted(() => {
+  if (container.value === null) return;
+  chart = echarts.init(container.value);
+  resizeObserver = new ResizeObserver(() => chart?.resize());
+  resizeObserver.observe(container.value);
+  render();
+});
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  chart?.dispose();
+  chart = null;
+});
+
+watch(() => props.points, render, { deep: true });
 </script>
 
 <template>
   <div class="line-chart" :style="{ height: `${props.height}px` }">
-    <svg v-if="geometry !== null" :viewBox="`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`" preserveAspectRatio="none">
-      <polyline
-        :points="geometry.polyline"
-        fill="none"
-        :stroke="props.color"
-        stroke-width="2"
-        stroke-linejoin="round"
-        vector-effect="non-scaling-stroke"
-      />
-    </svg>
-    <template v-if="geometry !== null">
-      <span class="line-chart-axis-label top-left">{{ formatValue(geometry.maxValue) }}</span>
-      <span class="line-chart-axis-label bottom-left">{{ formatValue(geometry.minValue) }}</span>
-      <span class="line-chart-axis-label bottom-right">
-        {{ formatDateTime(geometry.minTime) }} - {{ formatDateTime(geometry.maxTime) }}
-      </span>
-      <span class="line-chart-marker" :style="lastMarkerStyle" />
-    </template>
-    <div v-else class="line-chart-empty">{{ t('chart.empty') }}</div>
+    <div ref="container" class="line-chart-canvas" />
+    <div v-if="props.points.length === 0" class="line-chart-empty">{{ t('chart.empty') }}</div>
   </div>
 </template>
 
 <style scoped>
-.line-chart-marker {
+.line-chart {
+  position: relative;
+  width: 100%;
+}
+
+.line-chart-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.line-chart-empty {
   position: absolute;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  pointer-events: none;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8a94a6;
+  font-size: 13px;
 }
 </style>

@@ -359,8 +359,10 @@ export class RtdbClient {
     return record.databases.map((name) => String(name));
   }
 
-  /** Metric summaries of a database (server `GET /api/v1/metrics/:db`) */
-  async listMetrics(database: string): Promise<Array<{ metricName: string; firstTs: number; lastTs: number }>> {
+  /** Metric summaries of a database (server `GET /api/v1/metrics/:db`; `valueType` follows the JSON `vt` marker) */
+  async listMetrics(
+    database: string,
+  ): Promise<Array<{ metricName: string; firstTs: number; lastTs: number; valueType: number | null }>> {
     const databaseName = requireDatabaseName(database);
     const body = await this.request('GET', `/api/v1/metrics/${encodeURIComponent(databaseName)}`);
     const record = requireObject(body, 'metrics response body');
@@ -373,6 +375,7 @@ export class RtdbClient {
         metricName: String(summary.metricName),
         firstTs: readIntegerField(summary, 'firstTs'),
         lastTs: readIntegerField(summary, 'lastTs'),
+        valueType: summary.valueType === null ? null : readIntegerField(summary, 'valueType'),
       };
     });
   }

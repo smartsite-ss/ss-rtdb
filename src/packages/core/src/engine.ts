@@ -46,6 +46,7 @@ import { PerformanceObserver } from 'node:perf_hooks';
 
 import { ERROR_CODE, RtdbError } from './errors.ts';
 import { dateNumberFromTimestamp } from './format.ts';
+import type { SegmentBlockIndexEntry } from './format.ts';
 import { DataRootLock } from './lock.ts';
 import { BufferPool } from './pool.ts';
 import { recoverDataRoot } from './recovery.ts';
@@ -1251,6 +1252,7 @@ export class RtdbEngine {
 
   private listMetricsSync(database: string): MetricSummary[] {
     const ranges = new Map<string, { firstTs: number; lastTs: number }>();
+    const valueTypes = new Map<string, ValueType>();
     const merge = (metricName: string, timestampMin: number, timestampMax: number): void => {
       const existing = ranges.get(metricName);
       if (existing === undefined) {
@@ -1260,10 +1262,22 @@ export class RtdbEngine {
       if (timestampMin < existing.firstTs) existing.firstTs = timestampMin;
       if (timestampMax > existing.lastTs) existing.lastTs = timestampMax;
     };
+    /** Capture a metric's locked type from its first block header (one small read per metric, no payload decode) */
+    const mergeValueType = (
+      descriptor: ReturnType<SegmentReader['listSegments']>[number],
+      entry: SegmentBlockIndexEntry,
+    ): void => {
+      if (valueTypes.has(entry.metricName)) return;
+      const valueType = this.reader.readBlockValueType(descriptor, entry);
+      if (valueType !== null) valueTypes.set(entry.metricName, valueType);
+    };
 
     for (const descriptor of this.reader.listSegments(database)) {
       const entries = this.reader.loadIndexEntries(database, descriptor.dateNumber, descriptor.sequence);
-      for (const entry of entries) merge(entry.metricName, entry.timestampMin, entry.timestampMax);
+      for (const entry of entries) {
+        merge(entry.metricName, entry.timestampMin, entry.timestampMax);
+        mergeValueType(descriptor, entry);
+      }
     }
     const context = this.contexts.get(database);
     if (context !== undefined) {
@@ -1275,7 +1289,12 @@ export class RtdbEngine {
     }
 
     return [...ranges.entries()]
-      .map(([metricName, range]) => ({ metricName, firstTs: range.firstTs, lastTs: range.lastTs }))
+      .map(([metricName, range]) => ({
+        metricName,
+        firstTs: range.firstTs,
+        lastTs: range.lastTs,
+        valueType: valueTypes.get(metricName) ?? context?.writer.valueTypeOf(metricName) ?? null,
+      }))
       .sort((left, right) => (left.metricName < right.metricName ? -1 : left.metricName > right.metricName ? 1 : 0));
   }
 

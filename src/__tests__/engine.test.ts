@@ -18,6 +18,7 @@ import { RtdbEngine } from '../packages/core/src/engine.ts';
 import { ERROR_CODE, isRtdbError } from '../packages/core/src/errors.ts';
 import { SegmentStore } from '../packages/core/src/segment-store.ts';
 import { WriteAheadLog } from '../packages/core/src/wal.ts';
+import { ValueType } from '../packages/core/src/types.ts';
 import type { EngineOptions, WritePoint } from '../packages/core/src/types.ts';
 
 const rootDirectory = mkdtempSync(join(tmpdir(), 'ss-rtdb-engine-'));
@@ -559,7 +560,9 @@ describe('引擎: 管理 API', () => {
 
       assert.deepStrictEqual(await engine.listDatabases(), ['alpha', 'beta']);
       const metrics = await engine.listMetrics('alpha');
-      assert.deepStrictEqual(metrics, [{ metricName: 'm.a', firstTs: DAY_BASE, lastTs: DAY_BASE + 1000 }]);
+      assert.deepStrictEqual(metrics, [
+        { metricName: 'm.a', firstTs: DAY_BASE, lastTs: DAY_BASE + 1000, valueType: ValueType.Float64 },
+      ]);
 
       const stats = await engine.stats();
       assert.equal(stats.databases, 2);
@@ -567,6 +570,20 @@ describe('引擎: 管理 API', () => {
       assert.equal(stats.write.acceptedPoints, 3);
       assert.equal(stats.write.bufferedPoints, 3);
       assert.ok(stats.segments.openFiles >= 0);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('listMetrics 汇报块头来源的指标值类型（i64 落段后）', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      // 4096 点 = blockTargetPoints 下限，落段后走块头读取路径（而非写缓冲）
+      const values = Array.from({ length: 4_096 }, (_, index) => BigInt(index));
+      await engine.writeBatch('alpha', pointsFrom('m.i', values, DAY_BASE));
+      const metrics = await engine.listMetrics('alpha');
+      assert.equal(metrics.length, 1);
+      assert.equal(metrics[0].valueType, ValueType.Int64);
     } finally {
       await engine.close();
     }

@@ -128,6 +128,7 @@ export const en = {
   'metrics.reload': 'Reload metrics',
   'metrics.count': '{count} metric(s)',
   'metrics.column.metric': 'Metric',
+  'metrics.column.type': 'Type',
   'metrics.column.first': 'First point',
   'metrics.column.last': 'Last point',
   'metrics.select': 'Select',

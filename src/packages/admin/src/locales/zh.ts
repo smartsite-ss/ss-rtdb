@@ -129,6 +129,7 @@ export const zh: Record<MessageKey, string> = {
   'metrics.reload': '重新加载指标',
   'metrics.count': '{count} 个指标',
   'metrics.column.metric': '指标',
+  'metrics.column.type': '数据类型',
   'metrics.column.first': '首个点',
   'metrics.column.last': '末个点',
   'metrics.select': '选择',
