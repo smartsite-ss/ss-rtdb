@@ -11,7 +11,9 @@ Configuration is merged from four layers, lowest priority first:
 built-in defaults  <  config file  <  environment variables  <  explicit arguments
 ```
 
-- **Config file**: JSON, path given by `--config <path>` or the `RTDB_CONFIG` environment variable.
+- **Config file**: JSON. `conf/rtdb-server.json` under the **working directory** is loaded automatically when
+  present (both the repository and the release package ship it); `--config <path>` or `RTDB_CONFIG` point at
+  a different file, replacing the default one instead of layering on top of it.
 - **Environment variables**: see the table in §4.
 - **Explicit arguments**: the `overrides` object when embedding `RtdbServer` in your own process; the
   `--data-dir` / `--url` / `--token` / `--timeout` flags for `rtdbctl` (they affect the CLI only, not
@@ -23,7 +25,21 @@ Unknown keys in the config file are ignored. Numeric values that fall outside th
 
 ## 2. Config file
 
-`rtdb.config.json` — every key is optional; omitted keys keep their default:
+The runtime layout keeps the configuration in `conf/rtdb-server.json`:
+
+```
+ss-rtdb/            (repository root, or the root of a release package)
+├── bin/            start / packaging scripts
+├── conf/
+│   └── rtdb-server.json    <- edit this file; loaded automatically from the working directory
+└── src/
+```
+
+`bin\start-server.bat` starts the server with the repository (or package) root as the working directory, so
+that file is picked up without any environment variable. Running the server from another directory simply
+means the built-in defaults apply, unless `RTDB_CONFIG` points at a file. The file below lists **every key
+with its default value**, so it can be used as a template as-is — every key is optional and omitted keys keep
+their default:
 
 ```json
 {
@@ -50,7 +66,7 @@ Unknown keys in the config file are ignored. Numeric values that fall outside th
     "tokensFile": ""
   },
 
-  "admin": { "enabled": true, "staticDir": "" },
+  "admin": { "enabled": true, "staticDir": "", "exposePaths": false },
   "cors": { "allowedOrigins": [] },
 
   "write": {
@@ -72,7 +88,7 @@ Unknown keys in the config file are ignored. Numeric values that fall outside th
 }
 ```
 
-Start with a specific file:
+Start with a specific file (any file name):
 
 ```bash
 rtdbctl serve --config /etc/rtdb/rtdb.config.json                       # CLI (parses --config)
@@ -106,6 +122,7 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `auth.tokensFile` | `""` | API token directory JSON; empty = `{dataDir}/rtdb-tokens.json`. |
 | `admin.enabled` | `true` | Serve the Web console at `/admin`. |
 | `admin.staticDir` | `""` | Override the console asset directory; empty = bundled `packages/admin/dist`. |
+| `admin.exposePaths` | `false` | `false`: `GET /api/v1/databases/:db` reports the directory **relative to the working directory** (`rtdb-data/plant_a`); `true`: the resolved absolute path (host layout is disclosed). |
 | `cors.allowedOrigins` | `[]` | Opt-in CORS origins; `["*"]` allows any. Empty disables CORS entirely. |
 | `write.walEnabled` | `true` | Write-ahead log. Set `false` only when data can be re-generated. |
 | `write.fsyncPolicy` | `wal` | `wal` = group fsync after each WAL append; `none` = rely on the OS. |
@@ -156,6 +173,7 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `RTDB_AUTH_USERS_FILE` | `auth.usersFile` |
 | `RTDB_AUTH_TOKENS_FILE` | `auth.tokensFile` |
 | `RTDB_ADMIN_ENABLED` | `admin.enabled` |
+| `RTDB_ADMIN_EXPOSE_PATHS` | `admin.exposePaths` (`true`/`1`, `false`/`0`) |
 | `RTDB_CORS_ALLOWED_ORIGINS` | `cors.allowedOrigins` (comma separated) |
 | `RTDB_LOG_LEVEL` | `log.level` |
 
@@ -281,3 +299,5 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Added `auth.bootstrapUsername` / `auth.bootstrapPassword` (defaults `admin` / `ss-rtdb`), their environment variables and §6.4 "Default administrator on first start" | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Documented the runtime `conf/rtdb-server.json` (auto-loaded from the working directory, shipped by the repository and the release package) and `admin.exposePaths` with `RTDB_ADMIN_EXPOSE_PATHS` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `admin.exposePaths` now defaults to `false`: the reported database directory is relative to the working directory; `true` opts into the absolute path | DeepSeek-V4.1-Flash |

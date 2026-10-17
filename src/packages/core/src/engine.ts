@@ -638,7 +638,7 @@ export class RtdbEngine {
       segments: { count: descriptors.length, sealed, active: descriptors.length - sealed },
       wal: {
         pendingBytes: context === undefined ? 0 : context.wal.pendingBytes,
-        outstandingBatches: context === undefined ? 0 : context.wal.outstandingBatches.length,
+        outstandingBatches: context === undefined ? 0 : context.wal.outstandingBatchIds.length,
       },
       retention: { days: override, effectiveDays: override ?? this.retentionDays },
     };

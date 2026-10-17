@@ -23,10 +23,11 @@ import { fileURLToPath } from 'node:url';
 
 import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
 import { RtdbEngine } from '../../core/src/engine.ts';
+import { measureDatabaseSize } from '../../core/src/size.ts';
 import type { AggregateType, RangeOptions, WritePoint } from '../../core/src/types.ts';
 import { AuthVerifier, hashPassword, loadOrCreateAuthToken } from './auth.ts';
 import type { AuthScope } from './auth.ts';
-import { toEngineOptions, validateServerConfig } from './config.ts';
+import { reportedDatabaseDirectory, toEngineOptions, validateServerConfig } from './config.ts';
 import type { ServerConfig } from './config.ts';
 import { HttpFailure, SERVER_ERROR_CODE, toHttpErrorResponse } from './http-error.ts';
 import { decodeWritePointBatch, encodeAggregateWindows, encodeMetricSummaries, encodePoint, encodeSeries } from './json-codec.ts';
@@ -46,6 +47,9 @@ const DATABASE_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]{0,62}$/;
 const AGGREGATE_TYPES: readonly AggregateType[] = ['avg', 'sum', 'min', 'max', 'count', 'last'];
 
 const ADMIN_PATH = '/admin';
+const DATABASES_PATH = '/api/v1/databases';
+/** Management detail of one database (on-disk footprint + retention); see `core/src/size.ts` */
+const DATABASES_PREFIX = '/api/v1/databases/';
 const ADMIN_USERS_PATH = '/api/v1/admin/users';
 const ADMIN_USERS_PREFIX = '/api/v1/admin/users/';
 const ADMIN_TOKENS_PATH = '/api/v1/admin/tokens';
@@ -330,9 +334,18 @@ export class RtdbServer {
       this.handleHealthz(response);
       return;
     }
-    if (pathname === '/api/v1/databases') {
+    if (pathname === DATABASES_PATH) {
       if (method !== 'GET') throw methodNotAllowed('GET');
       await this.handleDatabases(request, response);
+      return;
+    }
+    if (pathname.startsWith(DATABASES_PREFIX)) {
+      if (method !== 'GET') throw methodNotAllowed('GET');
+      await this.handleDatabaseDetail(
+        request,
+        response,
+        requireDatabaseName(safeDecode(pathname.slice(DATABASES_PREFIX.length))),
+      );
       return;
     }
     if (pathname === AUTH_LOGIN_PATH) {
@@ -518,6 +531,27 @@ export class RtdbServer {
     this.requireAuth(request, 'query');
     const databases = await this.engine.listDatabases();
     this.sendJson(response, 200, { databases });
+  }
+
+  /**
+   * `GET /api/v1/databases/:db` — management detail of one database: absolute directory, file count, total
+   * bytes with the segment / index / WAL split, the database-level retention override (`null` = the global
+   * default applies) and the per-day breakdown.
+   *
+   * The measurement is pure filesystem arithmetic and takes no data-root lock (see `core/src/size.ts`), so it
+   * stays safe while the instance is writing; sizes are a point-in-time snapshot.
+   */
+  private async handleDatabaseDetail(
+    request: IncomingMessage,
+    response: ServerResponse,
+    database: string,
+  ): Promise<void> {
+    this.requireAuth(request, 'query');
+    const report = measureDatabaseSize(this.config.dataDir, database);
+    this.sendJson(response, 200, {
+      ...report,
+      directory: reportedDatabaseDirectory(this.config, report.directory, database),
+    });
   }
 
   private async handleMetrics(request: IncomingMessage, response: ServerResponse, database: string): Promise<void> {

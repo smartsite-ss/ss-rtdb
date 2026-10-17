@@ -11,12 +11,14 @@ REM
 REM Usage:
 REM   bin\start-server.bat
 REM
-REM Configuration is resolved by the server itself (built-in defaults < config file < environment
-REM variables), so this script sets nothing implicit. Override the usual knobs before running:
+REM Configuration is resolved by the server itself: built-in defaults, then conf\rtdb-server.json
+REM (loaded automatically when present, this is where the default configuration ships), then
+REM environment variables. Precedence is defaults, config file, environment, explicit arguments.
+REM Override the usual knobs before running:
 REM
 REM   set RTDB_PORT=6199
 REM   set RTDB_DATA_DIR=D:\rtdb-data
-REM   set RTDB_CONFIG=C:\rtdb\rtdb.config.json
+REM   set RTDB_CONFIG=C:\rtdb\rtdb.custom.json
 REM   set RTDB_LOG_LEVEL=debug
 REM   bin\start-server.bat
 
@@ -38,10 +40,19 @@ if "%SHOW_PORT%"=="" set "SHOW_PORT=6180"
 set "SHOW_DATA=%RTDB_DATA_DIR%"
 if "%SHOW_DATA%"=="" set "SHOW_DATA=%ROOT%\rtdb-data"
 
+REM Display-only: the file the server will actually load (RTDB_CONFIG wins over conf\rtdb-server.json).
+set "SHOW_CONFIG=%RTDB_CONFIG%"
+if not "%SHOW_CONFIG%"=="" goto :config_ready
+if exist "%ROOT%\conf\rtdb-server.json" set "SHOW_CONFIG=%ROOT%\conf\rtdb-server.json"
+if "%SHOW_CONFIG%"=="" set "SHOW_CONFIG=(built-in defaults; no config file)"
+:config_ready
+
 echo [INFO] ss-rtdb server
 echo [INFO]   root     : %ROOT%
+echo [INFO]   config   : %SHOW_CONFIG%
 echo [INFO]   endpoint : http://%SHOW_HOST%:%SHOW_PORT%
 echo [INFO]   data dir : %SHOW_DATA%
+echo [INFO]   console  : q = quit gracefully, r = reload configuration (Ctrl+C also quits)
 echo [INFO]   hint     : press Ctrl+C to stop gracefully
 echo.
 

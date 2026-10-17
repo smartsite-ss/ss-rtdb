@@ -19,10 +19,10 @@
  * lock while running, so these commands fail with `E_DB_LOCKED` in that case (an intentional safety gate).
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import { RETENTION_FILE_NAME, RtdbEngine } from '../../core/src/engine.ts';
+import { RtdbEngine } from '../../core/src/engine.ts';
 import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
 import { formatDateFolderName } from '../../core/src/format.ts';
 import { DataRootLock } from '../../core/src/lock.ts';
@@ -34,7 +34,6 @@ import {
   directoryExists,
   extractTarGzipArchive,
   listArchivedDays,
-  measureDirectory,
 } from '../../core/src/retention.ts';
 import { SegmentStore } from '../../core/src/segment-store.ts';
 

@@ -110,6 +110,8 @@ await rtdb.close();
 
 ```
 ss-rtdb/
+├── bin/                         # 启动 / 打包脚本（start-server / build-release / build-sea ...）
+├── conf/                        # rtdb-server.json —— 服务端默认配置（由工作目录自动加载）
 ├── src/                         # npm 工作区根目录（所有 npm 命令在此执行）
 │   └── packages/
 │       ├── core/                # @ss/rtdb-core      — 引擎，零运行时依赖
@@ -143,3 +145,4 @@ Apache License 2.0 —— 每个源文件都带有标准 Apache-2.0 文件头；
 | 2026-10-17 | 由两行占位改写为项目门面：简介与形态对照、能力概览、中英对照文档索引、快速上手、仓库结构、许可与联系 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 文档索引新增 10 — Smart Site 数据模拟客户端（中英对照） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 快速上手补充控制台登录：首启默认管理员 `admin` / `ss-rtdb` 与 `POST /api/v1/auth/login` 示例 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 仓库结构补充 `bin/` 与 `conf/`（服务端默认配置 `conf/rtdb-server.json`，运行时自动加载） | DeepSeek-V4.1-Flash |

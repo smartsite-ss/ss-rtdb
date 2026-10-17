@@ -11,6 +11,12 @@ node packages/server/src/main.ts
 node packages/server/src/main.ts   # add --config via RTDB_CONFIG
 ```
 
+> **Runtime config file.** The server loads `conf/rtdb-server.json` from its **working directory** when that
+> file exists (see [02 — Configuration](./02-configuration.md) §2). `bin\start-server.bat` runs with the
+> repository / release-package root as the working directory, so `conf/rtdb-server.json` applies automatically.
+> `npm start --workspace @ss/rtdb-server` runs in `src/packages/server` instead — set `RTDB_CONFIG` explicitly
+> there, or start with `node src/packages/server/src/main.ts` from the root.
+
 Startup log line:
 
 ```
@@ -23,6 +29,23 @@ the current day's WAL → start the flush timer and the retention timer → bind
 **Stopping.** Send `SIGINT` (Ctrl+C) or `SIGTERM`; the server then flushes buffers, seals the active
 segment, truncates the WAL and releases the data-root lock before exiting. Never `SIGKILL` a healthy
 server — you lose at most the last ≤5 s of WAL, but you also leave the lock to be recovered.
+
+### Interactive console keys
+
+When stdin is a terminal (`rtdb-server.exe` window, `bin\start-server.bat`, or `npm start` in a shell) the
+server listens for single keypresses:
+
+| Key | Action |
+| --- | ------ |
+| `q` (or `Ctrl+C`) | graceful shutdown — same path as `SIGINT`: stop accepting requests, wait for in-flight ones, flush and close the engine, release the data-root lock, exit `0` |
+| `r` | safe restart / reload — stop the listener and engine, re-read the config file (`conf/rtdb-server.json` or the `RTDB_CONFIG` file), then start again **in the same process** |
+
+- Use `r` to apply configuration changes (port, retention defaults, log level, …) without closing the window.
+- A failed reload (invalid JSON, port already taken) is logged and the process stays alive: fix the file and
+  press `r` again, or `q` to quit.
+- Keys are attached only when stdin is a TTY; under systemd / a redirected stdin the process runs silently and
+  is controlled by signals.
+- `q` / `r` are case-insensitive; every other key is ignored (Ctrl+letter shortcuts are ignored on purpose).
 
 ### First-run token
 
@@ -302,3 +325,5 @@ systemctl start ss-rtdb
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §1 notes the runtime config file `conf/rtdb-server.json` (working-directory relative) and how the two start paths differ | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Added "Interactive console keys": `q` = graceful shutdown, `r` = safe restart that re-reads the configuration in place (TTY only) | DeepSeek-V4.1-Flash |

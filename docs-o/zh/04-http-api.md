@@ -24,7 +24,7 @@
 | 权限域 | 端点 | `admin` | `write` | `readonly` |
 | ------ | ---- | :-----: | :-----: | :--------: |
 | `none` | `/api/v1/status`、`/metrics`、`/healthz` | ✅ | ✅ | ✅ |
-| `query` | `/api/v1/databases`、`/api/v1/metrics/:db`、`/api/v1/query/*` | ✅ | ✅ | ✅ |
+| `query` | `/api/v1/databases`、`/api/v1/databases/:db`、`/api/v1/metrics/:db`、`/api/v1/query/*` | ✅ | ✅ | ✅ |
 | `write` | `/api/v1/write`、`/api/v1/retention/:db`、`/api/v1/backup/:db` | ✅ | ✅ | ❌ |
 | `admin` | `/api/v1/admin/users*`、`/api/v1/admin/tokens*` | ✅ | ❌ | ❌ |
 
@@ -78,6 +78,7 @@
 | `GET` | `/metrics` | none | Prometheus 暴露格式 |
 | `GET` | `/healthz` | none | 存活探针 |
 | `GET` | `/api/v1/databases` | query | 列出数据库 |
+| `GET` | `/api/v1/databases/:db` | query | 某库的磁盘占用、按天明细与保留策略覆盖值 |
 | `GET` | `/api/v1/metrics/:db` | query | 列出某库的指标 |
 | `POST` | `/api/v1/write?db=<db>` | write | 写入数据点（JSON 或行协议） |
 | `POST` | `/api/v1/query/range` | query | 时间区间内的原始点 |
@@ -292,6 +293,30 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/metrics/plan
 # {"metrics":[{"metricName":"station01.powerMeter.kwh","firstTs":1760688000000,"lastTs":1760691600000}]}
 ```
 
+### 5.1 数据库详情
+
+`GET /api/v1/databases/:db` 返回单个数据库的磁盘占用，以及 `PUT /api/v1/retention/:db` 写入的库级保留策略
+（`null` 表示未设置、沿用全局默认）。该接口是纯文件系统统计：**不获取数据根锁**，服务写入期间也可安全调用，
+数值为某一时刻的快照。
+
+`directory` 默认**相对于服务进程的工作目录**（如 `rtdb-data/plant_a`）；设置
+`admin.exposePaths = true` 可改为返回解析后的绝对路径。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases/plant_a
+# {
+#   "database": "plant_a",
+#   "directory": "rtdb-data/plant_a",
+#   "fileCount": 42,
+#   "totalBytes": 1932735283,
+#   "breakdown": { "segmentBytes": 1800000000, "indexBytes": 120000000, "walBytes": 13273583, "otherBytes": 0 },
+#   "retentionDays": 90,
+#   "days": [{ "dateNumber": 20261017, "dayLabel": "20261017", "fileCount": 42, "totalBytes": 1932735283 }]
+# }
+```
+
+数据库不存在返回 `404 E_DB_NOT_FOUND`；库名非法返回 `400 E_INVALID_POINT`。
+
 ---
 
 ## 6. 保留策略与备份
@@ -302,6 +327,10 @@ curl -X PUT "http://127.0.0.1:6180/api/v1/retention/plant_a" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"days":90}'
 # {"ok":true}
+
+# 读回已保存的保留策略覆盖值（null = 沿用全局默认）
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases/plant_a
+# {"database":"plant_a","directory":"...","fileCount":42,"totalBytes":1932735283,"retentionDays":90,...}
 
 # 在服务所在主机上触发整库备份
 curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
@@ -431,3 +460,5 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 | 2026-10-17 | 端点索引补充根路径 `GET /` → 302 `/admin/`（`admin.enabled=false` 时仍为 404） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 写入字段说明明确 v0.1.0 仅接受 `quality = 0`，非 0 返回 `400 E_INVALID_POINT` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 §7.3「登录与会话」与端点索引三行：`POST /api/v1/auth/login`、`GET /api/v1/auth/session`、`POST /api/v1/auth/logout` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增 `GET /api/v1/databases/:db`（磁盘占用、按天明细、保留策略读回）与 §5.1、端点索引行及 `query` 权限域条目 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §5.1 明确 `directory` 默认为相对服务工作目录的路径（`admin.exposePaths=true` 时为绝对路径） | DeepSeek-V4.1-Flash |

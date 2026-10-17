@@ -24,7 +24,7 @@ A fresh instance creates the default administrator `admin` / `ss-rtdb` (override
 | Scope | Endpoints | `admin` | `write` | `readonly` |
 | ----- | --------- | :-----: | :-----: | :--------: |
 | `none` | `/api/v1/status`, `/metrics`, `/healthz` | ✅ | ✅ | ✅ |
-| `query` | `/api/v1/databases`, `/api/v1/metrics/:db`, `/api/v1/query/*` | ✅ | ✅ | ✅ |
+| `query` | `/api/v1/databases`, `/api/v1/databases/:db`, `/api/v1/metrics/:db`, `/api/v1/query/*` | ✅ | ✅ | ✅ |
 | `write` | `/api/v1/write`, `/api/v1/retention/:db`, `/api/v1/backup/:db` | ✅ | ✅ | ❌ |
 | `admin` | `/api/v1/admin/users*`, `/api/v1/admin/tokens*` | ✅ | ❌ | ❌ |
 
@@ -79,6 +79,7 @@ Every non-2xx response is JSON:
 | `GET` | `/metrics` | none | Prometheus exposition |
 | `GET` | `/healthz` | none | Liveness probe |
 | `GET` | `/api/v1/databases` | query | List databases |
+| `GET` | `/api/v1/databases/:db` | query | On-disk footprint, per-day detail and retention override of one database |
 | `GET` | `/api/v1/metrics/:db` | query | List metrics of a database |
 | `POST` | `/api/v1/write?db=<db>` | write | Write points (JSON or Line Protocol) |
 | `POST` | `/api/v1/query/range` | query | Raw points in a time range |
@@ -298,6 +299,31 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/metrics/plan
 # {"metrics":[{"metricName":"station01.powerMeter.kwh","firstTs":1760688000000,"lastTs":1760691600000}]}
 ```
 
+### 5.1 Database detail
+
+`GET /api/v1/databases/:db` returns the on-disk footprint of one database plus the retention override that
+`PUT /api/v1/retention/:db` writes (`null` = the global default applies). It is a pure filesystem
+measurement: no data-root lock is taken, so it is safe while the instance is writing, and the numbers are a
+point-in-time snapshot.
+
+`directory` is reported **relative to the server working directory** (`rtdb-data/plant_a`); set
+`admin.exposePaths = true` to get the resolved absolute path instead.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases/plant_a
+# {
+#   "database": "plant_a",
+#   "directory": "rtdb-data/plant_a",
+#   "fileCount": 42,
+#   "totalBytes": 1932735283,
+#   "breakdown": { "segmentBytes": 1800000000, "indexBytes": 120000000, "walBytes": 13273583, "otherBytes": 0 },
+#   "retentionDays": 90,
+#   "days": [{ "dateNumber": 20261017, "dayLabel": "20261017", "fileCount": 42, "totalBytes": 1932735283 }]
+# }
+```
+
+Unknown databases return `404 E_DB_NOT_FOUND`; invalid names return `400 E_INVALID_POINT`.
+
 ---
 
 ## 6. Retention and backup
@@ -308,6 +334,10 @@ curl -X PUT "http://127.0.0.1:6180/api/v1/retention/plant_a" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"days":90}'
 # {"ok":true}
+
+# Read the stored retention override (null = the global default applies)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases/plant_a
+# {"database":"plant_a","directory":"...","fileCount":42,"totalBytes":1932735283,"retentionDays":90,...}
 
 # Trigger a whole-database backup on the server host
 curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
@@ -440,3 +470,5 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 | 2026-10-17 | Endpoint index: documented `GET /` → 302 to `/admin/` (still 404 when `admin.enabled=false`) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Write fields: clarified that v0.1.0 only accepts `quality = 0`; non-zero returns `400 E_INVALID_POINT` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Added §7.3 "Sign-in and sessions" plus three endpoint-index rows: `POST /api/v1/auth/login`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Added `GET /api/v1/databases/:db` (on-disk footprint, per-day detail, retention readback) with §5.1, the endpoint index row and the `query` scope entry | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `directory` in §5.1 is now documented as relative to the server working directory by default (`admin.exposePaths=true` for the absolute path) | DeepSeek-V4.1-Flash |

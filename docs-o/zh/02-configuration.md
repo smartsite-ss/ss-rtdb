@@ -11,7 +11,8 @@
 内置默认值  <  配置文件  <  环境变量  <  显式参数
 ```
 
-- **配置文件**：JSON，路径由 `--config <path>` 或环境变量 `RTDB_CONFIG` 给出。
+- **配置文件**：JSON。**工作目录**下的 `conf/rtdb-server.json` 存在时会自动加载（仓库与发布包都自带该文件）；
+  `--config <path>` 或 `RTDB_CONFIG` 指向别的文件，此时**取代**默认文件，而不是在其之上叠加。
 - **环境变量**：见 §4 的表格。
 - **显式参数**：把 `RtdbServer` 嵌入自己进程时传入的 `overrides` 对象；`rtdbctl` 的
   `--data-dir` / `--url` / `--token` / `--timeout` 开关（这些只影响 CLI，不影响服务配置）。
@@ -21,7 +22,19 @@
 
 ## 2. 配置文件
 
-`rtdb.config.json` —— 每个键都可省略，省略则保持默认值：
+运行期布局把配置放在 `conf/rtdb-server.json`：
+
+```
+ss-rtdb/            （仓库根目录，或发布包的根目录）
+├── bin/            启动 / 打包脚本
+├── conf/
+│   └── rtdb-server.json    <- 改这个文件；由工作目录自动加载
+└── src/
+```
+
+`bin\start-server.bat` 会把仓库（或发布包）根目录作为工作目录启动服务，因此无需任何环境变量即可加载该文件。
+在别的目录启动服务时，若未设置 `RTDB_CONFIG`，则直接使用内置默认值。下面的文件列出了**全部键及其默认值**，
+可直接当模板使用 —— 每个键都可省略，省略则保持默认值：
 
 ```json
 {
@@ -48,7 +61,7 @@
     "tokensFile": ""
   },
 
-  "admin": { "enabled": true, "staticDir": "" },
+  "admin": { "enabled": true, "staticDir": "", "exposePaths": false },
   "cors": { "allowedOrigins": [] },
 
   "write": {
@@ -104,6 +117,7 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `auth.tokensFile` | `""` | API 令牌目录 JSON；留空 = `{dataDir}/rtdb-tokens.json`。 |
 | `admin.enabled` | `true` | 在 `/admin` 提供 Web 控制台。 |
 | `admin.staticDir` | `""` | 覆盖控制台静态资源目录；留空 = 内置的 `packages/admin/dist`。 |
+| `admin.exposePaths` | `false` | `false`：`GET /api/v1/databases/:db` 返回**相对工作目录**的路径（如 `rtdb-data/plant_a`）；`true`：返回解析后的绝对路径（会暴露主机目录结构）。 |
 | `cors.allowedOrigins` | `[]` | 显式开启的 CORS 来源；`["*"]` 允许任意。留空则完全关闭 CORS。 |
 | `write.walEnabled` | `true` | 预写日志。仅当数据可重新生成时才设为 `false`。 |
 | `write.fsyncPolicy` | `wal` | `wal` = 每次 WAL 追加后成组 fsync；`none` = 依赖操作系统。 |
@@ -154,6 +168,7 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `RTDB_AUTH_USERS_FILE` | `auth.usersFile` |
 | `RTDB_AUTH_TOKENS_FILE` | `auth.tokensFile` |
 | `RTDB_ADMIN_ENABLED` | `admin.enabled` |
+| `RTDB_ADMIN_EXPOSE_PATHS` | `admin.exposePaths`（`true`/`1`、`false`/`0`） |
 | `RTDB_CORS_ALLOWED_ORIGINS` | `cors.allowedOrigins`（逗号分隔） |
 | `RTDB_LOG_LEVEL` | `log.level` |
 
@@ -276,3 +291,5 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本；随英文版更新同步 §2 启动参数说明、§6.2 口令哈希生成方式 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 `auth.bootstrapUsername` / `auth.bootstrapPassword`（默认 `admin` / `ss-rtdb`）、对应环境变量与 §6.4「首次启动的默认管理员与登录」 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 补充运行期 `conf/rtdb-server.json`（由工作目录自动加载，仓库与发布包均自带）与 `admin.exposePaths` / `RTDB_ADMIN_EXPOSE_PATHS` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | `admin.exposePaths` 默认改为 `false`：数据库目录按工作目录相对路径报告，`true` 才返回绝对路径 | DeepSeek-V4.1-Flash |

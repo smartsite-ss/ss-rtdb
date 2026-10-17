@@ -1,0 +1,64 @@
+{
+  "port": 6180,
+  "host": "127.0.0.1",
+  "dataDir": "./rtdb-data",
+  "retentionDays": 0,
+  "archiveDir": "",
+  "archiveBeforeDelete": false,
+
+  "auth": {
+    "enabled": true,
+    "mode": "token",
+    "token": "",
+    "tokenFile": "./rtdb.token",
+    "username": "admin",
+    "password": "",
+    "passwordHash": "",
+    "bootstrapUsername": "admin",
+    "bootstrapPassword": "ss-rtdb",
+    "write": true,
+    "query": true,
+    "usersFile": "",
+    "tokensFile": ""
+  },
+
+  "admin": {
+    "enabled": true,
+    "staticDir": "",
+    "exposePaths": false
+  },
+  "cors": {
+    "allowedOrigins": []
+  },
+
+  "write": {
+    "walEnabled": true,
+    "fsyncPolicy": "wal",
+    "blockTargetPoints": 16384,
+    "blockMinPoints": 1024,
+    "flushIntervalMs": 5000,
+    "maxBufferBytes": 268435456,
+    "maxPendingPoints": 2000000,
+    "maxBatch": 1000000
+  },
+
+  "storage": {
+    "segment": {
+      "maxBytes": 209715200,
+      "maxPerDay": 1000
+    }
+  },
+  "cache": {
+    "blocks": 256,
+    "fdGroups": 32
+  },
+  "query": {
+    "defaultLimit": 100000
+  },
+  "http": {
+    "maxBodyBytes": 67108864
+  },
+  "log": {
+    "level": "info"
+  }
+}

@@ -7,11 +7,14 @@
  * rtdb-server configuration loading and validation (aligns with "Detailed Design v2.0" §6.1 ~ §6.5)
  *
  * Precedence (low → high): built-in defaults < config file < environment variables < explicit arguments (CLI / SDK direct pass).
- * Out-of-range numbers are clamped by core `clampEngineOption` at engine construction time (+WARN); only "semantic conflicts" startup-time validation is handled here.
+ * The config file is `conf/rtdb-server.json` under the **process working directory** when it exists (the
+ * runtime layout shipped with the repository / release package); `--config` or `RTDB_CONFIG` replace it instead
+ * of layering on top. Out-of-range numbers are clamped by core `clampEngineOption` at engine construction time
+ * (+WARN); only "semantic conflicts" startup-time validation is handled here.
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
 import type { EngineOptions } from '../../core/src/types.ts';
@@ -50,11 +53,11 @@ export interface AdminConfig {
   /** Empty = bundled `packages/admin/dist` */
   staticDir: string;
   /**
-   * Expose absolute server paths (`directory`) in `GET /api/v1/databases/{db}`.
+   * Report the `directory` field of `GET /api/v1/databases/{db}` as an absolute path.
    *
-   * On for the default single-tenant deployment (the field is what makes the console usable for locating
-   * data); turn it off when the API is exposed to users who must not learn the server layout — the endpoint
-   * then reports `{dataDir}/{db}` instead of the resolved absolute path.
+   * Off by default: the endpoint reports the directory **relative to the server working directory**
+   * (`rtdb-data/plant_a`), which is what the console shows and keeps the host layout out of the API.
+   * Turn it on only for an operator tool that needs the resolved absolute path.
    */
   exposePaths: boolean;
 }
@@ -140,7 +143,7 @@ export const SERVER_CONFIG_DEFAULTS: ServerConfig = {
     usersFile: '',
     tokensFile: '',
   },
-  admin: { enabled: true, staticDir: '', exposePaths: true },
+  admin: { enabled: true, staticDir: '', exposePaths: false },
   cors: { allowedOrigins: [] },
   write: {
     walEnabled: true,
@@ -161,6 +164,13 @@ export const SERVER_CONFIG_DEFAULTS: ServerConfig = {
 
 /* ---------- Loading ---------- */
 
+/**
+ * Runtime configuration file, relative to the process working directory. The repository and the release
+ * package both ship a `conf` directory next to `bin/`, so starting from the root picks this file up
+ * automatically; `--config` / `RTDB_CONFIG` point at another file instead.
+ */
+export const DEFAULT_CONFIG_FILE_PATH = 'conf/rtdb-server.json';
+
 export interface LoadServerConfigOptions {
   configFilePath?: string;
   env?: NodeJS.ProcessEnv;
@@ -171,7 +181,7 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
   const env = options.env ?? process.env;
   const raw = structuredClone(SERVER_CONFIG_DEFAULTS) as unknown as JsonObject;
 
-  const configFilePath = options.configFilePath ?? env.RTDB_CONFIG;
+  const configFilePath = options.configFilePath ?? env.RTDB_CONFIG ?? findDefaultConfigFile();
   if (configFilePath !== undefined && configFilePath.length > 0) {
     mergeDeep(raw, readConfigFile(configFilePath));
   }
@@ -179,6 +189,12 @@ export function loadServerConfig(options: LoadServerConfigOptions = {}): ServerC
   if (options.overrides !== undefined) mergeDeep(raw, options.overrides as unknown as JsonObject);
 
   return normalizeServerConfig(raw);
+}
+
+/** Absolute path of the runtime config file when it exists; `undefined` keeps the built-in defaults */
+function findDefaultConfigFile(): string | undefined {
+  const candidate = resolve(DEFAULT_CONFIG_FILE_PATH);
+  return existsSync(candidate) ? candidate : undefined;
 }
 
 function readConfigFile(filePath: string): JsonObject {
@@ -327,6 +343,23 @@ export function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase();
   if (normalized === 'localhost' || normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') return true;
   return /^127(\.\d{1,3}){3}$/.test(normalized);
+}
+
+/**
+ * Directory string reported by `GET /api/v1/databases/:db`.
+ *
+ * The default is a path **relative to the process working directory** (`rtdb-data/plant_a`), so the console
+ * shows where the data sits inside the runtime layout without disclosing the host layout. `admin.exposePaths`
+ * switches to the resolved absolute directory for operator tooling. When the data root lives outside the
+ * working directory (or on another Windows drive) the relative form would leak as many `..` segments as the
+ * absolute one, so the configured `{dataDir}/{database}` is reported instead.
+ */
+export function reportedDatabaseDirectory(config: ServerConfig, measuredDirectory: string, database: string): string {
+  if (config.admin.exposePaths) return measuredDirectory;
+  const relativePath = relative(process.cwd(), measuredDirectory);
+  if (relativePath.length === 0) return '.';
+  if (isAbsolute(relativePath) || relativePath.startsWith('..')) return join(config.dataDir, database);
+  return relativePath;
 }
 
 /* ---------- Mapping to engine options ---------- */

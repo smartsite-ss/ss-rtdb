@@ -73,6 +73,7 @@ ss-rtdb/
 │   │       └── conf/         # rtdb-server.json / client-smart-site.json
 │   ├── __tests__/            # node:test 套件（*.test.ts）+ benchmark/
 │   └── scripts/              # check-runtime-dependencies.ts、check-throughput-regression.ts
+├── conf/                     # rtdb-server.json —— 服务端默认配置（工作目录存在时自动加载）
 ├── bin/                      # 发布 / 启动批处理脚本（.bat 规则见 §4 第 10 条）
 │   ├── build-release.bat     #   构建并打包到 release\ss-rtdb-<version>\
 │   ├── build-sea.bat         #   生成单文件 release\sea\rtdb-server.exe（Node SEA）
@@ -275,6 +276,8 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 
 - 服务默认监听 `127.0.0.1:6180`，数据根默认 `./rtdb-data`（相对启动目录），
   首次启动会生成令牌文件 `./rtdb.token`（`0600`，所有写入/查询都需要它）。
+- 运行期配置文件：工作目录下的 `conf/rtdb-server.json` 存在时**自动加载**（仓库与发布包都自带，
+  内容即内置默认值，可直接改）；`RTDB_CONFIG` / `--config` 指定其他文件时**取代**它而非叠加。
 - `auth.enabled` 默认开启；非回环监听必须保持鉴权开启，否则启动失败（`E_AUTH`）。
 - 无需鉴权的观测端点：`GET /healthz`、`GET /api/v1/status`、`GET /metrics`（Prometheus）。
 - Web 控制台在 `/admin/`（结尾斜杠必需；根路径 `/` 会 302 跳转过去），需先
@@ -298,3 +301,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 新增 `bin\demo-smart-site.bat` 包装脚本（list / dry / once / stream / run）；§2 命令表与 §3 布局同步 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 `packages/demo/conf/` 统一配置（`rtdb-server.json`、`client-smart-site.json`）与 `bin\start-demo-server.bat`；客户端支持 `--config` / `--no-config` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `workspaces` 增加 `packages/demo/*`，`check:deps` 支持嵌套工作区；§2 Python SDK 路径、§3 布局、§4 文件头自检路径同步到 `packages/demo/client-*` | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增运行期配置目录 `conf/`（`rtdb-server.json` 默认配置，工作目录存在时自动加载）；§3 布局与 §10 运行时注意事项同步 | DeepSeek-V4.1-Flash |

@@ -93,6 +93,13 @@ mkdir "%TARGET%\bin" 2>nul
 copy /y "%ROOT%\bin\start-server.bat" "%TARGET%\bin\start-server.bat" >nul
 copy /y "%ROOT%\bin\rtdbctl.bat" "%TARGET%\bin\rtdbctl.bat" >nul
 
+echo [INFO] copying the default configuration ...
+robocopy "%ROOT%\conf" "%TARGET%\conf" /E >nul
+if errorlevel 8 (
+  echo [ERROR] robocopy failed while copying conf.
+  exit /b 1
+)
+
 echo [INFO] copying documentation ...
 robocopy "%ROOT%\docs-o" "%TARGET%\docs" /E >nul
 if errorlevel 8 (

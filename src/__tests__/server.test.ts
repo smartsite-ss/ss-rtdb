@@ -533,6 +533,54 @@ describe('server: 管理路由', () => {
     }
   });
 
+  it('GET /api/v1/databases/:db 返回目录、占用细分、按天明细与读回的保留策略', async () => {
+    const { server, baseUrl, dataDir } = await startTestServer();
+    try {
+      await postJson(baseUrl, '/api/v1/write?db=alpha', [
+        { metricName: 'm1', t: BASE, v: 1 },
+        { metricName: 'm1', t: BASE + 1000, v: 2 },
+      ]);
+
+      const response = await fetch(`${baseUrl}/api/v1/databases/alpha`);
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as {
+        database: string;
+        directory: string;
+        fileCount: number;
+        totalBytes: number;
+        breakdown: { segmentBytes: number; indexBytes: number; walBytes: number; otherBytes: number };
+        retentionDays: number | null;
+        days: { dayLabel: string; fileCount: number; totalBytes: number }[];
+      };
+      assert.equal(body.database, 'alpha');
+      assert.equal(body.directory, join(dataDir, 'alpha'));
+      assert.ok(body.fileCount >= 1);
+      assert.ok(body.totalBytes > 0);
+      assert.equal(body.retentionDays, null);
+      assert.ok(body.days.length >= 1);
+      assert.match(body.days[0].dayLabel, /^\d{8}$/);
+      const { segmentBytes, indexBytes, walBytes, otherBytes } = body.breakdown;
+      assert.ok(segmentBytes + indexBytes + walBytes + otherBytes > 0);
+      assert.ok(segmentBytes + indexBytes + walBytes + otherBytes <= body.totalBytes);
+
+      const retention = await putJson(baseUrl, '/api/v1/retention/alpha', { days: 7 });
+      assert.equal(retention.status, 200);
+      const reread = await fetch(`${baseUrl}/api/v1/databases/alpha`);
+      const rereadBody = (await reread.json()) as { retentionDays: number | null };
+      assert.equal(rereadBody.retentionDays, 7);
+
+      const missing = await fetch(`${baseUrl}/api/v1/databases/nosuchdb`);
+      assert.equal(missing.status, 404);
+      assert.equal((await readErrorBody(missing)).error, ERROR_CODE.DatabaseNotFound);
+
+      const invalid = await fetch(`${baseUrl}/api/v1/databases/1invalid`);
+      assert.equal(invalid.status, 400);
+      assert.equal((await readErrorBody(invalid)).error, ERROR_CODE.InvalidPoint);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('POST /api/v1/backup/:db 返回复制文件数', async () => {
     const { server, baseUrl, dataDir } = await startTestServer();
     try {

@@ -10,11 +10,22 @@
  * operator workstation, so no `toLocaleString`-style API is used anywhere.
  */
 
-/** Thousands-separated integer, otherwise the raw value */
+/** Insert thousands separators into the integer part, keeping any fraction untouched */
+function groupThousands(text: string): string {
+  const dotIndex = text.indexOf('.');
+  const integerPart = dotIndex === -1 ? text : text.slice(0, dotIndex);
+  const grouped = integerPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return dotIndex === -1 ? grouped : `${grouped}${text.slice(dotIndex)}`;
+}
+
+/**
+ * Thousands-separated number: integers stay integer, fractional values are kept to **two decimals**
+ * (`8.30`, not `8.29610443115234`). The status panel displays MiB / ms measurements whose raw float
+ * representation is unreadable at full precision.
+ */
 export function formatNumber(value: number): string {
   if (!Number.isFinite(value)) return String(value);
-  if (!Number.isInteger(value)) return String(value);
-  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return groupThousands(Number.isInteger(value) ? String(value) : value.toFixed(2));
 }
 
 const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'] as const;

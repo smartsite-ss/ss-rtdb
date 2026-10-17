@@ -98,6 +98,37 @@ export interface RtdbSessionInfo {
   scopes: string[];
 }
 
+/** Footer of one day directory inside a database (`yyyyMMdd`) */
+export interface RtdbDatabaseDaySize {
+  dateNumber: number;
+  /** `yyyyMMdd` label */
+  dayLabel: string;
+  fileCount: number;
+  totalBytes: number;
+}
+
+/** Byte split by file role, so the console can show segments / index / WAL separately */
+export interface RtdbDatabaseSizeBreakdown {
+  segmentBytes: number;
+  indexBytes: number;
+  walBytes: number;
+  otherBytes: number;
+}
+
+/** `GET /api/v1/databases/{database}` result: on-disk footprint plus the database-level retention override */
+export interface RtdbDatabaseReport {
+  database: string;
+  /** Absolute database directory on the server */
+  directory: string;
+  fileCount: number;
+  totalBytes: number;
+  breakdown: RtdbDatabaseSizeBreakdown;
+  /** Database-level retention override; `null` = absent (the global default applies) */
+  retentionDays: number | null;
+  /** Per-day detail, `yyyyMMdd` ascending */
+  days: RtdbDatabaseDaySize[];
+}
+
 /** Error raised for a non-2xx REST response; `status` / `code` mirror the §3.3 error table */
 export class RtdbAdminApiError extends Error {
   readonly status: number;
@@ -155,6 +186,11 @@ export class RtdbAdminApiClient {
   async listDatabases(): Promise<string[]> {
     const body = await this.request<{ databases: string[] }>('GET', '/api/v1/databases');
     return body.databases;
+  }
+
+  /** `GET /api/v1/databases/{database}` — directory, on-disk size and retention of one database */
+  getDatabaseReport(database: string): Promise<RtdbDatabaseReport> {
+    return this.request<RtdbDatabaseReport>('GET', `/api/v1/databases/${encodeURIComponent(database)}`);
   }
 
   async listMetrics(database: string): Promise<RtdbMetricSummary[]> {

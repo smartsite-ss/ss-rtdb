@@ -19,6 +19,7 @@
  * Output layout (release/sea/):
  *   rtdb-server.exe          single executable (Node runtime + engine + HTTP server)
  *   admin/dist/              web console served at /admin/
+ *   conf/rtdb-server.json    default configuration, loaded from the working directory when present
  *   rtdb-data/               created on first run (data root; override with RTDB_DATA_DIR)
  *
  * Run through `bin\build-sea.bat`, which checks the toolchain and builds the admin console first.
@@ -175,12 +176,23 @@ if (existsSync(adminDist)) {
   console.warn('[WARN] the executable will still run, but /admin/ returns 404.');
 }
 
+const confSource = join(root, 'conf');
+if (existsSync(confSource)) {
+  const confTarget = join(outDir, 'conf');
+  rmSync(confTarget, { recursive: true, force: true });
+  cpSync(confSource, confTarget, { recursive: true });
+  step(`default configuration copied to ${relative(root, confTarget).replaceAll('\\', '/')}`);
+} else {
+  console.warn('[WARN] conf/ is missing - the executable falls back to the built-in defaults.');
+}
+
 // ---------------------------------------------------------------- summary
 const sizeMb = (statSync(exePath).size / (1024 * 1024)).toFixed(1);
 console.log('');
 console.log(`[OK] single executable ready: ${relative(root, exePath).replaceAll('\\', '/')} (${sizeMb} MB)`);
 console.log('[OK]   run      : rtdb-server.exe');
 console.log('[OK]   data dir : .\\rtdb-data (next to the executable; override with RTDB_DATA_DIR)');
+console.log('[OK]   config   : .\\conf\\rtdb-server.json (edit in place; override with RTDB_CONFIG)');
 console.log('[OK]   console  : http://127.0.0.1:6180/admin/');
 console.log('[OK]   notes    : the data directory and admin/ stay external by design;');
 console.log('[OK]              build intermediates are kept in release/sea/.build for troubleshooting.');

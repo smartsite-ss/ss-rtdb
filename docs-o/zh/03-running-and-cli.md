@@ -11,6 +11,11 @@ node packages/server/src/main.ts
 node packages/server/src/main.ts   # 通过 RTDB_CONFIG 附加 --config
 ```
 
+> **运行期配置文件。** 服务会从**工作目录**下的 `conf/rtdb-server.json` 加载配置（存在时，见
+> [02 — 配置](./02-configuration.md) §2）。`bin\start-server.bat` 以仓库 / 发布包根目录作为工作目录启动，
+> 因此该文件会自动生效；`npm start --workspace @ss/rtdb-server` 的工作目录是 `src/packages/server`，
+> 那里没有 `conf/`，请显式设置 `RTDB_CONFIG`，或在根目录用 `node src/packages/server/src/main.ts` 启动。
+
 启动日志：
 
 ```
@@ -23,6 +28,20 @@ rtdb-server started: http://127.0.0.1:6180 (dataDir=./rtdb-data)
 **停止。** 发送 `SIGINT`（Ctrl+C）或 `SIGTERM`；服务会先刷缓冲区、封存活动段、截断 WAL、
 释放数据根锁再退出。不要对健康的服务使用 `SIGKILL` —— 那样最多丢失最后 ≤5 秒的 WAL，
 同时还会留下一个待回收的锁。
+
+### 交互式控制台按键
+
+当 stdin 是终端时（`rtdb-server.exe` 窗口、`bin\start-server.bat`、或在 shell 里 `npm start`），服务会监听单键：
+
+| 按键 | 动作 |
+| ---- | ---- |
+| `q`（或 `Ctrl+C`） | 安全退出 —— 与 `SIGINT` 同一条路径：停止接收请求、等待在途请求结束、刷盘并关闭引擎、释放数据根锁、以 `0` 退出 |
+| `r` | 安全重启 / 重载 —— 停止监听与引擎，重新读取配置文件（`conf/rtdb-server.json` 或 `RTDB_CONFIG` 指定的文件），然后**在同一进程内**重新启动 |
+
+- 想在不关窗口的情况下应用配置变更（端口、默认保留天数、日志级别等），按 `r` 即可。
+- 重载失败（JSON 非法、端口已被占用）会打印错误并**保持进程存活**：改好文件再按 `r`，或按 `q` 退出。
+- 仅在 stdin 为 TTY 时挂载按键；systemd / 重定向 stdin 场景不接管输入，仍由信号控制。
+- `q` / `r` 不区分大小写；其它按键一律忽略（Ctrl+字母组合键有意忽略）。
 
 ### 首次运行令牌
 
@@ -301,3 +320,5 @@ systemctl start ss-rtdb
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §1 补充运行期配置文件 `conf/rtdb-server.json`（相对工作目录）及两种启动方式的差异 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | 新增「交互式控制台按键」：`q` 安全退出、`r` 安全重启（就地重读配置），仅 TTY 生效 | DeepSeek-V4.1-Flash |

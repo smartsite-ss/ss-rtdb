@@ -90,7 +90,7 @@ operators and let each of them point it at whichever instance they manage.
 | Panel | What it shows / does |
 | ----- | -------------------- |
 | **Status** | Connection state, write & query rates, WAL backlog, cache hit rate, latency percentiles |
-| **Databases** | Database list with retention, on-disk size and metric count |
+| **Databases** | Two categories: (1) location / size / status — directory (relative to the server working directory), on-disk footprint with the segment / index / WAL split, the retention override and an expandable per-day detail; (2) a database-name filter whose result is the inventory table. Retention can be changed inline and is read back from `GET /api/v1/databases/{db}` |
 | **Metrics** | Metric browser with first/last timestamps and a time-series line chart preview |
 | **Backup** | Trigger a whole-database backup and show the result |
 | **Access control** | Users (create / change password / change role / enable-disable / remove) and API tokens (issue / revoke; the plaintext is shown once) |
@@ -149,3 +149,5 @@ The console ships two locales and starts in **English**:
 | 2026-10-17 | Documented console sign-in (default administrator `admin` / `ss-rtdb`, Sign in / Sign out, pasting an existing token) and added two sign-in troubleshooting rows | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Sign-in form moved to the top and pre-filled with `admin` / `ss-rtdb`; the header always shows a Sign in / Sign out entry point | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Console internationalised (English default + Chinese) with a header language switch persisted in `localStorage`; added §5 "Languages" and renumbered the following sections | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Databases panel reworked into two categories: location / size / status from the new `GET /api/v1/databases/{db}` endpoint (expandable per-day detail, retention read back) and a database-name filter whose result is the inventory table | DeepSeek-V4.1-Flash |
+| 2026-10-17 | Location column shows the server-reported directory, now relative to the working directory instead of an absolute host path | DeepSeek-V4.1-Flash |
