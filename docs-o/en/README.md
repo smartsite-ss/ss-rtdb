@@ -153,3 +153,11 @@ Apache License 2.0. Every source file carries the standard Apache-2.0 header; se
 
 - Website: <https://smartsite.top/>
 - Contact: zkxxa@qq.com, zcwebms@gmail.com
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |

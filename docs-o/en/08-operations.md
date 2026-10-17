@@ -238,3 +238,11 @@ rtdbctl archive plant_a            # review cold archives
 ## 13. Next steps
 
 - [09 — Developer guide](./09-developer-guide.md)
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |

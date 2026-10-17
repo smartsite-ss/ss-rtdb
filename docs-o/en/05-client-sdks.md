@@ -263,3 +263,11 @@ Same retry policy as the Node SDK: only `429` and transport failures are retried
 ## 4. Next steps
 
 - [06 — Embedded engine (Form A)](./06-embedded-engine.md)
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |

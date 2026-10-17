@@ -79,7 +79,10 @@ cli ────┼──> server ──> core
 3. **相对导入必须带 `.ts` 扩展名**（`import { X } from './engine.ts'`），
    因为启用了 `allowImportingTsExtensions` + `rewriteRelativeImportExtensions`。
 4. **类型导入用 `import type { … }`**（`verbatimModuleSyntax`）。
-5. **每个源文件（含 `.py`、`.toml`）必须以 Apache-2.0 文件头开始**，发布检查会 grep 校验：
+5. **所有代码文件必须以 Apache-2.0 文件头开始（强制，无例外）** —— 覆盖 `src/**` 下的
+   `.ts` / `.js` / `.mjs` / `.cjs` / `.vue` / `.css` / `.html` / `.py` / `.toml`，
+   测试（`__tests__/**`）、基准、脚本（`scripts/**`）与构建配置同样适用。新建文件的第一步
+   就是写入这 4 行（注释语法按语言调整）：
 
    ```ts
    // Copyright (c) 2025 Smart Site Team
@@ -87,6 +90,17 @@ cli ────┼──> server ──> core
    // https://smartsite.top/
    // Contact: zkxxa@qq.com, zcwebms@gmail.com
    ```
+
+   - 语言差异：Python / TOML / YAML 用 `#`；HTML 与 Vue 的 `<template>` 顶部用
+     `<!-- … -->`；CSS 用 `/* … */`。
+   - `package.json` 等 JSON 文件不能写注释，但必须在 `license` 字段声明 `Apache-2.0`。
+   - 修改既有文件时不得删除或改动该文件头；新增文件必须补上。
+   - 提交前自检（应无输出）：
+
+     ```bash
+     grep -rl --include='*.ts' --include='*.vue' --include='*.py' \
+       -L 'SPDX-License-Identifier: Apache-2.0' packages/*/src __tests__ scripts
+     ```
 
 6. **错误处理**：抛 `RtdbError` 并携带 `ERROR_CODE`（`packages/core/src/errors.ts`），
    服务端经 `ERROR_CODE_HTTP_STATUS` 映射为 HTTP 状态；路由层问题用 `HttpFailure`。
@@ -125,9 +139,18 @@ cli ────┼──> server ──> core
   `docs-o/en/<页>.md` 与 `docs-o/zh/<页>.md`（两套页码一一对应：`README` + `01`…`09`）。
 - 新增/删除页面时，同步更新 `docs-o/en/README.md` 与 `docs-o/zh/README.md` 的索引表，
   以及仓库根 `README.md` 的双语文档索引表。
-- **每次修改中文文档（`docs-o/zh/**`、根 `README.md`、本文件等）都必须在被改页面末尾的
-  「更新日志」表中追加一行**，字段为「日期 | 变更 | 处理模型」；「处理模型」填写实际执行本次
-  修改的模型名称（例如 `DeepSeek-V4.1-Flash`）。只允许追加，不得改写或删除既有历史行。
+- **每次修改任何文档都必须在被改页面末尾追加一行修订记录（强制，无例外）**：
+  - 中文文档（`docs-o/zh/**`、根 `README.md`、`AGENTS.md`）→ 章节标题 `## 更新日志`；
+  - 英文文档（`docs-o/en/**`）→ 章节标题 `## Revision history`。
+  - 表格固定三列：中文为「日期 | 变更 | 处理模型」，英文为 `Date | Change | Model`；
+    「处理模型」填写实际执行本次修改的模型名称（例如 `DeepSeek-V4.1-Flash`）。
+  - 新建页面时即在末尾创建该章节并写入首行记录；**只允许追加，不得改写或删除既有历史行**。
+  - 提交前自检（中文文档与英文文档的计数应分别等于文档总数）：
+
+    ```bash
+    git grep -c '^## 更新日志' -- docs-o/zh README.md AGENTS.md
+    git grep -c '^## Revision history' -- docs-o/en
+    ```
 - 页内交叉引用使用“§N 小节名”文字描述，不要写基于英文标题生成的锚点。
 - 不要把 `docs-e/`、运行时数据（`rtdb-data/`、`*.token`）、`dist/`、`node_modules/` 提交入库。
 
@@ -186,3 +209,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建本文件（面向 AI 编码代理的仓库指南）；同日补充 §7「中文文档更新日志」规则 | DeepSeek-V4.1-Flash |
+| 2026-10-17 | §4 强化「所有代码文件必须带 Apache-2.0 文件头」；§7 修订记录规则扩展至中英全部文档；补齐 `src/packages/admin/index.html` 文件头 | DeepSeek-V4.1-Flash |

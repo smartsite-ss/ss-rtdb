@@ -181,3 +181,11 @@ Then tag and publish the packages (`@ss/rtdb-core`, `@ss/rtdb-client`, `@ss/rtdb
 ## 9. License
 
 Apache License 2.0. Contributions are accepted under the same license; keep the file header intact.
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |

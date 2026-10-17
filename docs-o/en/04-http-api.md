@@ -392,3 +392,11 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 ## 10. Next steps
 
 - [05 — Client SDKs](./05-client-sdks.md) — use these endpoints from Node or Python.
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |

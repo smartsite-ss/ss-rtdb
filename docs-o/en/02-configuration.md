@@ -242,3 +242,11 @@ calls the REST API cross-origin, so the instance must allow that origin:
 ## 8. Next steps
 
 - [03 — Running the server & `rtdbctl`](./03-running-and-cli.md)
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |

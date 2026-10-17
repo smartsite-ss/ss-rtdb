@@ -294,3 +294,11 @@ systemctl start ss-rtdb
 
 - [04 — HTTP API](./04-http-api.md) — the contract behind every online command.
 - [08 — Operations & maintenance](./08-operations.md) — backup strategy, retention, monitoring.
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |

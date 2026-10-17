@@ -104,3 +104,11 @@ Status data comes from `GET /api/v1/status`; everything else mirrors the endpoin
 ## 6. Next steps
 
 - [08 — Operations & maintenance](./08-operations.md)
+
+---
+
+## Revision history
+
+| Date | Change | Model |
+| ---- | ------ | ----- |
+| 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
