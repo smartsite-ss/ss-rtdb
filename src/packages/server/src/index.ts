@@ -49,8 +49,8 @@ export type {
 } from './config.ts';
 
 /* ---------- Protocol codec (§3.1) ---------- */
-export { decodeWritePointBatch, encodeAggregateWindows, encodeMetricSummaries, encodePoint, encodeSeries } from './json-codec.ts';
-export type { JsonMetricSummary, JsonPoint, JsonSeries, JsonWindow } from './json-codec.ts';
+export { decodeWritePointBatch, encodeAggregateWindows, encodeAtPoints, encodeMetricSummaries, encodePoint, encodeSeries } from './json-codec.ts';
+export type { JsonAtPoint, JsonMetricSummary, JsonPoint, JsonSeries, JsonWindow } from './json-codec.ts';
 export { parseLineProtocol } from './line-protocol.ts';
 export type { LineProtocolResult } from './line-protocol.ts';
 

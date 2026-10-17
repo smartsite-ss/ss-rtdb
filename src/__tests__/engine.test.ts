@@ -185,6 +185,54 @@ describe('引擎: 写入与查询可见性', () => {
       await engine.close();
     }
   });
+
+  it('服务器接收时间窗口：缓冲点即查即有 received；成块落段后随块持久化', async () => {
+    // 缓冲路径：未成块点由写入时的到达窗口提供 received
+    const bufferedEngine = await openEngine(createDataDir());
+    try {
+      await bufferedEngine.writeBatch('db', pointsFrom('m.buf', [1, 2, 3], DAY_BASE));
+      const buffered = await bufferedEngine.queryRange('db', 'm.buf', {
+        start: DAY_BASE,
+        end: DAY_BASE + 2000,
+      });
+      assert.ok(buffered.received !== undefined, '缓冲可见性查询应携带 received');
+      assert.ok(buffered.received.min > 0);
+      assert.ok(buffered.received.min <= buffered.received.max);
+    } finally {
+      await bufferedEngine.close();
+    }
+
+    // 成块路径：4096 点达成目标块 → 立即落段
+    const dataDir = createDataDir();
+    const blockEngine = await openEngine(dataDir, { blockTargetPoints: 4096 });
+    try {
+      const values = Array.from({ length: 4096 }, (_, index) => index);
+      await blockEngine.writeBatch('db', pointsFrom('m.blk', values, DAY_BASE));
+      const flushed = await blockEngine.queryRange('db', 'm.blk', {
+        start: DAY_BASE,
+        end: DAY_BASE + 4095_000,
+      });
+      assert.ok(flushed.received !== undefined, '落段查询应携带 received');
+      assert.ok(flushed.received.min <= flushed.received.max);
+      // 数据时间戳（DAY_BASE 固定值）与接收时间（真实 wall clock）相互独立
+      assert.ok(flushed.received.max > DAY_BASE, '接收时间应晚于写入的数据时间戳');
+    } finally {
+      await blockEngine.close();
+    }
+
+    // 重开：窗口从块尾 16B 读出（格式往返验证）
+    const reopened = await openEngine(dataDir);
+    try {
+      const persisted = await reopened.queryRange('db', 'm.blk', {
+        start: DAY_BASE,
+        end: DAY_BASE + 4095_000,
+      });
+      assert.ok(persisted.received !== undefined, 'received 应随块持久化并在重开后可读');
+      assert.ok(persisted.received.min <= persisted.received.max);
+    } finally {
+      await reopened.close();
+    }
+  });
 });
 
 /* ---------- status 指标（§3.4） ---------- */
@@ -601,6 +649,133 @@ describe('引擎: 管理 API', () => {
 
       await engine.setRetention('db', -3);
       assert.equal(readRetentionDays(dataDir, 'db'), 0, '负数钳位为 0（永久）');
+    } finally {
+      await engine.close();
+    }
+  });
+});
+
+/* ---------- 插值取值 queryAt（插值功能详细设计 M2.1） ---------- */
+
+describe('引擎: queryAt 插值取值', () => {
+  it('step：命中点 exact；两点之间与边缘前值保持 exact；早于首点且无历史 → no-data', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.step', [10, 20], DAY_BASE));
+      const results = await engine.queryAt('db', 'm.step', {
+        timestamps: [DAY_BASE, DAY_BASE + 500, DAY_BASE + 1000, DAY_BASE + 5000, DAY_BASE - 1000],
+      });
+      assert.deepStrictEqual(results, [
+        { timestamp: DAY_BASE, value: 10, state: 'exact' },
+        { timestamp: DAY_BASE + 500, value: 10, state: 'exact' },
+        { timestamp: DAY_BASE + 1000, value: 20, state: 'exact' },
+        { timestamp: DAY_BASE + 5000, value: 20, state: 'exact' },
+        { timestamp: DAY_BASE - 1000, value: null, state: 'no-data' },
+      ]);
+
+      const missing = await engine.queryAt('db', 'ghost.metric', { timestamps: [DAY_BASE] });
+      assert.deepStrictEqual(missing, [{ timestamp: DAY_BASE, value: null, state: 'no-data' }]);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('linear：两点之间线性插值 interpolated；数据范围外平推 extrapolated', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.lin', [0, 10, 40], DAY_BASE));
+      const results = await engine.queryAt('db', 'm.lin', {
+        timestamps: [DAY_BASE + 500, DAY_BASE + 1500, DAY_BASE - 1000, DAY_BASE + 9000],
+        mode: 'linear',
+      });
+      assert.equal(results[0].state, 'interpolated');
+      assert.equal(results[0].value, 5, '0→10 中点');
+      assert.equal(results[1].state, 'interpolated');
+      assert.equal(results[1].value, 25, '10→40 中点');
+      assert.equal(results[2].state, 'extrapolated');
+      assert.equal(results[2].value, 0, '早于首点 → 首点平推');
+      assert.equal(results[3].state, 'extrapolated');
+      assert.equal(results[3].value, 40, '晚于末点 → 末点平推');
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('linear：i64 四舍五入保持 bigint；exact 命中返回原值不取整', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.i64', [10n, 13n], DAY_BASE));
+      const results = await engine.queryAt('db', 'm.i64', {
+        timestamps: [DAY_BASE, DAY_BASE + 500],
+        mode: 'linear',
+      });
+      assert.equal(results[0].state, 'exact');
+      assert.equal(results[0].value, 10n);
+      assert.equal(typeof results[0].value, 'bigint');
+      assert.equal(results[1].state, 'interpolated');
+      assert.equal(results[1].value, 12n, '10 + 3×0.5 = 11.5 → 四舍五入 12');
+      assert.equal(typeof results[1].value, 'bigint');
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('linear：bool/string 整批拒绝 E_TYPE_MISMATCH；非法 mode/timestamps 拒绝 E_INVALID_POINT', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.bool', [true, false], DAY_BASE));
+      await engine.writeBatch('db', pointsFrom('m.str', ['a', 'b'], DAY_BASE));
+      await assert.rejects(
+        () => engine.queryAt('db', 'm.bool', { timestamps: [DAY_BASE], mode: 'linear' }),
+        (error) => expectRtdbCode(error, ERROR_CODE.TypeMismatch),
+      );
+      await assert.rejects(
+        () => engine.queryAt('db', 'm.str', { timestamps: [DAY_BASE], mode: 'linear' }),
+        (error) => expectRtdbCode(error, ERROR_CODE.TypeMismatch),
+      );
+      await assert.rejects(
+        () => engine.queryAt('db', 'm.bool', { timestamps: [DAY_BASE], mode: 'nearest' as 'linear' }),
+        (error) => expectRtdbCode(error, ERROR_CODE.InvalidPoint),
+      );
+      await assert.rejects(
+        () => engine.queryAt('db', 'm.bool', { timestamps: [] }),
+        (error) => expectRtdbCode(error, ERROR_CODE.InvalidPoint),
+      );
+      await assert.rejects(
+        () => engine.queryAt('db', 'm.bool', { timestamps: [DAY_BASE + 0.5] }),
+        (error) => expectRtdbCode(error, ERROR_CODE.InvalidPoint),
+      );
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('未成块缓冲点参与插值（写后立查）；结果按请求顺序回显且无序输入可处理', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.buf', [1, 5], DAY_BASE));
+      const results = await engine.queryAt('db', 'm.buf', {
+        timestamps: [DAY_BASE + 500, DAY_BASE],
+        mode: 'linear',
+      });
+      assert.equal(results[0].timestamp, DAY_BASE + 500, '结果按请求顺序回显');
+      assert.equal(results[0].value, 3, '1→5 中点');
+      assert.equal(results[0].state, 'interpolated');
+      assert.equal(results[1].state, 'exact');
+      assert.equal(results[1].value, 1);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('timestamps 超过 10_000 整批拒绝', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      const tooMany = Array.from({ length: 10_001 }, (_, index) => DAY_BASE + index);
+      await assert.rejects(
+        () => engine.queryAt('db', 'm.x', { timestamps: tooMany }),
+        (error) => expectRtdbCode(error, ERROR_CODE.InvalidPoint),
+      );
     } finally {
       await engine.close();
     }

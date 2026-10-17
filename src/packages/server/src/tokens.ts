@@ -114,6 +114,23 @@ export class TokenStore {
   }
 
   /**
+   * Revoke every still-active token of one user carrying the given label (used by the console sign-in to
+   * enforce single-session semantics: a new login retires the previous `console login` tokens). Returns the
+   * number of tokens revoked now (already-revoked ones keep their first timestamp and are not re-saved).
+   */
+  revokeActiveByLabel(user: string, label: string): number {
+    const now = Date.now();
+    let revokedCount = 0;
+    for (const record of this.records.values()) {
+      if (record.user !== user || record.label !== label || record.revokedAt !== null) continue;
+      record.revokedAt = now;
+      revokedCount += 1;
+    }
+    if (revokedCount > 0) this.save();
+    return revokedCount;
+  }
+
+  /**
    * Resolve a presented plaintext token to its record; `null` when the token is unknown, revoked, or expired.
    * This is the authentication hot path and performs no allocation beyond one SHA-256 digest.
    */

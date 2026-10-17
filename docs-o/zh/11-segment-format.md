@@ -77,11 +77,14 @@ flags 的时序约束：段头在**建段时**一次性写入（flags=0）；写
 | tsRawLen | u32 | **落盘**时间戳负载字节数（见下） |
 | valRawLen | u32 | **落盘**值负载字节数（见下） |
 | tsMin / tsMax | i64×2 | 块内毫秒时间戳范围 |
-| flags | u16 | bit0 `backfill`＝乱序回填块；bit2 `qualityPresent` 预留（M0 恒 0） |
+| flags | u16 | bit0 `backfill`＝乱序回填块；bit2 `qualityPresent` 预留（M0 恒 0）；bit3 `receivedTime`＝块尾附带 16B 服务器接收时间窗口 |
 | reserved | u16 | 0 |
-| crc32 | u32 | 覆盖整个 BlockData（§4） |
+| crc32 | u32 | 覆盖整个 BlockData（含接收时间窗口尾，见 §4） |
 
-块数据 `BlockData = tsEncoded(tsRawLen B) ++ valEncoded(valRawLen B)`。
+块数据 `BlockData = tsEncoded(tsRawLen B) ++ valEncoded(valRawLen B)`；flags bit3 置位时
+其后再跟 `receivedWindow(16B) = [receivedMin i64][receivedMax i64]`（毫秒 epoch，`totalLength`
+与块 CRC 覆盖范围相应 +16）。旧格式块（无该标志）读侧解析为 `receivedMin/receivedMax = null`，
+行为不变——接收时间窗口是**块/批次粒度**的到达追溯（补传识别、链路时延观测），不逐点存储。
 
 **关键口径**：`tsRawLen` / `valRawLen` 填的是**落盘（编码后）负载字节数**，不是解压后字节数
 ——读侧靠这两个数切分 BlockData。块内时间戳按**稳定升序**排序（相同时间戳保持写入顺序），
@@ -136,7 +139,7 @@ codecId 已固定进格式，**不得复用或重排**：
 
 | 校验点 | 作用域 | 算法 | 失败表现 |
 | ------ | ------ | ---- | -------- |
-| 块 CRC | 整个 BlockData | 链式 `crc32(val, crc32(ts))`（node:zlib） | 读侧抛 `E_CORRUPT_BLOCK` |
+| 块 CRC | 整个 BlockData | 链式 `crc32(val, crc32(ts))`（node:zlib）；flags bit3 置位时再链入 16B 接收时间窗口（`crc32(received, crc32(val, crc32(ts)))`） | 读侧抛 `E_CORRUPT_BLOCK` |
 | Footer CRC | Header 32B ++ indexOffset 8B | crc32 | 读侧按 `E_CORRUPT_SEGMENT` 处理 |
 
 - 段头本身无 CRC，靠 magic + version + 字段范围校验（`parseSegmentHeader`）。
@@ -263,3 +266,4 @@ i64 ∈ ±2^53；时间戳毫秒 epoch。
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建本页：段文件物理布局、编码与 CRC、写入十步链路、WAL 行格式与安全点（含"WAL 涨满清零"的解释）、启动恢复、常量与钳制表 | GLM-5.3-Flash |
+| 2026-10-17 | §2.2 块 flags 新增 bit3 `receivedTime`：块尾 16B `[receivedMin][receivedMax]` 服务器接收时间窗口（计入 `totalLength` 与 CRC 链）；§4 CRC 链同步 | GLM-5.3-Flash |

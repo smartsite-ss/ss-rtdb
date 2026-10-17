@@ -30,7 +30,7 @@ import type { AuthPrincipal, AuthScope } from './auth.ts';
 import { reportedDatabaseDirectory, toEngineOptions, validateServerConfig } from './config.ts';
 import type { ServerConfig } from './config.ts';
 import { HttpFailure, SERVER_ERROR_CODE, toHttpErrorResponse } from './http-error.ts';
-import { decodeWritePointBatch, encodeAggregateWindows, encodeMetricSummaries, encodePoint, encodeSeries } from './json-codec.ts';
+import { decodeWritePointBatch, encodeAggregateWindows, encodeAtPoints, encodeMetricSummaries, encodePoint, encodeSeries } from './json-codec.ts';
 import { parseLineProtocol } from './line-protocol.ts';
 import { Logger } from './logger.ts';
 import { PROMETHEUS_METRICS_CONTENT_TYPE, encodePrometheusMetrics } from './metrics.ts';
@@ -391,6 +391,11 @@ export class RtdbServer {
       await this.handleQueryAggregate(request, response);
       return;
     }
+    if (pathname === '/api/v1/query/at') {
+      if (method !== 'POST') throw methodNotAllowed('POST');
+      await this.handleQueryAt(request, response);
+      return;
+    }
     if (pathname === ADMIN_USERS_PATH) {
       await this.handleAdminUsers(request, response, method);
       return;
@@ -670,6 +675,37 @@ export class RtdbServer {
     this.sendJson(response, 200, { windows: encodeAggregateWindows(windows) });
   }
 
+  private async handleQueryAt(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const principal = this.requireAuth(request, 'query');
+    const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'query/at'), 'query/at');
+    const database = requireDatabaseName(readOptionalString(body.db));
+    this.tokenUsage.touch(principal?.tokenId, database);
+    const metricName = requireMetricName(body.metricName);
+    await this.requireMetric(database, metricName);
+
+    const timestamps = body.timestamps;
+    if (!Array.isArray(timestamps)) {
+      throw new RtdbError(ERROR_CODE.InvalidPoint, 'query/at body.timestamps must be an integer array');
+    }
+    for (let index = 0; index < timestamps.length; index += 1) {
+      if (typeof timestamps[index] !== 'number' || !Number.isInteger(timestamps[index])) {
+        throw new RtdbError(
+          ERROR_CODE.InvalidPoint,
+          `query/at body.timestamps[${index}] must be an integer ms epoch`,
+        );
+      }
+    }
+    let mode: 'step' | 'linear' | undefined;
+    if (body.mode !== undefined) {
+      if (body.mode !== 'step' && body.mode !== 'linear') {
+        throw new RtdbError(ERROR_CODE.InvalidPoint, `Invalid interpolation mode: ${String(body.mode)} (should be step|linear)`);
+      }
+      mode = body.mode;
+    }
+    const points = await this.engine.queryAt(database, metricName, { timestamps, mode });
+    this.sendJson(response, 200, { points: encodeAtPoints(points) });
+  }
+
   private async handleRetention(request: IncomingMessage, response: ServerResponse, database: string): Promise<void> {
     this.requireAuth(request, 'write', database);
     const body = requireJsonObject(
@@ -823,6 +859,10 @@ export class RtdbServer {
    * token carrying that user's role. The plaintext token is returned exactly once (only its hash is persisted),
    * so the caller keeps it and sends `Authorization: Bearer <token>` afterwards. `ttlMs` is optional; without it
    * the token never expires (same rule as `POST /api/v1/admin/tokens`).
+   *
+   * Single-session semantics: issuing a new `console login` token first revokes the same user's previous
+   * `console login` tokens, so repeated sign-ins do not accumulate orphaned credentials (admin-issued tokens
+   * with other labels and the static `auth.token` are unaffected).
    */
   private async handleAuthLogin(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'auth/login'), 'auth/login');
@@ -835,6 +875,7 @@ export class RtdbServer {
       // One message for "unknown user" and "wrong password" so the endpoint cannot be used to enumerate users.
       throw new RtdbError(ERROR_CODE.Auth, 'Invalid user name or password');
     }
+    this.requireTokenStore().revokeActiveByLabel(user.username, 'console login');
     const issued = this.requireTokenStore().issue({
       user: user.username,
       role: user.role,

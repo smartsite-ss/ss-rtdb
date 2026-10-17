@@ -36,6 +36,7 @@ export type { ClientErrorCode } from './errors.ts';
 export {
   VALUE_TYPE,
   decodeAggregateWindows,
+  decodeAtPoints,
   decodePoint,
   decodeSeries,
   decodeValue,
@@ -44,9 +45,13 @@ export {
 export type {
   AggregateType,
   AggregateWindowResult,
+  AtPointState,
+  AtQueryOptions,
+  ClientAtPoint,
   ClientPoint,
   ClientSeries,
   ClientWritePoint,
+  InterpolationMode,
   JsonPoint,
   JsonSeries,
   JsonWindow,

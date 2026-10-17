@@ -86,6 +86,7 @@ Every non-2xx response is JSON:
 | `POST` | `/api/v1/query/last` | query | Latest point at or before a timestamp |
 | `POST` | `/api/v1/query/count` | query | Point count (estimated or exact) |
 | `POST` | `/api/v1/query/aggregate` | query | Windowed aggregation |
+| `POST` | `/api/v1/query/at` | query | Point-in-time interpolated lookup |
 | `PUT` | `/api/v1/retention/:db` | write | Set per-database retention |
 | `POST` | `/api/v1/backup/:db` | write | Trigger a whole-database backup |
 | `GET` `POST` | `/api/v1/admin/users` | admin | List / create users |
@@ -210,13 +211,22 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/range" \
     "points": [
       { "t": 1760688000000, "v": 1024.5, "vt": 1 },
       { "t": 1760688001000, "v": 1030.25, "vt": 1 }
-    ]
+    ],
+    "received": { "min": 1760691600050, "max": 1760691600062 }
   }
 }
 ```
 
 `start` / `end` are **inclusive** ms epoch. `limit` defaults to `query.defaultLimit` (100 000);
 `order` is `asc` (default) or `desc`.
+
+`series.received` is the **server receive-time window** (ms epoch): `[min, max]` of the server
+receive times of the blocks hit by the range plus unblocked buffered points, at block/batch
+granularity (not per-point) and independent of the `limit` truncation. Uses: ① tell backfilled
+data apart (data timestamps far earlier than the receive time); ② observe client→server link
+latency and server blocking (with synchronized clocks, receive time should trail send time
+closely). Legacy blocks without the `receivedTime` flag (see doc 11 §2.2) carry no window; the
+key is absent when no hit point carries one.
 
 ### 4.2 `last`
 
@@ -276,7 +286,37 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/aggregate" \
 - A window with no coverage returns `null` for `v` and `count: 0`.
 - More than 100 000 windows in one call → `400 E_INVALID_RANGE`.
 
-### 4.5 Reading values
+### 4.5 `at` (point-in-time interpolation)
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/at" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricName":"station01.powerMeter.kwh",
+       "timestamps":[1760688000000,1760688900000],"mode":"linear"}'
+```
+
+```json
+{
+  "points": [
+    { "t": 1760688000000, "v": 1024.5, "vt": 1, "state": "exact" },
+    { "t": 1760688900000, "v": 1037.1, "vt": 1, "state": "interpolated" }
+  ]
+}
+```
+
+Batch value lookup at arbitrary timestamps (fifth query primitive; see the Interpolation Detailed Design):
+
+- `timestamps`: ms epoch array, any order, at most 10 000 per call (exceeding → `400 E_INVALID_POINT`).
+- `mode`: `step` (default, previous-value hold — the latest real point at or before `t`) |
+  `linear` (piecewise-linear between the two real neighbors; f64/i64 metrics only, other value types
+  reject the whole batch with `400 E_TYPE_MISMATCH`; i64 results are rounded back and returned as i64).
+- `state`: `exact` = the value exists in storage (previous-value hold included); `interpolated` =
+  computed between two real points; `extrapolated` = flat from the nearest real point outside the
+  data range; `no-data` = nothing available (`v: null`).
+- Results echo the request order; unblocked buffered points participate (visible right after a
+  write); a missing metric returns `404 E_METRIC_NOT_FOUND`.
+
+### 4.6 Reading values
 
 | `vt` | JSON `v` |
 | ---- | -------- |
@@ -435,6 +475,9 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 ```
 
 - `ttlMs` is optional; omitting it means the token never expires (same rule as `POST /api/v1/admin/tokens`).
+- **Single-session semantics**: before issuing a new token, login revokes the same user's previous
+  `console login` tokens — repeated sign-ins no longer accumulate orphaned credentials (tokens issued through
+  the admin panel with other labels and the static `auth.token` are unaffected).
 - An unknown user and a wrong password both return `401 E_AUTH` (no user enumeration); a missing field
   returns `400 E_INVALID_POINT`.
 
@@ -503,3 +546,6 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 | 2026-10-17 | `GET /api/v1/admin/tokens` now returns per-token runtime usage (`lastUsedAt`, `lastDatabase`, `pointsPerSec`, `bytesPerSec`); §7.2 documents the fields and the "credential, not session" rule | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §7.2 adds `configToken`: the static `auth.token` (`rtdb.token`) has no token-store record, so its usage is returned separately instead of being dropped | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `GET /api/v1/metrics/:db` response now carries `valueType` (value-type marker locked on first write, from the first block header, `null` when unknown); §5 example updated | GLM-5.3-Flash |
+| 2026-10-17 | §7.3 login is now **single-session**: issuing a new token first revokes the same user's previous `console login` tokens (other labels and the static token are unaffected) | GLM-5.3-Flash |
+| 2026-10-17 | §4.1 `query/range` response adds `series.received` (server receive-time window, block/batch granularity; for backfill identification and link-latency observation), example updated | GLM-5.3-Flash |
+| 2026-10-17 | Added §4.5 `POST /api/v1/query/at` (point-in-time interpolated lookup: `step`/`linear` modes, `state` provenance markers, batches ≤10 000) and the endpoint-index row; "Reading values" renumbered to §4.6 | GLM-5.3-Flash |

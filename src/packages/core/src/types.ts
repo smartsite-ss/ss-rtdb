@@ -65,6 +65,13 @@ export interface RangeOptions {
 export interface Series {
   metricName: string;
   points: Point[];
+  /**
+   * Server receive-time window over the queried range (ms epoch): min/max of the
+   * server receive times of the hit blocks plus unblocked buffered points.
+   * Absent when no point carries a receive time (legacy blocks only).
+   * Block/batch granularity — not per-point.
+   */
+  received?: { min: number; max: number };
 }
 
 export interface AggregateWindow {
@@ -83,6 +90,24 @@ export interface AggregateWindow {
 }
 
 export type AggregateType = 'avg' | 'sum' | 'min' | 'max' | 'count' | 'last';
+
+/** Interpolation mode of `queryAt` (MVP: `step`/`linear`; `nearest` planned) */
+export type InterpolationMode = 'step' | 'linear';
+
+/** One result of `queryAt`: the value at a requested timestamp plus where it came from */
+export interface AtPoint {
+  /** Requested timestamp (ms epoch, echoed) */
+  timestamp: number;
+  /** Value at `timestamp`; null = nothing to report (`state: 'no-data'`) */
+  value: Point['value'] | null;
+  /**
+   * `exact` = the value exists in storage (a real point; previous-value hold included);
+   * `interpolated` = computed between two real points (linear only);
+   * `extrapolated` = flat from the nearest real point outside the data range (linear only);
+   * `no-data` = no point is available for the request
+   */
+  state: 'exact' | 'interpolated' | 'extrapolated' | 'no-data';
+}
 
 /** Engine options (all config items for Form A library integration; the key mapping for Form B is in Detailed Design §6.2) */
 export interface EngineOptions {

@@ -57,8 +57,10 @@ import {
 import type { EncodableValues } from './encoder/registry.ts';
 import { ERROR_CODE, RtdbError } from './errors.ts';
 import {
+  BLOCK_FLAG,
+  BLOCK_RECEIVED_WINDOW_SIZE,
   SEGMENT_HEADER_FLAG,
-  blockDataCrc32,
+  blockDataCrc32WithReceived,
   dateNumberFromTimestamp,
   encodeBlockHeader,
 } from './format.ts';
@@ -114,6 +116,12 @@ interface MetricBuffer {
   timestamps: number[];
   values: Array<Point['value']>;
   bytes: number;
+  /**
+   * Server receive-time window of the points currently buffered (ms epoch; null = no points tracked
+   * since the last drain). O(1) per batch — block-granularity arrival traceability without per-point cost.
+   */
+  receivedMin: number | null;
+  receivedMax: number | null;
 }
 
 /* ---------- Constants ---------- */
@@ -226,11 +234,14 @@ export class SegmentWriter {
         ? lastDateNumber
         : Math.max(this.latestSeenDateNumber, lastDateNumber);
 
+    const receivedAt = Date.now();
     for (const point of points) {
       const buffer = this.requireBuffer(point.metricName, batchValueTypes);
       buffer.timestamps.push(point.timestamp);
       buffer.values.push(point.value);
       buffer.bytes += pointCostBytes(buffer.valueType, point.value);
+      if (buffer.receivedMin === null) buffer.receivedMin = receivedAt;
+      buffer.receivedMax = receivedAt;
     }
 
     for (const metricName of batchValueTypes.keys()) {
@@ -358,6 +369,17 @@ export class SegmentWriter {
     return points;
   }
 
+  /**
+   * Server receive-time window of a metric's currently unblocked buffered points (ms epoch;
+   * null = the buffer is empty or tracks no arrival window). O(1); used by the query path to
+   * merge the window of "accepted but not yet flushed" points into the range response.
+   */
+  bufferedReceivedWindowOf(metricName: string): { min: number; max: number } | null {
+    const buffer = this.buffers.get(metricName);
+    if (buffer === undefined || buffer.receivedMin === null || buffer.receivedMax === null) return null;
+    return { min: buffer.receivedMin, max: buffer.receivedMax };
+  }
+
   /* ---------- Internals: validation and backpressure ---------- */
 
   /**
@@ -445,6 +467,8 @@ export class SegmentWriter {
       timestamps: [],
       values: [],
       bytes: 0,
+      receivedMin: null,
+      receivedMax: null,
     };
     this.buffers.set(metricName, buffer);
     return buffer;
@@ -489,7 +513,21 @@ export class SegmentWriter {
     for (const value of values) releasedBytes += pointCostBytes(buffer.valueType, value);
     buffer.bytes -= releasedBytes;
 
-    const block = encodeSegmentBlock(this.bufferPool, buffer.metricName, buffer.valueType, timestamps, values);
+    // Defensive fallback: the arrival window is recorded on append; a null here can only come from a
+    // path that bypassed `append` (kept for safety), stamped with the flush time instead.
+    // On partial drains the window carries over and stays a **superset** of the remainder's actual
+    // receive times (invariant: every point's receive time ∈ [receivedMin, receivedMax]).
+    const receivedMin = buffer.receivedMin ?? Date.now();
+    const receivedMax = buffer.receivedMax ?? receivedMin;
+    const block = encodeSegmentBlock(
+      this.bufferPool,
+      buffer.metricName,
+      buffer.valueType,
+      timestamps,
+      values,
+      receivedMin,
+      receivedMax,
+    );
 
     try {
       const opened = this.store.openActiveSegment(this.database, block.timestampMin, block.blockBytes.length);
@@ -675,6 +713,8 @@ function encodeSegmentBlock(
   valueType: ValueType,
   unsortedTimestamps: readonly number[],
   unsortedValues: readonly Point['value'][],
+  receivedMin: number,
+  receivedMax: number,
 ): EncodedSegmentBlock {
   const count = unsortedTimestamps.length;
   if (count < 1) {
@@ -689,6 +729,12 @@ function encodeSegmentBlock(
     count,
   );
 
+  // Server receive-time window: 16B appended after BlockData (flag bit3), included in the CRC scope
+  const receivedBytes = new Uint8Array(BLOCK_RECEIVED_WINDOW_SIZE);
+  const receivedView = new DataView(receivedBytes.buffer);
+  receivedView.setBigInt64(0, BigInt(Math.trunc(receivedMin)), true);
+  receivedView.setBigInt64(8, BigInt(Math.trunc(receivedMax)), true);
+
   const timestampMin = sorted.timestamps[0];
   const timestampMax = sorted.timestamps[count - 1];
   const blockHeader = encodeBlockHeader({
@@ -701,12 +747,12 @@ function encodeSegmentBlock(
     valueRawLength: encodedValues.payload.length,
     timestampMin,
     timestampMax,
-    flags: 0,
-    crc32: blockDataCrc32(timestampEncoded, encodedValues.payload),
+    flags: BLOCK_FLAG.receivedTime,
+    crc32: blockDataCrc32WithReceived(timestampEncoded, encodedValues.payload, receivedBytes),
   });
 
   return {
-    blockBytes: concatBytes(pool, [blockHeader, timestampEncoded, encodedValues.payload]),
+    blockBytes: concatBytes(pool, [blockHeader, timestampEncoded, encodedValues.payload, receivedBytes]),
     pointCount: count,
     timestampMin,
     timestampMax,

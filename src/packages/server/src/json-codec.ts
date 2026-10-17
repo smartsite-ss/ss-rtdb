@@ -14,7 +14,7 @@
 
 import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
 import { ValueType } from '../../core/src/types.ts';
-import type { AggregateWindow, Point, Series, WritePoint } from '../../core/src/types.ts';
+import type { AggregateWindow, AtPoint, Point, Series, WritePoint } from '../../core/src/types.ts';
 
 /* ---------- Read-side (response) types ---------- */
 
@@ -30,6 +30,12 @@ export interface JsonPoint {
 export interface JsonSeries {
   metricName: string;
   points: JsonPoint[];
+  /**
+   * Server receive-time window over the queried range (ms epoch): min/max of the server receive
+   * times of the hit blocks plus unblocked buffered points; block/batch granularity.
+   * Absent when no hit point carries one (legacy-only blocks).
+   */
+  received?: { min: number; max: number };
 }
 
 export interface JsonWindow {
@@ -38,6 +44,17 @@ export interface JsonWindow {
   v: number | string | boolean | null;
   vt: ValueType;
   count: number;
+}
+
+/** One `queryAt` result on the wire (§4.2 of the Interpolation Detailed Design) */
+export interface JsonAtPoint {
+  /** requested timestamp (ms epoch, echoed) */
+  t: number;
+  /** f64→number; i64→decimal string; bool→boolean; string→string; null = no-data */
+  v: number | string | boolean | null;
+  vt: ValueType;
+  /** 'exact' | 'interpolated' | 'extrapolated' | 'no-data' */
+  state: string;
 }
 
 /** metric summary (structurally equivalent to core `MetricSummary` to avoid coupling the server side to the engine module) */
@@ -71,13 +88,23 @@ export function encodePoint(point: Point): JsonPoint {
 }
 
 export function encodeSeries(series: Series): JsonSeries {
-  return { metricName: series.metricName, points: series.points.map(encodePoint) };
+  const json: JsonSeries = { metricName: series.metricName, points: series.points.map(encodePoint) };
+  if (series.received !== undefined) json.received = series.received;
+  return json;
 }
 
 export function encodeAggregateWindows(windows: readonly AggregateWindow[]): JsonWindow[] {
   return windows.map((window) => {
     const encoded = encodeValue(window.value);
     return { start: window.start, end: window.end, v: encoded.v, vt: encoded.vt, count: window.count };
+  });
+}
+
+export function encodeAtPoints(points: readonly AtPoint[]): JsonAtPoint[] {
+  return points.map((point) => {
+    // no-data keeps a null value; vt is irrelevant there but the field stays present for wire uniformity
+    const encoded = point.value === null ? { v: null as null, vt: ValueType.Float64 } : encodeValue(point.value);
+    return { t: point.timestamp, v: encoded.v, vt: encoded.vt, state: point.state };
   });
 }
 

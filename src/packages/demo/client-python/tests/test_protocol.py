@@ -24,6 +24,7 @@ from ss_rtdb_client.protocol import (
     Series,
     WritePoint,
     decode_aggregate_windows,
+    decode_at_points,
     decode_point,
     decode_series,
     decode_value,
@@ -206,6 +207,13 @@ class DecodeRejectionTests(unittest.TestCase):
         self.assert_transport_code(decode_aggregate_windows, [{"start": 1, "end": 2, "v": 1}])
         self.assert_transport_code(decode_aggregate_windows, ["nope"])
 
+    def test_at_points_bad_shapes(self) -> None:
+        """Malformed ``query/at`` wire shapes raise the transport error code."""
+        self.assert_transport_code(decode_at_points, "not-an-array")
+        self.assert_transport_code(decode_at_points, [{"t": 1, "v": 1, "vt": 1}])  # missing state
+        self.assert_transport_code(decode_at_points, [{"t": 1, "v": 1, "vt": 1, "state": "bogus"}])
+        self.assert_transport_code(decode_at_points, [{"t": "x", "v": 1, "vt": 1, "state": "exact"}])
+
 
 class DecodeShapeTests(unittest.TestCase):
     """Decoded shapes and the dataclass data model."""
@@ -223,6 +231,35 @@ class DecodeShapeTests(unittest.TestCase):
         self.assertEqual(series.metric_name, "m")
         self.assertEqual(len(series.points), 1)
         self.assertEqual(series.points[0].value, 1.5)
+
+    def test_series_received_window(self) -> None:
+        """Server receive-time window passes through; legacy responses decode with ``received=None``."""
+        series = decode_series(
+            {"metricName": "m", "points": [], "received": {"min": 1700000000000, "max": 1700000000500}}
+        )
+        self.assertEqual(series.received, {"min": 1700000000000, "max": 1700000000500})
+
+        legacy = decode_series({"metricName": "m", "points": []})
+        self.assertIsNone(legacy.received)
+
+        malformed = decode_series({"metricName": "m", "points": [], "received": {"min": "x", "max": 2}})
+        self.assertIsNone(malformed.received)
+
+    def test_at_points_shape(self) -> None:
+        """``query/at`` wire points decode into AtPoint with provenance markers."""
+        decoded = decode_at_points(
+            [
+                {"t": 100, "v": 1.5, "vt": 1, "state": "exact"},
+                {"t": 150, "v": 2.5, "vt": 1, "state": "interpolated"},
+                {"t": 200, "v": None, "vt": 1, "state": "no-data"},
+            ]
+        )
+        self.assertEqual(len(decoded), 3)
+        self.assertEqual(decoded[0].state, "exact")
+        self.assertEqual(decoded[0].value, 1.5)
+        self.assertEqual(decoded[1].state, "interpolated")
+        self.assertEqual(decoded[2].state, "no-data")
+        self.assertIsNone(decoded[2].value)
 
     def test_window_shape(self) -> None:
         windows = decode_aggregate_windows([{"start": 0, "end": 10, "v": None, "vt": 1, "count": 0}])

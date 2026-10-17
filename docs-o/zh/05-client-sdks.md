@@ -88,6 +88,13 @@ const series = await client.queryRange('plant_a', 'station01.powerMeter.kwh', {
   start: startMs, end: endMs, limit: 10_000, order: 'asc',
 });
 for (const point of series.points) console.log(point.timestamp, point.value);
+// series.received：服务器接收时间窗口（{ min, max } 毫秒 epoch，块/批次粒度；旧服务端/旧块为缺省）
+
+// at —— 任意时刻批量取值（step=前值保持 / linear=线性插值；state 区分实测与推算）
+const atPoints = await client.queryAt('plant_a', 'station01.powerMeter.kwh', {
+  timestamps: [startMs, startMs + 60_000], mode: 'linear',
+});
+for (const at of atPoints) console.log(at.timestamp, at.value, at.state);
 
 // last —— `before` 时刻或之前的最新点（省略 = 全局最新）
 const last = await client.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
@@ -209,6 +216,12 @@ series = client.query_range("plant_a", "station01.powerMeter.kwh",
 for point in series.points:
     print(point.timestamp, point.value, point.quality)
 
+# at —— 任意时刻批量取值（step=前值保持 / linear=线性插值；state 区分实测与推算）
+at_points = client.query_at("plant_a", "station01.powerMeter.kwh",
+                            [start_ms, start_ms + 60000], mode="linear")
+for at in at_points:
+    print(at.timestamp, at.value, at.state)
+
 last = client.query_last("plant_a", "station01.powerMeter.kwh", before=end_ms)
 
 count = client.query_count("plant_a", "station01.powerMeter.kwh",
@@ -271,4 +284,6 @@ except RtdbClientError as error:
 | 2026-10-17 | 创建中文译本；随英文版更新同步「值类型映射」、长字段名、`aggregate_type` 参数等 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 更正 SDK 目录为 `packages/demo/client-node` / `packages/demo/client-python`（含工作区源码导入路径与 `pip install` 命令） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Node SDK `listMetrics` 返回项增加 `valueType`（与服务端 `GET /api/v1/metrics/:db` 同步） | GLM-5.3-Flash |
+| 2026-10-17 | 双 SDK `queryRange`/`query_range` 返回值新增可选 `received`（服务器接收时间窗口，块/批次粒度），Python `Series.received` 同步 | GLM-5.3-Flash |
+| 2026-10-17 | 双 SDK 新增 `queryAt`/`query_at`（任意时刻插值取值，`step`/`linear`，`state` 来源标记），示例同步 | GLM-5.3-Flash |
 

@@ -35,10 +35,12 @@ import { sep } from 'node:path';
 import { decodeTimestamps, decodeValues } from './encoder/registry.ts';
 import { ERROR_CODE, RtdbError, isRtdbError } from './errors.ts';
 import {
+  BLOCK_FLAG,
   BLOCK_HEADER_FIXED_SIZE,
   SEGMENT_FOOTER_SIZE,
   SEGMENT_HEADER_SIZE,
   blockDataCrc32,
+  blockDataCrc32WithReceived,
   footerCrc32,
   nextDayTimestampFromDateNumber,
   parseIndexRegion,
@@ -113,6 +115,9 @@ interface DecodedBlock {
   valueType: ValueType;
   timestamps: number[];
   values: Array<Point['value']>;
+  /** Server receive-time window carried by the block; null for blocks without the `receivedTime` flag */
+  receivedMin: number | null;
+  receivedMax: number | null;
 }
 
 /* ---------- Segment reader ---------- */
@@ -239,8 +244,15 @@ export class SegmentReader {
    * limit/order/aggregation on top of this)
    *
    * `order` defaults to `asc`; `limit` defaults to 100_000 (the same scope as `RangeOptions`).
+   * When `receivedOut` is given, the aggregated server receive-time window of the hit blocks
+   * (min of `receivedMin` / max of `receivedMax`; null when no block carries one) is written into it.
    */
-  readMetricPoints(database: string, metricName: string, options: RangeOptions): Point[] {
+  readMetricPoints(
+    database: string,
+    metricName: string,
+    options: RangeOptions,
+    receivedOut?: { min: number; max: number },
+  ): Point[] {
     if (!Number.isFinite(options.start) || !Number.isFinite(options.end) || options.start > options.end) {
       throw new RtdbError(
         ERROR_CODE.InvalidRange,
@@ -261,6 +273,10 @@ export class SegmentReader {
           ERROR_CODE.TypeMismatch,
           `metric ${metricName} has an inconsistent value type: already decoded ${VALUE_TYPE_NAME[valueType]}, but block ${location.segmentFilePath}@${location.entry.offset} is ${VALUE_TYPE_NAME[block.valueType]}`,
         );
+      }
+      if (receivedOut !== undefined && block.receivedMin !== null && block.receivedMax !== null) {
+        receivedOut.min = receivedOut.min === 0 ? block.receivedMin : Math.min(receivedOut.min, block.receivedMin);
+        receivedOut.max = Math.max(receivedOut.max, block.receivedMax);
       }
       for (let index = 0; index < block.timestamps.length; index += 1) {
         const timestamp = block.timestamps[index];
@@ -529,9 +545,15 @@ export class SegmentReader {
   private blockDataCrcMatches(segmentFilePath: string, header: BlockHeader): boolean {
     try {
       const blockBytes = this.store.readSegmentSlice(segmentFilePath, header.offset, header.totalLength);
-      const dataOffset = header.totalLength - header.timestampRawLength - header.valueRawLength;
+      const hasReceived = (header.flags & BLOCK_FLAG.receivedTime) !== 0;
+      const dataEnd = hasReceived ? header.totalLength - 16 : header.totalLength;
+      const dataOffset = dataEnd - header.timestampRawLength - header.valueRawLength;
       const timestampEncoded = blockBytes.subarray(dataOffset, dataOffset + header.timestampRawLength);
-      const valueEncoded = blockBytes.subarray(dataOffset + header.timestampRawLength, header.totalLength);
+      const valueEncoded = blockBytes.subarray(dataOffset + header.timestampRawLength, dataEnd);
+      if (hasReceived) {
+        const receivedEncoded = blockBytes.subarray(dataEnd, header.totalLength);
+        return blockDataCrc32WithReceived(timestampEncoded, valueEncoded, receivedEncoded) === header.crc32;
+      }
       return blockDataCrc32(timestampEncoded, valueEncoded) === header.crc32;
     } catch (error) {
       if (isRtdbError(error)) return false;
@@ -607,7 +629,9 @@ export class SegmentReader {
       const fieldsOffset = 2 + metricLength;
       const timestampRawLength = headerView.getUint32(fieldsOffset + 7, true);
       const valueRawLength = headerView.getUint32(fieldsOffset + 11, true);
-      const totalLength = headerLength + timestampRawLength + valueRawLength;
+      const flags = headerView.getUint16(fieldsOffset + 31, true);
+      const totalLength =
+        headerLength + timestampRawLength + valueRawLength + ((flags & BLOCK_FLAG.receivedTime) !== 0 ? 16 : 0);
       if (offset + totalLength > descriptor.blockRegionEnd) break;
 
       const blockBytes = this.store.readSegmentSlice(descriptor.segmentFilePath, offset, totalLength);
@@ -649,13 +673,20 @@ export class SegmentReader {
       );
     }
 
-    const dataOffset = header.totalLength - header.timestampRawLength - header.valueRawLength;
+    const hasReceived = (header.flags & BLOCK_FLAG.receivedTime) !== 0;
+    const dataEnd = hasReceived ? header.totalLength - 16 : header.totalLength;
+    const dataOffset = dataEnd - header.timestampRawLength - header.valueRawLength;
     const timestampEncoded = blockBytes.subarray(dataOffset, dataOffset + header.timestampRawLength);
-    const valueEncoded = blockBytes.subarray(
-      dataOffset + header.timestampRawLength,
-      header.totalLength,
-    );
-    if (blockDataCrc32(timestampEncoded, valueEncoded) !== header.crc32) {
+    const valueEncoded = blockBytes.subarray(dataOffset + header.timestampRawLength, dataEnd);
+    if (hasReceived) {
+      const receivedEncoded = blockBytes.subarray(dataEnd, header.totalLength);
+      if (blockDataCrc32WithReceived(timestampEncoded, valueEncoded, receivedEncoded) !== header.crc32) {
+        throw new RtdbError(
+          ERROR_CODE.CorruptBlock,
+          `Block data CRC verification failed: ${segmentFilePath}@${entry.offset} (metric=${header.metricName})`,
+        );
+      }
+    } else if (blockDataCrc32(timestampEncoded, valueEncoded) !== header.crc32) {
       throw new RtdbError(
         ERROR_CODE.CorruptBlock,
         `Block data CRC verification failed: ${segmentFilePath}@${entry.offset} (metric=${header.metricName})`,
@@ -669,7 +700,14 @@ export class SegmentReader {
     const decoded = decodeValues(header.valueType, header.valueCodecId, valueEncoded, header.pointCount);
     const values = toPointValues(header.valueType, decoded, header.pointCount);
 
-    const block: DecodedBlock = { metricName: header.metricName, valueType: header.valueType, timestamps, values };
+    const block: DecodedBlock = {
+      metricName: header.metricName,
+      valueType: header.valueType,
+      timestamps,
+      values,
+      receivedMin: header.receivedMin,
+      receivedMax: header.receivedMax,
+    };
     this.blockCache.set(cacheKey, block);
     this.evictBlockCache();
     return block;

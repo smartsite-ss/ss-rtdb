@@ -93,7 +93,17 @@ export const BLOCK_FLAG = {
   backfill: 0b0000_0001,
   /** bit2 reserved: quality-flags persisted marker (M0 decision: all-zero is not persisted, so this bit is always 0; enabling it later once the enumeration table is fixed won't change the format) */
   qualityPresent: 0b0000_0100,
+  /**
+   * bit3: the block carries a server receive-time window — 16B appended after BlockData
+   * (`[receivedMin i64][receivedMax i64]`, included in `totalLength` and in the block CRC scope).
+   * Written for backfill traceability and client→server latency observation; old v1 blocks without
+   * the flag read unchanged (`receivedMin/receivedMax` = null).
+   */
+  receivedTime: 0b0000_1000,
 } as const;
+
+/** Byte size of the appended server receive-time window (`receivedMin` + `receivedMax`, two i64) */
+export const BLOCK_RECEIVED_WINDOW_SIZE = 16;
 
 /** Valid codecId set (0=raw 1=tsDoD 2=Gorilla 4=zlib 5=i64delta 6=boolRLE 7=stringDict; 3 reserved unused) */
 const KNOWN_VALUE_CODEC_IDS: ReadonlySet<number> = new Set([0, 2, 4, 5, 6, 7]);
@@ -300,8 +310,14 @@ export interface BlockHeader {
   timestampMax: number;
   flags: number;
   crc32: number;
-  /** Whole-block byte count = block header + data */
+  /**
+   * Whole-block byte count = block header + data (+ receive window when the `receivedTime` flag is set)
+   */
   totalLength: number;
+  /** Earliest server receive time within the block (ms epoch); null for blocks without the `receivedTime` flag */
+  receivedMin: number | null;
+  /** Latest server receive time within the block (ms epoch); null for blocks without the `receivedTime` flag */
+  receivedMax: number | null;
 }
 
 export interface BlockHeaderInput {
@@ -380,7 +396,19 @@ export function tryParseBlockHeader(
   const timestampMax = Number(view.getBigInt64(fieldsOffset + 23, true));
   if (timestampMax < timestampMin) return null;
   const flags = view.getUint16(fieldsOffset + 31, true);
-  if ((flags & ~(BLOCK_FLAG.backfill | BLOCK_FLAG.qualityPresent)) !== 0) return null;
+  if ((flags & ~(BLOCK_FLAG.backfill | BLOCK_FLAG.qualityPresent | BLOCK_FLAG.receivedTime)) !== 0) return null;
+
+  const hasReceivedTime = (flags & BLOCK_FLAG.receivedTime) !== 0;
+  let receivedMin: number | null = null;
+  let receivedMax: number | null = null;
+  let totalLength = BLOCK_HEADER_FIXED_SIZE + metricLength + dataLength;
+  if (hasReceivedTime) {
+    if (dataOffset + dataLength + BLOCK_RECEIVED_WINDOW_SIZE > limit) return null;
+    receivedMin = Number(view.getBigInt64(dataOffset + dataLength, true));
+    receivedMax = Number(view.getBigInt64(dataOffset + dataLength + 8, true));
+    if (receivedMin <= 0 || receivedMin > receivedMax) return null;
+    totalLength += BLOCK_RECEIVED_WINDOW_SIZE;
+  }
 
   return {
     offset,
@@ -396,7 +424,9 @@ export function tryParseBlockHeader(
     timestampMax,
     flags,
     crc32: view.getUint32(fieldsOffset + 35, true),
-    totalLength: BLOCK_HEADER_FIXED_SIZE + metricLength + dataLength,
+    totalLength,
+    receivedMin,
+    receivedMax,
   };
 }
 
@@ -564,6 +594,15 @@ export function parseIndexRegion(
 /** BlockHeader.crc32 scope: over the whole BlockData (tsEncoded ++ valEncoded) */
 export function blockDataCrc32(timestampEncoded: Uint8Array, valueEncoded: Uint8Array): number {
   return crc32(valueEncoded, crc32(timestampEncoded));
+}
+
+/** Block CRC scope when the `receivedTime` flag is set: chained over BlockData ++ receive window */
+export function blockDataCrc32WithReceived(
+  timestampEncoded: Uint8Array,
+  valueEncoded: Uint8Array,
+  receivedEncoded: Uint8Array,
+): number {
+  return crc32(receivedEncoded, crc32(valueEncoded, crc32(timestampEncoded)));
 }
 
 /* ---------- Internal: fixed-size little-endian write buffer ---------- */

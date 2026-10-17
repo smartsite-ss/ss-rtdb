@@ -103,10 +103,16 @@ counted as duplicates, not as errors — retries are idempotent.
 const series = await rtdb.queryRange('plant_a', 'station01.powerMeter.kwh', {
   start: startMs, end: endMs, limit: 100_000, order: 'asc',
 });
-// series: { metricName, points: [{ timestamp, value, quality? }] }
+// series: { metricName, points: [{ timestamp, value, quality? }], received?: { min, max } }
+// received = server receive-time window (ms epoch, block/batch granularity; absent when no hit block carries one)
 
 // last — latest point at or before `before` (omit = latest overall)
 const last = await rtdb.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
+
+// at — batch point-in-time lookup (step = previous-value hold / linear = piecewise-linear; state: exact|interpolated|extrapolated|no-data)
+const atPoints = await rtdb.queryAt('plant_a', 'station01.powerMeter.kwh', {
+  timestamps: [startMs, startMs + 60_000], mode: 'linear',
+});
 
 // count — index estimate by default, exact when requested
 const count = await rtdb.queryCount('plant_a', 'station01.powerMeter.kwh',
@@ -243,3 +249,5 @@ main()
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Corrected the crash-loss wording: with `fsyncPolicy='wal'` no points are lost (block append → segment fsync → WAL safe point; the former "lose at most ≤5 s" described the pre-fix behavior) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `MetricSummary` returned by `listMetrics` now includes the `valueType` field | GLM-5.3-Flash |
+| 2026-10-17 | `Series` returned by `queryRange` gains the optional `received` field (server receive-time window, block/batch granularity) | GLM-5.3-Flash |
+| 2026-10-17 | `RtdbEngine` adds the fifth query primitive `queryAt` (batch point-in-time interpolated lookup, `step`/`linear`, `state` provenance markers; see the Interpolation Detailed Design) | GLM-5.3-Flash |

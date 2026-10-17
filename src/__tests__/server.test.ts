@@ -434,6 +434,68 @@ describe('server: 查询四原语', () => {
     }
   });
 
+  it('query/range 响应携带服务器接收时间窗口 received（缓冲点即查即有）', async () => {
+    const { server, baseUrl } = await startTestServer();
+    try {
+      await seed(baseUrl, 'arrival', [1, 2]);
+
+      const response = await postJson(baseUrl, '/api/v1/query/range', {
+        db: 'query',
+        metricName: 'arrival',
+        start: BASE,
+        end: BASE + 1000,
+      });
+      const body = (await response.json()) as { series: { received?: { min: number; max: number } } };
+      assert.ok(body.series.received !== undefined, 'series 应携带 received 窗口');
+      assert.ok(body.series.received.min > 0, 'received.min 应为正的毫秒 epoch');
+      assert.ok(body.series.received.min <= body.series.received.max);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('query/at 批量插值取值：state 标记、非法 mode 与非法 timestamps 拒绝', async () => {
+    const { server, baseUrl } = await startTestServer();
+    try {
+      await seed(baseUrl, 'atm', [0, 10, 40]);
+
+      const response = await postJson(baseUrl, '/api/v1/query/at', {
+        db: 'query',
+        metricName: 'atm',
+        timestamps: [BASE + 500, BASE + 1500, BASE + 9000],
+        mode: 'linear',
+      });
+      const body = (await response.json()) as {
+        points: { t: number; v: unknown; vt: number; state: string }[];
+      };
+      assert.deepEqual(
+        body.points.map((point) => [point.state, point.v]),
+        [
+          ['interpolated', 5],
+          ['interpolated', 25],
+          ['extrapolated', 40],
+        ],
+      );
+
+      const badMode = await postJson(baseUrl, '/api/v1/query/at', {
+        db: 'query',
+        metricName: 'atm',
+        timestamps: [BASE],
+        mode: 'nearest',
+      });
+      assert.equal(badMode.status, 400);
+
+      const badTimestamps = await postJson(baseUrl, '/api/v1/query/at', {
+        db: 'query',
+        metricName: 'atm',
+        timestamps: 'nope',
+      });
+      assert.equal(badTimestamps.status, 400);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('query/count 支持索引估算与 exact 精确', async () => {
     const { server, baseUrl } = await startTestServer();
     try {
@@ -1061,6 +1123,63 @@ describe('server: 登录与会话（auth/login）', () => {
       const afterLogout = await fetch(`${baseUrl}/api/v1/auth/session`, { headers });
       assert.equal(afterLogout.status, 401);
       assert.equal((await readErrorBody(afterLogout)).error, ERROR_CODE.Auth);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('单会话语义：新 console login 签发时自动吊销同用户旧的 console login 令牌', async () => {
+    const { server, baseUrl } = await startTestServer({
+      auth: { enabled: true, mode: 'token', token: TOKEN, tokenFile: join(rootDirectory, 'single-session.token') },
+    });
+    try {
+      const first = await postJson(baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'ss-rtdb' });
+      assert.equal(first.status, 200);
+      const firstToken = ((await first.json()) as LoginBody).token;
+
+      const second = await postJson(baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'ss-rtdb' });
+      assert.equal(second.status, 200);
+      const secondToken = ((await second.json()) as LoginBody).token;
+
+      // 旧令牌立即失效，新令牌可用
+      const oldSession = await fetch(`${baseUrl}/api/v1/auth/session`, {
+        headers: { Authorization: `Bearer ${firstToken}` },
+      });
+      assert.equal(oldSession.status, 401);
+      const newSession = await fetch(`${baseUrl}/api/v1/auth/session`, {
+        headers: { Authorization: `Bearer ${secondToken}` },
+      });
+      assert.equal(newSession.status, 200);
+
+      // 令牌目录：两个 console login 记录，旧的带吊销时间戳，新的 active
+      const tokens = await fetch(`${baseUrl}/api/v1/admin/tokens`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(tokens.status, 200);
+      const list = ((await tokens.json()) as AdminTokensBody).tokens.filter(
+        (item) => item.label === 'console login',
+      );
+      assert.equal(list.length, 2);
+      const revoked = list.filter((item) => item.revokedAt !== null);
+      const active = list.filter((item) => item.revokedAt === null);
+      assert.equal(revoked.length, 1);
+      assert.equal(active.length, 1);
+      assert.equal(active[0].user, 'admin');
+
+      // 管理面手工签发的令牌不受影响（label 不同）
+      const issue = await postJson(
+        baseUrl,
+        '/api/v1/admin/tokens',
+        { user: 'admin', label: 'manual' },
+        { Authorization: `Bearer ${secondToken}` },
+      );
+      assert.equal(issue.status, 201);
+      const third = await postJson(baseUrl, '/api/v1/auth/login', { username: 'admin', password: 'ss-rtdb' });
+      assert.equal(third.status, 200);
+      const manualSession = await fetch(`${baseUrl}/api/v1/auth/session`, {
+        headers: { Authorization: `Bearer ${((await issue.json()) as { token: string }).token}` },
+      });
+      assert.equal(manualSession.status, 200);
     } finally {
       await server.stop();
     }

@@ -72,10 +72,16 @@ class WritePoint:
 
 @dataclass
 class Series:
-    """A named, time-ascending list of decoded points."""
+    """A named, time-ascending list of decoded points.
+
+    ``received`` carries the server receive-time window over the queried range (ms epoch;
+    ``min`` / ``max`` of the hit points, block/batch granularity); ``None`` when the server
+    does not provide one (legacy-only blocks or an older server).
+    """
 
     metric_name: str
     points: List[Point] = field(default_factory=list)
+    received: Optional[Dict[str, int]] = None
 
 
 @dataclass
@@ -86,6 +92,27 @@ class AggregateWindow:
     end: int
     value: PointValue
     count: int
+
+
+#: Interpolation modes of :meth:`RtdbClient.query_at` (MVP: ``step`` / ``linear``).
+INTERPOLATION_MODES = ("step", "linear")
+
+#: Provenance markers of an :class:`AtPoint`.
+AT_POINT_STATES = ("exact", "interpolated", "extrapolated", "no-data")
+
+
+@dataclass
+class AtPoint:
+    """One ``query_at`` result: the value at a requested timestamp plus its provenance.
+
+    ``value`` is ``None`` when ``state == 'no-data'``; ``state`` is one of
+    ``exact`` (a real stored point, previous-value hold included) / ``interpolated`` /
+    ``extrapolated`` (computed, ``linear`` only) / ``no-data``.
+    """
+
+    timestamp: int
+    value: Optional[PointValue]
+    state: str
 
 
 # ---------- internal numeric predicates ----------
@@ -246,16 +273,21 @@ def decode_point(record: Any) -> Point:
 
 
 def decode_series(record: Any) -> Series:
-    """Decode a wire series ``{metricName, points: [...]}`` into a :class:`Series`."""
+    """Decode a wire series ``{metricName, points: [...], received?: {min, max}}`` into a :class:`Series`."""
     if not isinstance(record, dict):
         raise RtdbClientError(CLIENT_ERROR_CODE["Transport"], "series must be a JSON object")
     points = record.get("points")
     if not isinstance(points, list):
         raise RtdbClientError(CLIENT_ERROR_CODE["Transport"], "series.points must be an array")
     metric_name = record.get("metricName")
+    received: Optional[Dict[str, int]] = None
+    raw_received = record.get("received")
+    if isinstance(raw_received, dict) and _is_integer_number(raw_received.get("min")) and _is_integer_number(raw_received.get("max")):
+        received = {"min": int(raw_received["min"]), "max": int(raw_received["max"])}
     return Series(
         metric_name=metric_name if isinstance(metric_name, str) else "",
         points=[decode_point(item) for item in points],
+        received=received,
     )
 
 
@@ -279,4 +311,33 @@ def decode_aggregate_windows(windows: Any) -> List[AggregateWindow]:
                 count=int(count) if _is_number(count) else 0,
             )
         )
+    return decoded
+
+
+def decode_at_points(records: Any) -> List[AtPoint]:
+    """Decode the wire ``query/at`` point list ``[{t, v, vt, state}]`` into :class:`AtPoint` values."""
+    if not isinstance(records, list):
+        raise RtdbClientError(CLIENT_ERROR_CODE["Transport"], "query/at points must be an array")
+    decoded: List[AtPoint] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise RtdbClientError(CLIENT_ERROR_CODE["Transport"], "query/at point must be a JSON object")
+        timestamp = record.get("t")
+        marker = record.get("vt")
+        state = record.get("state")
+        if not _is_integer_number(timestamp):
+            raise RtdbClientError(CLIENT_ERROR_CODE["Transport"], "query/at point.t must be an integer timestamp")
+        if state not in AT_POINT_STATES:
+            raise RtdbClientError(
+                CLIENT_ERROR_CODE["Transport"],
+                "query/at point.state must be one of %s: %s" % ("|".join(AT_POINT_STATES), str(state)),
+            )
+        raw_value = record.get("v")
+        if raw_value is None:
+            value: Optional[PointValue] = None
+        else:
+            if not _is_number(marker):
+                raise RtdbClientError(CLIENT_ERROR_CODE["Transport"], "query/at point.vt must carry a value type marker")
+            value = decode_value(raw_value, int(marker))
+        decoded.append(AtPoint(timestamp=int(timestamp), value=value, state=str(state)))
     return decoded

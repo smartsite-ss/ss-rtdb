@@ -162,6 +162,8 @@ describe('client: 六方法与 i64 vt 双向编解码', () => {
       assert.equal(counter.points[0].timestamp, BASE);
       assert.equal(counter.points[0].value, 1234567890123n);
       assert.equal(typeof counter.points[0].value, 'bigint');
+      assert.ok(counter.received !== undefined, 'range 响应应透传服务器接收时间窗口');
+      assert.ok(counter.received.min <= counter.received.max);
 
       const temperature = await client.queryRange('demo', 'temperature', { start: BASE, end: BASE });
       assert.equal(temperature.points[0].value, 21.5);
@@ -171,6 +173,38 @@ describe('client: 六方法与 i64 vt 双向编解码', () => {
 
       const label = await client.queryRange('demo', 'label', { start: BASE, end: BASE });
       assert.equal(label.points[0].value, 'running');
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('queryAt：批量插值取值，state 区分实测与推算', async () => {
+    const { server, baseUrl } = await startTestServer();
+    try {
+      const client = new RtdbClient({ baseUrl });
+      await client.writeBatch('demo', [
+        { metricName: 'atm', timestamp: BASE, value: 0 },
+        { metricName: 'atm', timestamp: BASE + 1000, value: 10 },
+      ]);
+
+      const results = await client.queryAt('demo', 'atm', {
+        timestamps: [BASE, BASE + 500, BASE + 5000],
+        mode: 'linear',
+      });
+      assert.deepEqual(
+        results.map((point) => [point.state, point.value]),
+        [
+          ['exact', 0],
+          ['interpolated', 5],
+          ['extrapolated', 10],
+        ],
+      );
+
+      // 空指标 → 服务端预检 404 E_METRIC_NOT_FOUND（引擎层的 no-data 语义由 engine 套件覆盖）
+      await assert.rejects(
+        () => client.queryAt('demo', 'ghost.metric', { timestamps: [BASE] }),
+        (error: unknown) => error instanceof RtdbClientError && error.code === 'E_METRIC_NOT_FOUND',
+      );
     } finally {
       await server.stop();
     }

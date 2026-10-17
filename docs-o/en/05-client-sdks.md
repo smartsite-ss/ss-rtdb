@@ -90,6 +90,13 @@ const series = await client.queryRange('plant_a', 'station01.powerMeter.kwh', {
   start: startMs, end: endMs, limit: 10_000, order: 'asc',
 });
 for (const point of series.points) console.log(point.timestamp, point.value);
+// series.received: server receive-time window ({ min, max } ms epoch, block/batch granularity; absent for legacy servers/blocks)
+
+// at — batch point-in-time lookup (step = previous-value hold / linear = piecewise-linear; state tells real points from computed ones)
+const atPoints = await client.queryAt('plant_a', 'station01.powerMeter.kwh', {
+  timestamps: [startMs, startMs + 60_000], mode: 'linear',
+});
+for (const at of atPoints) console.log(at.timestamp, at.value, at.state);
 
 // last — latest point at or before `before` (omit for the latest overall)
 const last = await client.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
@@ -211,6 +218,12 @@ series = client.query_range("plant_a", "station01.powerMeter.kwh",
 for point in series.points:
     print(point.timestamp, point.value, point.quality)
 
+# at — batch point-in-time lookup (step = previous-value hold / linear = piecewise-linear; state tells real points from computed ones)
+at_points = client.query_at("plant_a", "station01.powerMeter.kwh",
+                            [start_ms, start_ms + 60000], mode="linear")
+for at in at_points:
+    print(at.timestamp, at.value, at.state)
+
 last = client.query_last("plant_a", "station01.powerMeter.kwh", before=end_ms)
 
 count = client.query_count("plant_a", "station01.powerMeter.kwh",
@@ -273,3 +286,5 @@ Same retry policy as the Node SDK: only `429` and transport failures are retried
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Corrected SDK directories to `packages/demo/client-node` / `packages/demo/client-python` (workspace source import path and `pip install` commands) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Node SDK `listMetrics` items now include `valueType` (in sync with the server `GET /api/v1/metrics/:db`) | GLM-5.3-Flash |
+| 2026-10-17 | Both SDKs' `queryRange`/`query_range` results gain the optional `received` field (server receive-time window, block/batch granularity); Python `Series.received` in sync | GLM-5.3-Flash |
+| 2026-10-17 | Both SDKs add `queryAt`/`query_at` (point-in-time interpolated lookup, `step`/`linear`, `state` provenance markers), examples updated | GLM-5.3-Flash |

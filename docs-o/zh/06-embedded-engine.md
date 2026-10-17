@@ -98,10 +98,16 @@ const { accepted } = await rtdb.writeBatch('plant_a', [
 const series = await rtdb.queryRange('plant_a', 'station01.powerMeter.kwh', {
   start: startMs, end: endMs, limit: 100_000, order: 'asc',
 });
-// series: { metricName, points: [{ timestamp, value, quality? }] }
+// series: { metricName, points: [{ timestamp, value, quality? }], received?: { min, max } }
+// received = 服务器接收时间窗口（毫秒 epoch，块/批次粒度；全部命中块无窗口时缺省）
 
 // last —— `before` 时刻或之前的最新点（省略 = 全局最新）
 const last = await rtdb.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
+
+// at —— 任意时刻批量取值（step=前值保持 / linear=线性插值；state: exact|interpolated|extrapolated|no-data）
+const atPoints = await rtdb.queryAt('plant_a', 'station01.powerMeter.kwh', {
+  timestamps: [startMs, startMs + 60_000], mode: 'linear',
+});
 
 // count —— 默认索引估算，可请求精确值
 const count = await rtdb.queryCount('plant_a', 'station01.powerMeter.kwh',
@@ -237,4 +243,6 @@ main()
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 修正崩溃丢失口径：`fsyncPolicy='wal'` 下不丢点（块落段 → fsync 段文件 → 才推进 WAL 安全点；原「最多丢失 ≤5 秒」对应修复前的实现） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `listMetrics` 返回的 `MetricSummary` 增加 `valueType` 字段 | GLM-5.3-Flash |
+| 2026-10-17 | `queryRange` 返回的 `Series` 新增可选 `received`（服务器接收时间窗口，块/批次粒度） | GLM-5.3-Flash |
+| 2026-10-17 | `RtdbEngine` 新增第五查询原语 `queryAt`（任意时刻批量插值取值，`step`/`linear`，`state` 来源标记；详见《插值功能详细设计》） | GLM-5.3-Flash |
 

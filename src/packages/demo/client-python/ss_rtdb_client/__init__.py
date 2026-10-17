@@ -36,12 +36,16 @@ from .client import RtdbClient, WriteBatchResult
 from .errors import CLIENT_ERROR_CODE, RtdbClientError, is_rtdb_client_error
 from .protocol import (
     AGGREGATE_TYPES,
+    AT_POINT_STATES,
+    INTERPOLATION_MODES,
     VALUE_TYPE,
     AggregateWindow,
+    AtPoint,
     Point,
     Series,
     WritePoint,
     decode_aggregate_windows,
+    decode_at_points,
     decode_point,
     decode_series,
     decode_value,
@@ -66,8 +70,11 @@ __all__ = [
     "WritePoint",
     "Series",
     "AggregateWindow",
+    "AtPoint",
     "VALUE_TYPE",
     "AGGREGATE_TYPES",
+    "INTERPOLATION_MODES",
+    "AT_POINT_STATES",
     # Protocol codec
     "encode_write_point",
     "encode_value",
@@ -76,6 +83,7 @@ __all__ = [
     "decode_point",
     "decode_series",
     "decode_aggregate_windows",
+    "decode_at_points",
     # Transport
     "Response",
     "TransportError",

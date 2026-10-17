@@ -24,6 +24,7 @@
 import { CLIENT_ERROR_CODE, RtdbClientError } from './errors.ts';
 import {
   decodeAggregateWindows,
+  decodeAtPoints,
   decodePoint,
   decodeSeries,
   encodeWritePoint,
@@ -31,9 +32,12 @@ import {
 import type {
   AggregateType,
   AggregateWindowResult,
+  AtQueryOptions,
+  ClientAtPoint,
   ClientPoint,
   ClientSeries,
   ClientWritePoint,
+  JsonAtPoint,
   JsonPoint,
   JsonSeries,
   JsonWindow,
@@ -295,6 +299,27 @@ export class RtdbClient {
       throw new RtdbClientError(CLIENT_ERROR_CODE.Transport, 'query/aggregate response is missing the windows array');
     }
     return decodeAggregateWindows(windows.map((item) => requireJsonWindow(item)));
+  }
+
+  /** Batch point-in-time lookup (`POST /api/v1/query/at`; Interpolation Detailed Design §4.3) */
+  async queryAt(database: string, metricName: string, options: AtQueryOptions): Promise<ClientAtPoint[]> {
+    if (!Array.isArray(options.timestamps) || options.timestamps.length === 0) {
+      throw new RtdbClientError(
+        CLIENT_ERROR_CODE.InvalidArgument,
+        'queryAt requires a non-empty timestamps array',
+      );
+    }
+    const body = await this.request('POST', '/api/v1/query/at', {
+      db: requireDatabaseName(database),
+      metricName: requireMetricName(metricName),
+      ...options,
+    });
+    const record = requireObject(body, 'query/at response body');
+    const points = record.points;
+    if (!Array.isArray(points)) {
+      throw new RtdbClientError(CLIENT_ERROR_CODE.Transport, 'query/at response is missing the points array');
+    }
+    return decodeAtPoints(points.map((item) => requireJsonAtPoint(item)));
   }
 
   /* ---------- Management ---------- */
@@ -656,10 +681,21 @@ function readSeriesField(body: unknown): JsonSeries {
   if (!Array.isArray(points)) {
     throw new RtdbClientError(CLIENT_ERROR_CODE.Transport, 'query/range response series.points must be an array');
   }
-  return {
+  const decoded: JsonSeries = {
     metricName: String(series.metricName ?? ''),
     points: points.map((item) => requireJsonPoint(item, 'query/range point')),
   };
+  const received = series.received;
+  if (
+    typeof received === 'object' &&
+    received !== null &&
+    typeof (received as { min?: unknown }).min === 'number' &&
+    typeof (received as { max?: unknown }).max === 'number'
+  ) {
+    const window = received as { min: number; max: number };
+    decoded.received = { min: window.min, max: window.max };
+  }
+  return decoded;
 }
 
 function requireJsonPoint(value: unknown, label: string): JsonPoint {
@@ -675,6 +711,22 @@ function requireJsonPoint(value: unknown, label: string): JsonPoint {
   const point: JsonPoint = { t: timestamp, v: record.v as JsonPoint['v'], vt: marker as JsonPoint['vt'] };
   if (typeof record.q === 'number') point.q = record.q;
   return point;
+}
+
+function requireJsonAtPoint(value: unknown): JsonAtPoint {
+  const record = requireObject(value, 'query/at point');
+  const timestamp = record.t;
+  const marker = record.vt;
+  if (typeof timestamp !== 'number' || !Number.isInteger(timestamp)) {
+    throw new RtdbClientError(CLIENT_ERROR_CODE.Transport, 'query/at point.t must be an integer timestamp');
+  }
+  if (typeof marker !== 'number') {
+    throw new RtdbClientError(CLIENT_ERROR_CODE.Transport, 'query/at point.vt must carry a value type marker');
+  }
+  if (typeof record.state !== 'string') {
+    throw new RtdbClientError(CLIENT_ERROR_CODE.Transport, 'query/at point.state must be a string');
+  }
+  return { t: timestamp, v: record.v as JsonAtPoint['v'], vt: marker as JsonAtPoint['vt'], state: record.state };
 }
 
 function requireJsonWindow(value: unknown): JsonWindow {

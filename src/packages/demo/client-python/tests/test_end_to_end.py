@@ -139,8 +139,11 @@ class EndToEndTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        # tests/ -> client-python -> demo -> packages -> <repository root = src/>
         repository_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            )
         )
         cls.data_directory = tempfile.mkdtemp(prefix="ss-rtdb-client-python-")
         cls.port = pick_free_port()

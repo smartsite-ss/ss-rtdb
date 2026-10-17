@@ -72,6 +72,7 @@ import {
 import type {
   AggregateType,
   AggregateWindow,
+  AtPoint,
   EngineOptionName,
   EngineOptions,
   Point,
@@ -86,6 +87,9 @@ import type { WalEntry } from './wal.ts';
 
 /** Maximum number of windows returned by a single aggregate call (prevents a window explosion from too small a `windowMs`; exceeding the limit throws `E_INVALID_RANGE`) */
 export const MAX_AGGREGATE_WINDOWS = 100_000;
+
+/** Maximum number of timestamps accepted by one `queryAt` call (exceeding throws `E_INVALID_POINT`) */
+export const MAX_QUERY_AT_TIMESTAMPS = 10_000;
 
 /** Per-database retention policy file name (listed under the database directory, atomically written by `setRetention`; §6.2.1) */
 export const RETENTION_FILE_NAME = 'retention.json';
@@ -455,7 +459,12 @@ export class RtdbEngine {
 
   /* ---------- Query four primitives ---------- */
 
-  /** Range read (ascending/descending + count limit), source is a merge of in-segment points and unblocked buffered points */
+  /**
+   * Range read (ascending/descending + count limit), source is a merge of in-segment points and unblocked
+   * buffered points. The response also carries `received` — the aggregated server receive-time window of the
+   * hit blocks plus buffered points (block/batch granularity; independent of the returned point limit;
+   * absent when no hit point carries one, e.g. legacy-only blocks).
+   */
   async queryRange(database: string, metricName: string, opts: RangeOptions): Promise<Series> {
     this.requireOpen();
     const startedAt = performance.now();
@@ -466,18 +475,22 @@ export class RtdbEngine {
     }
     const order = opts.order ?? 'asc';
     // Ascending takes the first limit; descending means "the latest limit entries", so take all ascending first and then take the tail reversed
+    const receivedOut = { min: 0, max: 0 };
     const ascending = this.collectAscendingPoints(
       database,
       metricName,
       opts.start,
       opts.end,
       order === 'asc' ? limit : Number.MAX_SAFE_INTEGER,
+      receivedOut,
     );
     const points =
       order === 'desc'
         ? ascending.slice(Math.max(0, ascending.length - limit)).reverse()
         : ascending.slice(0, limit);
-    return this.finishQuery(startedAt, { metricName, points });
+    const series: Series = { metricName, points };
+    if (receivedOut.min !== 0 && receivedOut.max !== 0) series.received = receivedOut;
+    return this.finishQuery(startedAt, series);
   }
 
   /** Get the latest point at or before `before` (`before` defaults to the latest overall; used for report endpoint difference boundary backfill) */
@@ -585,6 +598,94 @@ export class RtdbEngine {
       });
     }
     return this.finishQuery(startedAt, windows);
+  }
+
+  /**
+   * Batch point-in-time lookup (fifth query primitive; Interpolation Detailed Design §3/§4)
+   *
+   * `mode='step'` (default): previous-value hold — the value of the latest real point at or before
+   * `t` (so the state is always 'exact' when a point exists);
+   * `mode='linear'`: piecewise-linear between the two real neighbors of `t` ('interpolated'); before
+   * the first / after the last data point the nearest point is flat-extracted ('extrapolated').
+   * Only f64/i64 metrics support linear (E_TYPE_MISMATCH otherwise, same gate as the aggregate
+   * operators); i64 results are rounded back to bigint (type contract preserved).
+   * Unblocked buffered points participate, so data written just before the query is visible (same
+   * merge + "segments win" dedupe scope as `queryRange`).
+   */
+  async queryAt(
+    database: string,
+    metricName: string,
+    opts: { timestamps: number[]; mode?: 'step' | 'linear' },
+  ): Promise<AtPoint[]> {
+    this.requireOpen();
+    const startedAt = performance.now();
+    const mode = opts.mode ?? 'step';
+    if (mode !== 'step' && mode !== 'linear') {
+      throw new RtdbError(ERROR_CODE.InvalidPoint, `Illegal interpolation mode: ${String(opts.mode)}`);
+    }
+    const timestamps = opts.timestamps;
+    if (!Array.isArray(timestamps) || timestamps.length === 0) {
+      throw new RtdbError(ERROR_CODE.InvalidPoint, 'queryAt requires a non-empty timestamps array');
+    }
+    if (timestamps.length > MAX_QUERY_AT_TIMESTAMPS) {
+      throw new RtdbError(
+        ERROR_CODE.InvalidPoint,
+        `queryAt accepts at most ${MAX_QUERY_AT_TIMESTAMPS} timestamps per call (got ${timestamps.length})`,
+      );
+    }
+    for (let index = 0; index < timestamps.length; index += 1) {
+      if (!Number.isInteger(timestamps[index])) {
+        throw new RtdbError(
+          ERROR_CODE.InvalidPoint,
+          `queryAt timestamps must be integer ms epoch (index ${index}: ${String(timestamps[index])})`,
+        );
+      }
+    }
+
+    // Results echo the request order; evaluate in ascending order with a monotonic two-pointer scan
+    const order = timestamps
+      .map((timestamp, index) => ({ timestamp, index }))
+      .sort((left, right) => left.timestamp - right.timestamp);
+    const min = order[0].timestamp;
+    const max = order[order.length - 1].timestamp;
+
+    const coverage = this.collectAscendingPoints(database, metricName, min, max, Number.MAX_SAFE_INTEGER);
+
+    // Left edge neighbor: the latest point strictly before the covered range (needed only when some
+    // requested t precedes the first covered point)
+    let beforeFirst: Point | null = null;
+    if (coverage.length === 0 || coverage[0].timestamp > min) {
+      beforeFirst = this.latestPointAtOrBefore(database, metricName, min);
+    }
+    // Right edge neighbor (linear only): the true right neighbor may live beyond `max`
+    let afterLast: Point | null = null;
+    if (mode === 'linear' && (coverage.length === 0 || coverage[coverage.length - 1].timestamp < max)) {
+      afterLast = this.earliestPointAtOrAfter(database, metricName, max);
+    }
+
+    // Type gate for linear (same operator x value-type matrix as the aggregate primitives)
+    if (mode === 'linear') {
+      const source = coverage[0] ?? beforeFirst ?? afterLast;
+      if (source !== null) {
+        const valueType = inferValueTypeFromValue(source.value);
+        if (valueType !== ValueType.Float64 && valueType !== ValueType.Int64) {
+          throw new RtdbError(
+            ERROR_CODE.TypeMismatch,
+            `Interpolation mode 'linear' only supports f64/i64; metric ${metricName} is ${valueTypeName(valueType)}`,
+          );
+        }
+      }
+    }
+
+    const results: AtPoint[] = new Array(timestamps.length);
+    let cursor = 0; // first coverage index with timestamp > current t (coverage is ascending)
+    for (const request of order) {
+      while (cursor < coverage.length && coverage[cursor].timestamp <= request.timestamp) cursor += 1;
+      const left = cursor > 0 ? coverage[cursor - 1] : null;
+      const right = cursor < coverage.length ? coverage[cursor] : null;
+      results[request.index] = evaluateQueryAtPoint(mode, request.timestamp, left, right, beforeFirst, afterLast);
+    }
+    return this.finishQuery(startedAt, results);
   }
 
   /* ---------- Management ---------- */
@@ -1111,13 +1212,19 @@ export class RtdbEngine {
     start: number,
     end: number,
     segmentLimit: number,
+    receivedOut?: { min: number; max: number },
   ): Point[] {
-    const segmentPoints = this.reader.readMetricPoints(database, metricName, {
-      start,
-      end,
-      limit: segmentLimit,
-      order: 'asc',
-    });
+    const segmentPoints = this.reader.readMetricPoints(
+      database,
+      metricName,
+      {
+        start,
+        end,
+        limit: segmentLimit,
+        order: 'asc',
+      },
+      receivedOut,
+    );
     const context = this.contexts.get(database);
     if (context === undefined) return segmentPoints;
 
@@ -1125,6 +1232,14 @@ export class RtdbEngine {
       .bufferedPointsOf(metricName)
       .filter((point) => point.timestamp >= start && point.timestamp <= end);
     if (buffered.length === 0) return segmentPoints;
+    // The buffered points' arrival window merges into the same out param (block/batch granularity)
+    if (receivedOut !== undefined) {
+      const bufferedWindow = context.writer.bufferedReceivedWindowOf(metricName);
+      if (bufferedWindow !== null) {
+        receivedOut.min = receivedOut.min === 0 ? bufferedWindow.min : Math.min(receivedOut.min, bufferedWindow.min);
+        receivedOut.max = Math.max(receivedOut.max, bufferedWindow.max);
+      }
+    }
     return mergeAscending(segmentPoints, buffered);
   }
 
@@ -1480,6 +1595,61 @@ function compareAggregateValues(left: Point['value'], right: Point['value']): nu
   const leftNumber = valueToNumber(left);
   const rightNumber = valueToNumber(right);
   return leftNumber < rightNumber ? -1 : leftNumber > rightNumber ? 1 : 0;
+}
+
+/**
+ * Evaluate one `queryAt` request (Interpolation Detailed Design §3)
+ *
+ * `left`/`right` are the covered points around `t` (null at the edges); `beforeFirst`/`afterLast`
+ * are the edge neighbors outside the covered range (may be null). An exact hit always wins.
+ */
+function evaluateQueryAtPoint(
+  mode: 'step' | 'linear',
+  t: number,
+  left: Point | null,
+  right: Point | null,
+  beforeFirst: Point | null,
+  afterLast: Point | null,
+): AtPoint {
+  if (left !== null && left.timestamp === t) {
+    return { timestamp: t, value: left.value, state: 'exact' };
+  }
+
+  if (mode === 'step') {
+    // `left` is the latest covered point <= t; when absent, `beforeFirst` (the latest point before
+    // the covered range) is the latest <= t. Previous-value hold returns a real point -> 'exact'.
+    const source = left ?? beforeFirst;
+    return source === null
+      ? { timestamp: t, value: null, state: 'no-data' }
+      : { timestamp: t, value: source.value, state: 'exact' };
+  }
+
+  const leftNeighbor = left ?? beforeFirst;
+  const rightNeighbor = right ?? afterLast;
+  if (leftNeighbor !== null && rightNeighbor !== null && leftNeighbor.timestamp < t && t < rightNeighbor.timestamp) {
+    return {
+      timestamp: t,
+      value: interpolateQueryAtValue(leftNeighbor, rightNeighbor, t),
+      state: 'interpolated',
+    };
+  }
+  // Outside the data range: flat from the nearest real point ('extrapolated'); nothing at all -> no-data
+  if (leftNeighbor !== null) return { timestamp: t, value: leftNeighbor.value, state: 'extrapolated' };
+  if (rightNeighbor !== null) return { timestamp: t, value: rightNeighbor.value, state: 'extrapolated' };
+  return { timestamp: t, value: null, state: 'no-data' };
+}
+
+/** Linear interpolation between two real points at `t` (i64 stays i64: rounded back to bigint) */
+function interpolateQueryAtValue(leftPoint: Point, rightPoint: Point, t: number): Point['value'] {
+  const leftValue = valueToNumber(leftPoint.value);
+  const rightValue = valueToNumber(rightPoint.value);
+  const span = rightPoint.timestamp - leftPoint.timestamp;
+  const ratio = span <= 0 ? 0 : (t - leftPoint.timestamp) / span;
+  const value = leftValue + (rightValue - leftValue) * ratio;
+  if (typeof leftPoint.value === 'bigint' && typeof rightPoint.value === 'bigint') {
+    return BigInt(Math.round(value));
+  }
+  return value;
 }
 
 /** Single-window aggregate value: count -> number; avg -> time-weighted; sum -> number; min/max -> the base value type; last -> the last value in the window (empty window -> NaN) */

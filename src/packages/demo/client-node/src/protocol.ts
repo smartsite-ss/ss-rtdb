@@ -48,6 +48,11 @@ export interface ClientWritePoint extends ClientPoint {
 export interface ClientSeries {
   metricName: string;
   points: ClientPoint[];
+  /**
+   * Server receive-time window over the queried range (ms epoch): min/max of the server receive
+   * times of the hit points (block/batch granularity); absent when the server does not provide one.
+   */
+  received?: { min: number; max: number };
 }
 
 /** Aggregated window; `avg` / `sum` / `count` -> number, `min` / `max` / `last` -> the metric value type; an empty window -> `NaN` */
@@ -59,6 +64,30 @@ export interface AggregateWindowResult {
 }
 
 export type AggregateType = 'avg' | 'sum' | 'min' | 'max' | 'count' | 'last';
+
+/** Interpolation mode of `queryAt` (MVP: `step`/`linear`) */
+export type InterpolationMode = 'step' | 'linear';
+
+/** Options of `RtdbClient.queryAt` */
+export interface AtQueryOptions {
+  /** Timestamps to evaluate (ms epoch, any order, ≤10 000 per call) */
+  timestamps: number[];
+  /** `step` (default) = previous-value hold; `linear` = piecewise-linear (f64/i64 metrics only) */
+  mode?: InterpolationMode;
+}
+
+/** Where a `queryAt` value came from */
+export type AtPointState = 'exact' | 'interpolated' | 'extrapolated' | 'no-data';
+
+/** One `queryAt` result: the value at a requested timestamp plus its provenance */
+export interface ClientAtPoint {
+  /** Requested timestamp (ms epoch, echoed) */
+  timestamp: number;
+  /** Value at `timestamp`; null = nothing to report (`state: 'no-data'`) */
+  value: PointValue | null;
+  /** `exact` = a real stored point; `interpolated`/`extrapolated` = computed (linear only); `no-data` */
+  state: AtPointState;
+}
 
 /* ---------- Wire shapes (server response fragments) ---------- */
 
@@ -72,6 +101,7 @@ export interface JsonPoint {
 export interface JsonSeries {
   metricName: string;
   points: JsonPoint[];
+  received?: { min: number; max: number };
 }
 
 export interface JsonWindow {
@@ -80,6 +110,13 @@ export interface JsonWindow {
   v: number | string | boolean | null;
   vt: ValueType;
   count: number;
+}
+
+export interface JsonAtPoint {
+  t: number;
+  v: number | string | boolean | null;
+  vt: ValueType;
+  state: string;
 }
 
 /* ---------- Encoding (SDK value -> wire JSON) ---------- */
@@ -181,7 +218,9 @@ export function decodePoint(json: JsonPoint): ClientPoint {
 }
 
 export function decodeSeries(json: JsonSeries): ClientSeries {
-  return { metricName: json.metricName, points: json.points.map(decodePoint) };
+  const series: ClientSeries = { metricName: json.metricName, points: json.points.map(decodePoint) };
+  if (json.received !== undefined) series.received = json.received;
+  return series;
 }
 
 export function decodeAggregateWindows(windows: readonly JsonWindow[]): AggregateWindowResult[] {
@@ -191,4 +230,22 @@ export function decodeAggregateWindows(windows: readonly JsonWindow[]): Aggregat
     value: decodeValue(window.v, window.vt),
     count: window.count,
   }));
+}
+
+const AT_POINT_STATES: readonly AtPointState[] = ['exact', 'interpolated', 'extrapolated', 'no-data'];
+
+export function decodeAtPoints(records: readonly JsonAtPoint[]): ClientAtPoint[] {
+  return records.map((record) => {
+    if (!AT_POINT_STATES.includes(record.state as AtPointState)) {
+      throw new RtdbClientError(
+        CLIENT_ERROR_CODE.Transport,
+        `query/at point.state must be one of exact|interpolated|extrapolated|no-data: ${String(record.state)}`,
+      );
+    }
+    return {
+      timestamp: record.t,
+      value: record.v === null ? null : decodeValue(record.v, record.vt),
+      state: record.state as AtPointState,
+    };
+  });
 }

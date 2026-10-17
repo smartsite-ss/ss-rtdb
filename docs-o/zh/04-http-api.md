@@ -85,6 +85,7 @@
 | `POST` | `/api/v1/query/last` | query | 某时刻或之前的最新点 |
 | `POST` | `/api/v1/query/count` | query | 点数（估算或精确） |
 | `POST` | `/api/v1/query/aggregate` | query | 窗口聚合 |
+| `POST` | `/api/v1/query/at` | query | 任意时刻插值取值 |
 | `PUT` | `/api/v1/retention/:db` | write | 设置按库保留策略 |
 | `POST` | `/api/v1/backup/:db` | write | 触发整库备份 |
 | `GET` `POST` | `/api/v1/admin/users` | admin | 列出 / 创建用户 |
@@ -207,13 +208,20 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/range" \
     "points": [
       { "t": 1760688000000, "v": 1024.5, "vt": 1 },
       { "t": 1760688001000, "v": 1030.25, "vt": 1 }
-    ]
+    ],
+    "received": { "min": 1760691600050, "max": 1760691600062 }
   }
 }
 ```
 
 `start` / `end` 为**闭区间**毫秒 epoch。`limit` 默认取 `query.defaultLimit`（100 000）；
 `order` 为 `asc`（默认）或 `desc`。
+
+`series.received` 为**服务器接收时间窗口**（毫秒 epoch）：本次区间命中的数据块及未成块缓冲点
+的服务器接收时刻的 `[min, max]`，块/批次粒度（非逐点），与返回的 `limit` 截断无关。用途：
+① 区分补传数据（数据时间戳远早于接收时间）；② 观测客户端→服务端链路时延与服务器阻塞
+（同步时钟后，接收时刻应紧随发送时刻）。旧格式块（无 `receivedTime` 标志，见文档 11 §2.2）
+不携带该窗口；若整个区间无任何点携带则为该键缺省。
 
 ### 4.2 `last`
 
@@ -270,7 +278,34 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/aggregate" \
 - 无数据覆盖的窗口返回 `v` 为 `null`、`count: 0`。
 - 单次调用窗口数超过 100 000 → `400 E_INVALID_RANGE`。
 
-### 4.5 读取值
+### 4.5 `at`（插值取值）
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/at" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricName":"station01.powerMeter.kwh",
+       "timestamps":[1760688000000,1760688900000],"mode":"linear"}'
+```
+
+```json
+{
+  "points": [
+    { "t": 1760688000000, "v": 1024.5, "vt": 1, "state": "exact" },
+    { "t": 1760688900000, "v": 1037.1, "vt": 1, "state": "interpolated" }
+  ]
+}
+```
+
+批量取任意时刻的值（第五查询原语；插值语义详见《插值功能详细设计》）：
+
+- `timestamps`：毫秒 epoch 数组，无需有序，单次 ≤ 10 000 个（超出 `400 E_INVALID_POINT`）。
+- `mode`：`step`（默认，前值保持——取 ≤t 最近实测点）| `linear`（相邻两实测点之间线性插值；
+  仅 f64/i64 指标支持，其余值类型整批 `400 E_TYPE_MISMATCH`；i64 结果四舍五入后仍以 i64 返回）。
+- `state`：`exact`＝存储中真实存在的点（含前值保持）；`interpolated`＝两实测点之间推算；
+  `extrapolated`＝数据范围之外按最近点平推；`no-data`＝无任何数据（`v: null`）。
+- 结果按请求顺序回显；未成块缓冲点参与（写后立查即可见）；metric 不存在返回 `404 E_METRIC_NOT_FOUND`。
+
+### 4.6 读取值
 
 | `vt` | JSON 中的 `v` |
 | ---- | ------------- |
@@ -424,6 +459,8 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 ```
 
 - `ttlMs` 可选；省略表示永不过期，与服务端 `POST /api/v1/admin/tokens` 一致。
+- **单会话语义**：登录签发新令牌前，会先吊销**同一用户**此前的 `console login` 令牌——反复登录不会积累孤儿凭据
+  （管理面签发的其它 label 令牌与静态 `auth.token` 不受影响）。
 - 未知用户与错误口令返回同一个 `401 E_AUTH`（不泄露用户是否存在）；字段缺失返回 `400 E_INVALID_POINT`。
 
 ```bash
@@ -491,4 +528,7 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 | 2026-10-17 | `GET /api/v1/admin/tokens` 增加逐令牌运行期统计（`lastUsedAt`、`lastDatabase`、`pointsPerSec`、`bytesPerSec`）；§7.2 补充字段说明与「凭据而非会话」规则 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §7.2 新增 `configToken`：静态 `auth.token`（`rtdb.token`）不在令牌存储中，其用量单独返回，演示客户端等静态令牌写入不再被丢弃 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `GET /api/v1/metrics/:db` 响应增加 `valueType`（指标首次写入锁定的值类型标记，取自第一个块头，未知为 `null`）；§5 示例同步 | GLM-5.3-Flash |
+| 2026-10-17 | §7.3 登录改为**单会话语义**：签发新令牌前自动吊销同用户旧的 `console login` 令牌（其它 label 与静态令牌不受影响） | GLM-5.3-Flash |
+| 2026-10-17 | §4.1 `query/range` 响应新增 `series.received`（服务器接收时间窗口，块/批次粒度；用于补传识别与链路时延观测），示例同步 | GLM-5.3-Flash |
+| 2026-10-17 | 新增 §4.5 `POST /api/v1/query/at`（任意时刻插值取值：`step`/`linear` 模式、`state` 来源标记、批量 ≤10 000）与端点索引行，原「读取值」顺延为 §4.6 | GLM-5.3-Flash |
 

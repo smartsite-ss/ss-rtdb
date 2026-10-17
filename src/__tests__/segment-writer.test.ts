@@ -17,10 +17,13 @@ import { after, describe, it } from 'node:test';
 import { CODEC_ID, decodeTimestamps, decodeValues } from '../packages/core/src/encoder/registry.ts';
 import { ERROR_CODE, isRtdbError } from '../packages/core/src/errors.ts';
 import {
+  BLOCK_FLAG,
+  BLOCK_RECEIVED_WINDOW_SIZE,
   SEGMENT_FOOTER_SIZE,
   SEGMENT_HEADER_FLAG,
   SEGMENT_HEADER_SIZE,
   blockDataCrc32,
+  blockDataCrc32WithReceived,
   dateNumberFromTimestamp,
   parseIndexRegion,
   parseSegmentFooter,
@@ -130,18 +133,26 @@ function readSealedSegment(segmentFilePath: string, indexFilePath: string): Seal
   };
 }
 
-/** 解码单个块（校验块头 totalLength 与 BlockData CRC，逐点还原 ts/value） */
+/** 解码单个块（校验块头 totalLength 与 BlockData CRC——含 flags bit3 的 16B 接收时间窗口尾，逐点还原 ts/value） */
 function decodeBlock(
   segmentBytes: Uint8Array,
   header: BlockHeader,
 ): { timestamps: number[]; values: Array<Point['value']> } {
-  const dataOffset = header.offset + header.totalLength - header.timestampRawLength - header.valueRawLength;
+  const blockEnd = header.offset + header.totalLength;
+  const dataEnd =
+    (header.flags & BLOCK_FLAG.receivedTime) !== 0 ? blockEnd - BLOCK_RECEIVED_WINDOW_SIZE : blockEnd;
+  const dataOffset = dataEnd - header.timestampRawLength - header.valueRawLength;
   const timestampEncoded = segmentBytes.subarray(dataOffset, dataOffset + header.timestampRawLength);
-  const valueEncoded = segmentBytes.subarray(
-    dataOffset + header.timestampRawLength,
-    header.offset + header.totalLength,
-  );
-  assert.equal(blockDataCrc32(timestampEncoded, valueEncoded), header.crc32, '块数据 CRC 应校验通过');
+  const valueEncoded = segmentBytes.subarray(dataOffset + header.timestampRawLength, dataEnd);
+  const expectedCrc =
+    dataEnd === blockEnd
+      ? blockDataCrc32(timestampEncoded, valueEncoded)
+      : blockDataCrc32WithReceived(
+          timestampEncoded,
+          valueEncoded,
+          segmentBytes.subarray(dataEnd, blockEnd),
+        );
+  assert.equal(expectedCrc, header.crc32, '块数据 CRC 应校验通过');
 
   const decodedTimestamps = decodeTimestamps(timestampEncoded, header.pointCount);
   const timestamps: number[] = new Array(header.pointCount);

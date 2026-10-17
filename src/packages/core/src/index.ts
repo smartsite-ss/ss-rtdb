@@ -24,8 +24,10 @@ export {
 export type {
   AggregateType,
   AggregateWindow,
+  AtPoint,
   EngineOptionName,
   EngineOptions,
+  InterpolationMode,
   Point,
   RangeOptions,
   Series,
@@ -192,7 +194,7 @@ export {
 } from './encoder/values.ts';
 
 /* ---------- Engine facade (§2.2) ---------- */
-export { MAX_AGGREGATE_WINDOWS, RETENTION_FILE_NAME, RtdbEngine } from './engine.ts';
+export { MAX_AGGREGATE_WINDOWS, MAX_QUERY_AT_TIMESTAMPS, RETENTION_FILE_NAME, RtdbEngine } from './engine.ts';
 export type {
   BackupResult,
   DatabaseMetricStats,

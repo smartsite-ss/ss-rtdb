@@ -34,13 +34,16 @@ from urllib.parse import quote
 from .errors import CLIENT_ERROR_CODE, RtdbClientError
 from .protocol import (
     AGGREGATE_TYPES,
+    INTERPOLATION_MODES,
     AggregateWindow,
+    AtPoint,
     Point,
     Series,
     WritePoint,
     _is_integer_number,
     _is_number,
     decode_aggregate_windows,
+    decode_at_points,
     decode_point,
     decode_series,
     encode_write_point,
@@ -287,6 +290,46 @@ class RtdbClient:
                 "query/aggregate response is missing the windows array",
             )
         return decode_aggregate_windows(windows)
+
+    def query_at(
+        self,
+        database: str,
+        metric_name: str,
+        timestamps: List[int],
+        mode: str = "step",
+    ) -> List[AtPoint]:
+        """Batch point-in-time lookup (``POST /api/v1/query/at``; Interpolation Detailed Design §4.3).
+
+        ``mode='step'`` (default) = previous-value hold; ``mode='linear'`` = piecewise-linear
+        between neighbors (f64/i64 metrics only). Each result carries ``state`` telling apart a
+        real stored point (``exact``) from a computed one (``interpolated`` / ``extrapolated``).
+        """
+        if mode not in INTERPOLATION_MODES:
+            raise RtdbClientError(
+                CLIENT_ERROR_CODE["InvalidArgument"],
+                "Unsupported interpolation mode: %s (expected one of %s)"
+                % (mode, ", ".join(INTERPOLATION_MODES)),
+            )
+        if not isinstance(timestamps, list) or len(timestamps) == 0:
+            raise RtdbClientError(
+                CLIENT_ERROR_CODE["InvalidArgument"],
+                "query_at requires a non-empty timestamps list",
+            )
+        body: Dict[str, Any] = {
+            "db": _require_database_name(database),
+            "metricName": _require_metric_name(metric_name),
+            "timestamps": timestamps,
+            "mode": mode,
+        }
+        response = self._request("POST", "/api/v1/query/at", body)
+        record = _require_object(response, "query/at response body")
+        points = record.get("points")
+        if not isinstance(points, list):
+            raise RtdbClientError(
+                CLIENT_ERROR_CODE["Transport"],
+                "query/at response is missing the points array",
+            )
+        return decode_at_points(points)
 
     # ---------- Management ----------
 

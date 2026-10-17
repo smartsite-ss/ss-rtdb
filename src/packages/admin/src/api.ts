@@ -33,6 +33,8 @@ export interface RtdbJsonPoint {
 export interface RtdbJsonSeries {
   metricName: string;
   points: RtdbJsonPoint[];
+  /** Server receive-time window over the queried range (ms epoch); absent when unavailable */
+  received?: { min: number; max: number };
 }
 
 export interface RtdbMetricSummary {

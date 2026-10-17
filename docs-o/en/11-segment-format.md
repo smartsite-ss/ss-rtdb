@@ -81,11 +81,16 @@ with the on-disk header would fail read-side verification.
 | tsRawLen | u32 | **on-disk** timestamp payload byte count (see below) |
 | valRawLen | u32 | **on-disk** value payload byte count (see below) |
 | tsMin / tsMax | i64×2 | ms timestamp range within the block |
-| flags | u16 | bit0 `backfill` = out-of-order backfill block; bit2 `qualityPresent` reserved (M0: always 0) |
+| flags | u16 | bit0 `backfill` = out-of-order backfill block; bit2 `qualityPresent` reserved (M0: always 0); bit3 `receivedTime` = a 16B server receive-time window is appended at the block tail |
 | reserved | u16 | 0 |
-| crc32 | u32 | covers the whole BlockData (§4) |
+| crc32 | u32 | covers the whole BlockData (including the receive-time window tail, §4) |
 
-Block data: `BlockData = tsEncoded(tsRawLen B) ++ valEncoded(valRawLen B)`.
+Block data: `BlockData = tsEncoded(tsRawLen B) ++ valEncoded(valRawLen B)`; when flags bit3 is set
+it is followed by `receivedWindow(16B) = [receivedMin i64][receivedMax i64]` (ms epoch; `totalLength`
+and the block CRC scope grow by 16 accordingly). Legacy blocks without the flag parse as
+`receivedMin/receivedMax = null` with unchanged behavior — the receive-time window is arrival
+traceability at **block/batch granularity** (backfill identification, link-latency observation),
+not stored per point.
 
 **Key convention**: `tsRawLen` / `valRawLen` carry the **on-disk (encoded) payload byte counts**,
 not the decompressed counts — the read side uses them to split BlockData. Timestamps inside a block
@@ -143,7 +148,7 @@ codecIds are fixed into the format and **must not be reused or reordered**:
 
 | Check | Scope | Algorithm | On failure |
 | ----- | ----- | --------- | ---------- |
-| Block CRC | the whole BlockData | chained `crc32(val, crc32(ts))` (node:zlib) | read side throws `E_CORRUPT_BLOCK` |
+| Block CRC | the whole BlockData | chained `crc32(val, crc32(ts))` (node:zlib); when flags bit3 is set the 16B receive-time window is chained in as well (`crc32(received, crc32(val, crc32(ts)))`) | read side throws `E_CORRUPT_BLOCK` |
 | Footer CRC | Header 32B ++ indexOffset 8B | crc32 | read side treats it as `E_CORRUPT_SEGMENT` |
 
 - The segment header itself carries no CRC; it is validated via magic + version + field-range checks
@@ -289,3 +294,4 @@ i64 ∈ ±2^53; ms-epoch timestamps.
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Page created: segment physical layout, encoding & CRCs, ten-step write path, WAL line format & safe point (including the "WAL fills then resets" explanation), startup recovery, constants & clamp table | GLM-5.3-Flash |
+| 2026-10-17 | §2.2 block flags add bit3 `receivedTime`: 16B `[receivedMin][receivedMax]` server receive-time window at the block tail (included in `totalLength` and the CRC chain); §4 CRC chain updated | GLM-5.3-Flash |
