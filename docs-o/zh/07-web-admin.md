@@ -100,3 +100,11 @@ npm run build --workspace @ss/rtdb-admin
 ## 6. 下一步
 
 - [08 — 运维与维护](./08-operations.md)
+
+---
+
+## 更新日志
+
+| 日期 | 变更 | 处理模型 |
+| ---- | ---- | -------- |
+| 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |

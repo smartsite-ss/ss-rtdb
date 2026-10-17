@@ -124,3 +124,11 @@ python -c "import ss_rtdb_client; print(ss_rtdb_client.__version__)"   # -> 0.1.
 
 - [02 — 配置](./02-configuration.md)：设置端口、数据目录与鉴权。
 - [03 — 运行服务与 `rtdbctl`](./03-running-and-cli.md)：启动服务并开始使用。
+
+---
+
+## 更新日志
+
+| 日期 | 变更 | 处理模型 |
+| ---- | ---- | -------- |
+| 2026-10-17 | 创建中文译本；随英文版更新同步 §4 构建流程、§6 运行方式、§8 Python SDK 版本输出 | DeepSeek-V4.1-Flash |

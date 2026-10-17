@@ -125,6 +125,9 @@ cli ────┼──> server ──> core
   `docs-o/en/<页>.md` 与 `docs-o/zh/<页>.md`（两套页码一一对应：`README` + `01`…`09`）。
 - 新增/删除页面时，同步更新 `docs-o/en/README.md` 与 `docs-o/zh/README.md` 的索引表，
   以及仓库根 `README.md` 的双语文档索引表。
+- **每次修改中文文档（`docs-o/zh/**`、根 `README.md`、本文件等）都必须在被改页面末尾的
+  「更新日志」表中追加一行**，字段为「日期 | 变更 | 处理模型」；「处理模型」填写实际执行本次
+  修改的模型名称（例如 `DeepSeek-V4.1-Flash`）。只允许追加，不得改写或删除既有历史行。
 - 页内交叉引用使用“§N 小节名”文字描述，不要写基于英文标题生成的锚点。
 - 不要把 `docs-e/`、运行时数据（`rtdb-data/`、`*.token`）、`dist/`、`node_modules/` 提交入库。
 
@@ -175,3 +178,11 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
   否则返回 404。
 - 已忽略的本地产物：`node_modules/`、`dist/`、`tsbuildinfo`、`*.log`、`rtdb-data/`、`*.token`、
   `coverage/`、`bench-out/`、Python 缓存目录、`docs-e/`。
+
+---
+
+## 更新日志
+
+| 日期 | 变更 | 处理模型 |
+| ---- | ---- | -------- |
+| 2026-10-17 | 创建本文件（面向 AI 编码代理的仓库指南）；同日补充 §7「中文文档更新日志」规则 | DeepSeek-V4.1-Flash |

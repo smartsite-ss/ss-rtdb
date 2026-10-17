@@ -154,3 +154,11 @@ Apache License 2.0。每个源文件都带有标准 Apache-2.0 文件头；提�
 
 - 网站：<https://smartsite.top/>
 - 联系：zkxxa@qq.com，zcwebms@gmail.com
+
+---
+
+## 更新日志
+
+| 日期 | 变更 | 处理模型 |
+| ---- | ---- | -------- |
+| 2026-10-17 | 创建中文文档索引；补齐 09 开发者指南链接，修正许可章节引用 | DeepSeek-V4.1-Flash |

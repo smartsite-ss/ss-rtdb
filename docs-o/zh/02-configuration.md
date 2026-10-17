@@ -240,3 +240,11 @@ console.log(hashPassword('your-strong-password'));
 ## 8. 下一步
 
 - [03 — 运行服务与 `rtdbctl`](./03-running-and-cli.md)
+
+---
+
+## 更新日志
+
+| 日期 | 变更 | 处理模型 |
+| ---- | ---- | -------- |
+| 2026-10-17 | 创建中文译本；随英文版更新同步 §2 启动参数说明、§6.2 口令哈希生成方式 | DeepSeek-V4.1-Flash |

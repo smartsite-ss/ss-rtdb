@@ -261,3 +261,11 @@ except RtdbClientError as error:
 ## 4. 下一步
 
 - [06 — 嵌入式引擎（形态 A）](./06-embedded-engine.md)
+
+---
+
+## 更新日志
+
+| 日期 | 变更 | 处理模型 |
+| ---- | ---- | -------- |
+| 2026-10-17 | 创建中文译本；随英文版更新同步「值类型映射」、长字段名、`aggregate_type` 参数等 | DeepSeek-V4.1-Flash |

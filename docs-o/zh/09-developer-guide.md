@@ -181,3 +181,11 @@ grep -rl --include='*.ts' -L 'SPDX-License-Identifier: Apache-2.0' packages/*/sr
 ## 9. 许可证
 
 Apache License 2.0。贡献按同一许可证接受；请保持文件头完整。
+
+---
+
+## 更新日志
+
+| 日期 | 变更 | 处理模型 |
+| ---- | ---- | -------- |
+| 2026-10-17 | 创建中文译本（新增页面，对应英文 09-developer-guide.md） | DeepSeek-V4.1-Flash |
