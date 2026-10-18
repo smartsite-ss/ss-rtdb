@@ -76,28 +76,6 @@ const isBundledForm = (): boolean => normalizeApiBaseUrl(baseUrl.value).length =
     <main class="login-stage">
       <div class="login-intro">
         <span class="login-eyebrow">ss-rtdb</span>
-        <h1>{{ t('login.hero.title') }}</h1>
-        <p class="login-hero-desc">{{ t('login.hero.desc') }}</p>
-        <ul class="login-points">
-          <li>
-            <span class="login-point-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg>
-            </span>
-            {{ t('login.point.api') }}
-          </li>
-          <li>
-            <span class="login-point-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg>
-            </span>
-            {{ t('login.point.static') }}
-          </li>
-          <li>
-            <span class="login-point-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg>
-            </span>
-            {{ t('login.point.monitor') }}
-          </li>
-        </ul>
       </div>
 
       <form class="login-card" @submit.prevent="submit">

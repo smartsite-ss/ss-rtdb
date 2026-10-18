@@ -26,6 +26,25 @@ REM   bin\start-demo-server.bat vars <pts/s> <seconds> [client options]
 REM                                                    Variable-count ladder: runs the bench for
 REM                                                    1000 / 3000 / 6000 / 10000 metrics, one
 REM                                                    database per point (perf_vars_<count>)
+REM   bin\start-demo-server.bat remote [host[:port] or url] [client options]
+REM                                                    Remote smoke test against the published
+REM                                                    instance (default URL
+REM                                                    https://smartsite.top:8081): writes one
+REM                                                    simulated batch, verifies it, then exits.
+REM                                                    An optional positional target accepts
+REM                                                    "smartsite.top:8081" (https is assumed)
+REM                                                    or a full http(s):// URL; RTDB_REMOTE_URL
+REM                                                    and RTDB_REMOTE_DB (default
+REM                                                    smart_site_remote) also override.
+REM                                                    Pass --duration / --rate to stream instead.
+REM
+REM                                                    Token order: RTDB_TOKEN (environment) ->
+REM                                                    bin\rtdb.remote.token (gitignored) ->
+REM                                                    a "demo-remote" API token (role=write)
+REM                                                    minted after signing in with
+REM                                                    RTDB_DEMO_USER / RTDB_DEMO_PASSWORD
+REM                                                    (default admin / ss-rtdb); the minted
+REM                                                    token is cached for later runs.
 REM
 REM Examples:
 REM   window 1: bin\start-demo-server.bat
@@ -35,6 +54,9 @@ REM   window 2: bin\start-demo-server.bat bench 20000 30 --db perf_demo --interv
 REM   window 2: bin\start-demo-server.bat bench 5000 60 --points-per-tick 5000
 REM   window 2: bin\start-demo-server.bat bench 200000 60 --metrics 10000
 REM   window 2: bin\start-demo-server.bat vars 50000 60
+REM
+REM   bin\start-demo-server.bat remote                       One batch + verify (smoke test)
+REM   bin\start-demo-server.bat remote smartsite.top:8081 --duration 60 --interval 1000
 REM
 REM The load client sends "rate * interval / 1000" points per batch: with the
 REM default 1000 ms sampling interval, "--rate 20000" means 20000 points per batch
@@ -68,6 +90,7 @@ if /I "%ACTION%"=="-h" goto usage
 if /I "%ACTION%"=="--help" goto usage
 if /I "%ACTION%"=="bench" goto prepare_bench
 if /I "%ACTION%"=="vars" goto prepare_bench
+if /I "%ACTION%"=="remote" goto prepare_remote
 
 echo [ERROR] Unknown action: %ACTION%
 call :print_short_usage
@@ -88,9 +111,32 @@ set "EXTRA=%EXTRA% %1"
 shift
 goto collect_extra
 
+:prepare_remote
+shift
+REM Optional positional target: "host[:port]" or a full "http(s)://host[:port]".
+if "%~1"=="" goto remote_setup
+set "REMOTE_TARGET=%~1"
+if "%REMOTE_TARGET:~0,2%"=="--" goto remote_setup
+set "RTDB_REMOTE_URL=%REMOTE_TARGET%"
+shift
+
+:remote_setup
+if not defined RTDB_REMOTE_URL set "RTDB_REMOTE_URL=https://smartsite.top:8081"
+if not defined RTDB_REMOTE_DB set "RTDB_REMOTE_DB=smart_site_remote"
+REM A bare host[:port] defaults to https; the client requires an explicit scheme.
+echo %RTDB_REMOTE_URL% | findstr /I /C:"http://" /C:"https://" >nul 2>nul
+if errorlevel 1 set "RTDB_REMOTE_URL=https://%RTDB_REMOTE_URL%"
+set "EXTRA="
+:collect_remote_extra
+if "%~1"=="" goto check_files
+set "EXTRA=%EXTRA% %1"
+shift
+goto collect_remote_extra
+
 :check_files
 if /I "%ACTION%"=="bench" goto check_bench_files
 if /I "%ACTION%"=="vars" goto check_bench_files
+if /I "%ACTION%"=="remote" goto check_bench_files
 if not exist "%CONFIG_FILE%" (
   echo [ERROR] Demo server config not found: "%CONFIG_FILE%"
   exit /b 1
@@ -121,6 +167,7 @@ if defined RTDB_PORT set "URL_ARG=--url http://127.0.0.1:%RTDB_PORT%"
 
 if /I "%ACTION%"=="bench" goto bench_start
 if /I "%ACTION%"=="vars" goto vars_start
+if /I "%ACTION%"=="remote" goto remote_start
 goto server_foreground
 
 :server_foreground
@@ -134,6 +181,109 @@ echo.
 node "%SERVER_ENTRY%"
 set "CODE=%ERRORLEVEL%"
 goto finish
+
+:remote_start
+echo [demo] mode   : remote smoke test (no local server is started)
+echo [demo] target : %RTDB_REMOTE_URL%
+echo [demo] db     : %RTDB_REMOTE_DB%
+if not "%EXTRA%"=="" echo [demo] options:%EXTRA%
+echo.
+
+call :remote_auth
+if errorlevel 1 (
+  set "CODE=1"
+  goto remote_done
+)
+
+REM Default is one batch plus verification; switch to streaming when the caller asked for it.
+set "RUN_MODE=--once --verify"
+set "RESULT_LABEL=remote smoke test"
+echo %EXTRA% | findstr /I /C:"--duration" /C:"--rate" /C:"--points-per-tick" /C:"--total-points" /C:"--once" /C:"--dry-run" /C:"--list" >nul 2>nul
+if not errorlevel 1 (
+  set "RUN_MODE=--verify"
+  set "RESULT_LABEL=remote run"
+)
+
+set /a ATTEMPT=0
+:remote_attempt
+set /a ATTEMPT+=1
+node "%CLIENT_ENTRY%" --url %RTDB_REMOTE_URL% --db %RTDB_REMOTE_DB% %RUN_MODE% %TOKEN_ARG% %EXTRA%
+set "CODE=%ERRORLEVEL%"
+if not "%CODE%"=="3" goto remote_done
+if %ATTEMPT% GEQ 2 goto remote_done
+echo.
+echo [demo] remote run failed (attempt %ATTEMPT%/2); retrying in 3 s ...
+REM ping is used instead of timeout: timeout aborts when stdin is redirected (CI / piped output).
+ping -n 4 127.0.0.1 >nul
+goto remote_attempt
+
+:remote_done
+echo.
+if "%CODE%"=="0" (
+  echo [demo] %RESULT_LABEL% PASSED: simulated data was written to %RTDB_REMOTE_DB% and verified.
+) else if "%CODE%"=="2" (
+  echo [demo] %RESULT_LABEL% FAILED: verification did not match the written data.
+) else if "%CODE%"=="3" (
+  echo [demo] remote run failed: endpoint unreachable or credentials rejected
+  echo [demo] check the endpoint first: %RTDB_REMOTE_URL%/healthz
+  echo [demo] if this run reused a cached token, delete "%SCRIPT_DIR%rtdb.remote.token" and retry
+) else (
+  echo [demo] remote run finished with exit code %CODE%.
+  echo [demo] hint: the target address goes right after "remote", for example
+  echo          bin\start-demo-server.bat remote smartsite.top:8081 --duration 60
+)
+goto finish
+
+:remote_auth
+REM Resolve the Bearer token for the published instance; sets TOKEN_ARG when a file is used.
+set "TOKEN_ARG="
+echo %EXTRA% | findstr /I /C:"--token" >nul 2>nul
+if not errorlevel 1 (
+  echo [demo] token  : provided on the command line
+  exit /b 0
+)
+if defined RTDB_TOKEN (
+  echo [demo] token  : RTDB_TOKEN
+  exit /b 0
+)
+if exist "%SCRIPT_DIR%rtdb.remote.token" (
+  set "TOKEN_ARG=--token-file "%SCRIPT_DIR%rtdb.remote.token""
+  echo [demo] token  : %SCRIPT_DIR%rtdb.remote.token
+  exit /b 0
+)
+
+set "DEMO_USER=admin"
+if defined RTDB_DEMO_USER set "DEMO_USER=%RTDB_DEMO_USER%"
+set "DEMO_PASS=ss-rtdb"
+if defined RTDB_DEMO_PASSWORD set "DEMO_PASS=%RTDB_DEMO_PASSWORD%"
+set "TOKEN_TMP=%TEMP%\ss-rtdb-remote-token.txt"
+del /f /q "%TOKEN_TMP%" >nul 2>nul
+echo [demo] token  : signing in as %DEMO_USER% and minting a "demo-remote" token ...
+REM A console-login token is revoked by the next sign-in of the same user (single-session
+REM semantics), which kills streams longer than a minute whenever the console is used in
+REM parallel. Mint a normal API token instead (role=write, no expiry): sign-ins never revoke
+REM it. It is cached in bin\rtdb.remote.token (covered by the *.token gitignore) for later runs.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $b=ConvertTo-Json -InputObject (New-Object PSObject -Property @{username='%DEMO_USER%';password='%DEMO_PASS%'}) -Compress; $login=Invoke-RestMethod -Uri '%RTDB_REMOTE_URL%/api/v1/auth/login' -Method Post -ContentType 'application/json' -Body $b -TimeoutSec 20; $tok=$login.token; try { $h=@{Authorization=('Bearer '+$login.token)}; $nb=ConvertTo-Json -InputObject (New-Object PSObject -Property @{user='%DEMO_USER%';role='write';label='demo-remote'}) -Compress; $mint=Invoke-RestMethod -Uri '%RTDB_REMOTE_URL%/api/v1/admin/tokens' -Method Post -Headers $h -ContentType 'application/json' -Body $nb -TimeoutSec 20; $tok=$mint.token; try { [IO.File]::WriteAllText('%SCRIPT_DIR%rtdb.remote.token', $tok) } catch {} } catch {}; [IO.File]::WriteAllText('%TOKEN_TMP%', $tok)" >nul 2>nul
+if errorlevel 1 goto remote_auth_failed
+if not exist "%TOKEN_TMP%" goto remote_auth_failed
+set "RTDB_TOKEN="
+set /p RTDB_TOKEN=<"%TOKEN_TMP%"
+del /f /q "%TOKEN_TMP%" >nul 2>nul
+if not defined RTDB_TOKEN goto remote_auth_failed
+if exist "%SCRIPT_DIR%rtdb.remote.token" (
+  echo [demo] token  : saved to %SCRIPT_DIR%rtdb.remote.token (reused by later runs^)
+) else (
+  echo [demo] token  : session token only - a later sign-in of %DEMO_USER% revokes it
+)
+exit /b 0
+
+:remote_auth_failed
+echo [ERROR] Remote sign-in failed: %RTDB_REMOTE_URL%/api/v1/auth/login
+echo         Provide a token instead:
+echo           set RTDB_TOKEN=^<token^>
+echo           bin\start-demo-server.bat remote --token ^<token^>
+echo         The static server token is /home/ss-rtdb/rtdb.token on the host.
+exit /b 1
 
 :bench_start
 set "VARS="
@@ -233,6 +383,12 @@ echo   bin\start-demo-server.bat vars ^<pts/s^> ^<seconds^> [client options]
 echo                                                    Variable-count ladder: bench for 1000 /
 echo                                                    3000 / 6000 / 10000 metrics, one database
 echo                                                    per point (perf_vars_^<count^>)
+echo   bin\start-demo-server.bat remote [host[:port] or url] [client options]
+echo                                                    Remote smoke test against the published
+echo                                                    instance https://smartsite.top:8081:
+echo                                                    one simulated batch + verification.
+echo                                                    The optional target accepts
+echo                                                    "smartsite.top:8081" (https assumed)
 echo   bin\start-demo-server.bat help                   Show this help
 echo.
 echo Examples:
@@ -242,6 +398,8 @@ echo   window 2: bin\start-demo-server.bat bench 20000 30 --db perf_demo --inter
 echo   window 2: bin\start-demo-server.bat bench 5000 60 --points-per-tick 5000
 echo   window 2: bin\start-demo-server.bat bench 200000 60 --metrics 10000
 echo   window 2: bin\start-demo-server.bat vars 50000 60
+echo   bin\start-demo-server.bat remote
+echo   bin\start-demo-server.bat remote smartsite.top:8081 --duration 60 --interval 1000
 echo.
 echo Notes:
 echo   - bench never starts a server: start it first in another window or as a service.
@@ -256,6 +414,16 @@ echo   - "vars" runs the ladder 1000 / 3000 / 6000 / 10000 metrics and writes ea
 echo     point into its own database (perf_vars_^<count^>) so the runs stay comparable.
 echo   - "duration" is in seconds; use a large value (or Ctrl+C) to run indefinitely.
 echo     Ctrl+C stops only the client, the server keeps running.
+echo   - "remote" targets the published instance (default https://smartsite.top:8081,
+echo     database smart_site_remote) and verifies the batch it wrote; the first
+echo     argument may be "host[:port]" (https assumed) or a full http(s):// URL,
+echo     and RTDB_REMOTE_URL / RTDB_REMOTE_DB also override.
+echo   - "remote" takes the token from RTDB_TOKEN, else bin\rtdb.remote.token, else it
+echo     signs in with RTDB_DEMO_USER / RTDB_DEMO_PASSWORD (default admin / ss-rtdb)
+echo     and mints a role=write "demo-remote" token, cached in bin\rtdb.remote.token
+echo     (a console-login token would be revoked by the next sign-in mid-run).
+echo   - the published 8081 listener uses the smartsite.top certificate, so an https
+echo     target must use that host name (a bare IP fails certificate validation).
 echo   - set RTDB_PORT when the server listens on a port other than 6180.
 exit /b 0
 
@@ -270,6 +438,7 @@ echo Usage:
 echo   bin\start-demo-server.bat [help]
 echo   bin\start-demo-server.bat bench ^<pts/s^> ^<seconds^> [client options]
 echo   bin\start-demo-server.bat vars ^<pts/s^> ^<seconds^> [client options]
+echo   bin\start-demo-server.bat remote [host[:port] or url] [client options]
 echo.
 exit /b 0
 

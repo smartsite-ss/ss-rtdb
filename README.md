@@ -107,6 +107,34 @@ await rtdb.writeBatch('plant_a', [
 await rtdb.close();
 ```
 
+## 在线演示
+
+仓库附带一个已部署的公开实例，无需本地安装即可体验 Web 控制台与 HTTP API：
+
+| 项目 | 地址 / 说明 |
+| ---- | ----------- |
+| 站点入口 | <https://smartsite.top:8081/>（302 跳转控制台） |
+| Web 控制台 | <https://smartsite.top:8081/admin/> |
+| 登录账号 | `admin` / `ss-rtdb`（首启引导管理员，登录后请立即修改密码） |
+| 数据浏览 | 数据库 `smart_site_remote`：44 个模拟指标（f64 / i64 / bool / string 四类值型，1 秒采样） |
+| 免鉴权观测端点 | `/healthz`、`/api/v1/status`、`/metrics`（Prometheus） |
+| 接口文档 | `/api/docs`（OpenAPI JSON：`/api/docs/openapi.json`） |
+
+```bash
+curl https://smartsite.top:8081/healthz
+curl https://smartsite.top:8081/api/v1/status
+```
+
+> 该端口为 **TLS-only**：`http://…:8081` 会握手失败（`wrong version number`），请使用 `https://`。
+> 查询与写入需要令牌（控制台登录即用其换取）；示例数据由本仓库的模拟客户端写入，可随时重跑覆盖：
+
+```bat
+cd f:\work\smartdata\202603_trace\trunk\code\ss-rtdb
+bin\start-demo-server.bat remote smartsite.top:8081 --duration 60 --interval 1000
+```
+
+位置参数目标地址、令牌解析顺序与退出码含义见[文档 10 §3.5](./docs-o/zh/10-smart-site-demo.md)。
+
 ## 仓库结构
 
 ```
@@ -148,3 +176,4 @@ Apache License 2.0 —— 每个源文件都带有标准 Apache-2.0 文件头；
 | 2026-10-17 | 快速上手补充控制台登录：首启默认管理员 `admin` / `ss-rtdb` 与 `POST /api/v1/auth/login` 示例 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 仓库结构补充 `bin/` 与 `conf/`（服务端默认配置 `conf/rtdb-server.json`，运行时自动加载） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 文档索引新增 11 — 存储格式与写入路径（细化设计，中英对照） | GLM-5.3-Flash |
+| 2026-10-18 | 新增「在线演示」章节：公开实例 <https://smartsite.top:8081/> 的控制台入口、默认管理员、示例数据库 `smart_site_remote`、观测端点与接口文档，并说明端口为 TLS-only、模拟数据可由 `bin\start-demo-server.bat remote` 重新生成 | DeepSeek-V4.1-Flash |

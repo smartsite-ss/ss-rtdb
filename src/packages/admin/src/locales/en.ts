@@ -51,12 +51,6 @@ export const en = {
   'app.login.tokenHint': 'Tokens issued elsewhere can be pasted here instead of signing in.',
   'app.login.tokenEmpty': 'Enter a token first.',
   'login.token': 'Bearer token',
-  'login.hero.title': 'One engine for real-time and historical data',
-  'login.hero.desc':
-    'Embed it in your process or run it as a service — same engine, same on-disk format, no migration.',
-  'login.point.api': 'Public REST API only — no build-time server address',
-  'login.point.static': 'One static build for bundled and standalone deployments',
-  'login.point.monitor': 'Live status, databases, metrics, backups and access control',
   'login.showPassword': 'Show password',
   'login.hidePassword': 'Hide password',
 

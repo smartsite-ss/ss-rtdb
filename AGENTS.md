@@ -42,6 +42,7 @@
 | 运行 Smart Site 模拟客户端（写入实时数据） | `npm run demo:smart-site -- --once --verify`；Windows 包装：`bin\demo-smart-site.bat list` / `bin\demo-smart-site.bat stream 60`（见文档 10） |
 | 启动演示服务器（读取 `demo/conf` 统一配置） | `bin\start-demo-server.bat`（端口被占用时 `set RTDB_PORT=6190`） |
 | 压测演示服务（服务端需已启动，脚本不拉服务） | `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]`；变量数阶梯（1000/3000/6000/10000 指标各一库）：`bin\start-demo-server.bat vars <pts/s> <seconds>`；客户端 `--metrics <n>` 按 `#k` 后缀复制目录 |
+| 远程冒烟测试（对已发布实例写入并校验模拟数据） | `bin\start-demo-server.bat remote [host[:port] 或 URL]`（默认 `https://smartsite.top:8081`、库 `smart_site_remote`，默认 1 批 44 点 + `--verify`；位置参数可写 `smartsite.top:8081`，自动补 `https://`，裸 IP 会证书校验失败；`RTDB_REMOTE_URL` / `RTDB_REMOTE_DB` 覆盖；令牌 `--token` → `RTDB_TOKEN` → `bin\rtdb.remote.token` → `RTDB_DEMO_USER`/`RTDB_DEMO_PASSWORD` 登录后铸造 `role=write` 的 `demo-remote` 令牌并缓存，避免 `console login` 单会话语义导致长跑 401） |
 | 控制台开发服务器 | `npm run dev --workspace @ss/rtdb-admin` |
 | Python SDK 测试 | `cd packages/demo/client-python` 后 `python -m pytest tests/` |
 
@@ -83,7 +84,7 @@ ss-rtdb/
 │   ├── start-server.bat      #   前台启动服务（仓库与发布包通用）
 │   ├── rtdbctl.bat           #   rtdbctl 包装脚本
 │   ├── demo-smart-site.bat   #   Smart Site 模拟客户端包装（list/dry/once/stream/run）
-│   ├── start-demo-server.bat #   启动演示服务器；bench/vars 子命令再起压测客户端
+│   ├── start-demo-server.bat #   启动演示服务器；bench/vars 再起压测客户端，remote 做远程冒烟
 │   └── sea\build-sea.mjs     #   SEA 实现：esbuild bundle + --experimental-sea-config + postject
 ├── release/                  # 发布产物（build-release.bat 生成，**不入库**）
 └── docs-o/                   # en/ 原始英文文档，zh/ 中文译本（逐页对应）
@@ -311,3 +312,6 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 演示客户端新增性能模式（`--points-per-tick` / `--rate` / `--total-points`）与 `bin\start-demo-server.bat bench`（**仅跑压测客户端，不启动服务端**，服务端由人工在外部启动）；§2 命令表与 §3 布局同步。同轮修正 §4 第 10 条：`.bat` 必须 **UTF-8 无 BOM**（cmd.exe 不识别 BOM，会导致 `@echo off` 失效） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增文档 11「存储格式与写入路径（细化设计）」（中英对照，含索引与根 README 同步）；§7 页码范围更新为 `01`…`11` | GLM-5.3-Flash |
 | 2026-10-18 | §6 基准清单新增 B7（跨时间跨度查询性能：1/5/10/20/30/50/100 天的 range/count-exact/avg/queryAt 冷热延迟与堆增量） | GLM-5.3-Flash |
+| 2026-10-18 | §2 命令表与 §3 布局补充 `bin\start-demo-server.bat remote`（对已发布实例 `https://smartsite.top:8081` 写入 1 批 44 点并 `--verify`，支持 `--duration` 等持续写入与令牌三级回退）；详见文档 10 §3.5 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | `remote` 增加位置参数目标地址（`host[:port]` 自动补 `https://`，或完整 URL），即 `remote smartsite.top:8081 --duration 60 --interval 1000`；文档 10 §3.5 中英同步 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | `remote` 令牌改为“登录后铸造 `role=write` 无过期的 `demo-remote` 令牌并缓存到 `bin\rtdb.remote.token`”：`console login` 令牌单会话语义会被并发 admin 登录吊销，实测 60 s 长跑第 50 s 起全部 `401 E_AUTH`；重试等待改 `ping`（`timeout` 在 stdin 重定向时直接退出） | DeepSeek-V4.1-Flash |

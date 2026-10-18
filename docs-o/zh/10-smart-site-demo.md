@@ -282,6 +282,28 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
   每档会打印客户端头（`catalog : 9 devices / 1000 metrics (44 catalog tags x 23)`）与一行
   `[demo] vars <n> finished with exit code …`，阶梯结束时列出写入过的数据库；
   如需多档共用一个库，在额外参数里传 `--db`（后出现的 `--db` 生效）；
+- `bin\start-demo-server.bat remote [host[:port] | url] [客户端参数]` 对**已发布实例**做写入+校验
+  冒烟测试（默认 `https://smartsite.top:8081`、数据库 `smart_site_remote`）：默认只写 **1 批**
+  （44 个指标）并 `--verify`，成功打印 `remote smoke test PASSED` 后退出：
+
+  ```bat
+  bin\start-demo-server.bat remote
+  bin\start-demo-server.bat remote smartsite.top:8081 --duration 60 --interval 1000
+  bin\start-demo-server.bat remote https://smartsite.top:8081 --db demo_remote
+  ```
+
+  紧跟在 `remote` 后面的位置参数就是目标地址：可写 `host[:port]`（**自动补 `https://`**，因为发布
+  端口是 TLS-only）或完整 `http(s)://` URL；没有位置参数时用 `RTDB_REMOTE_URL`，再退回默认值。
+  8081 使用的是 `smartsite.top` 证书，**用裸 IP 会证书校验失败**，请写域名。
+  额外参数里出现 `--duration` / `--rate` / `--points-per-tick` / `--total-points` / `--once` /
+  `--dry-run` / `--list` 时不再自动补 `--once`（持续写入仍然带 `--verify`）。令牌优先级：
+  命令行 `--token` → `RTDB_TOKEN` → `bin\rtdb.remote.token`（`*.token` 已 gitignore）→ 用
+  `RTDB_DEMO_USER` / `RTDB_DEMO_PASSWORD`（默认 `admin` / `ss-rtdb`）登录后**铸造一个
+  `role=write`、无过期的 `demo-remote` 令牌**，并写入 `bin\rtdb.remote.token` 供后续复用。
+  不直接用登录令牌的原因：`console login` 是单会话语义，期间任何一次 admin 登录（浏览器
+  控制台、另一次脚本运行）都会吊销它，长跑会在中途开始 `401 E_AUTH`；`demo-remote` 令牌
+  不受登录影响。删掉缓存文件即可重新铸造。退出码：`0` 通过、`2` 校验不一致、
+  `3` 连不上或鉴权被拒（自动重试 2 次）；
 - `run` 原样转发后续参数，`run --help` 可查看客户端完整帮助；
 - 未知动作返回退出码 `1`，其余退出码与客户端一致（`0/2/3`）；
 - 脚本在 `src\` 中运行，因此相对路径按该目录解析：SEA 发布目录的令牌写作
@@ -385,3 +407,6 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-18 | §3.5 与 `bin\demo-smart-site.bat` 新增**大数据测试**示例（`--rate 20000 --duration 60 --verify`、`--points-per-tick 5000 --total-points 1000000`、`dry --points-per-tick 5000`），并补充容量上限与实测吞吐（21 823 点/s） | DeepSeek-V4.1-Flash |
 | 2026-10-18 | 新增 §3.3.1 **变量数模式** `--metrics <n>`（配置键 `metrics`）：目录按 `#k` 指标名后缀复制（1000 / 3000 / 6000 / 10000 变量 = 44 标签 × 23/69/137/228），每个副本为独立信号流且 `counter.rateFrom` 在副本组内解析；`bin\start-demo-server.bat` 新增 `vars <pts/s> <seconds>` 阶梯（每档独立 `perf_vars_<count>` 数据库）并支持 `bench … --metrics` 转发 | Step-5-Preview |
 | 2026-10-18 | 质量位说明改为与实现一致：引擎已支持 u8 质量位与 `quality.store` / `quality.onReject` 落盘策略，模拟器仍不发送 `q`；§6 排障表补 `E_QUALITY_REJECTED` 与非法质量位两行 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5 新增 `bin\start-demo-server.bat remote [客户端参数]`：对已发布实例 `https://smartsite.top:8081` 做写入+校验冒烟（默认 1 批 44 点，`--duration` 等改为持续写入），支持 `RTDB_REMOTE_URL` / `RTDB_REMOTE_DB` 与令牌三级回退（`RTDB_TOKEN` → `bin\rtdb.remote.token` → `RTDB_DEMO_USER`/`RTDB_DEMO_PASSWORD` 登录） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5 `remote` 支持位置参数目标地址 `host[:port]`（自动补 `https://`）或完整 URL，即 `remote smartsite.top:8081 --duration 60`；补充“裸 IP 因证书域名不匹配会校验失败、应写域名”的说明 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5 `remote` 的令牌策略改为“登录后铸造 `role=write` 无过期的 `demo-remote` 令牌并缓存到 `bin\rtdb.remote.token`”：`console login` 令牌是单会话语义，长跑期间任何 admin 登录都会把它吊销并导致中途 `401 E_AUTH`（实测 60 s 跑至第 50 s 崩溃）；同时把重试等待从 `timeout` 改为 `ping`（stdin 重定向时 `timeout` 直接退出） | DeepSeek-V4.1-Flash |

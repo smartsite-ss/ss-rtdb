@@ -299,6 +299,32 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
   Pass `--db` in the extra options to share one database instead (later `--db` wins);
 - `list` / `dry` / `once` / `stream` are presets: `once` means `--once --verify`, and `stream`
   runs 60 seconds by default with `--verify` (the seconds argument is optional);
+- `bin\start-demo-server.bat remote [host[:port] | url] [client options]` is a write-and-verify smoke
+  test against a **published** instance (default `https://smartsite.top:8081`, database
+  `smart_site_remote`): it writes **one batch** (44 metrics), runs `--verify` and exits with
+  `remote smoke test PASSED`:
+
+  ```bat
+  bin\start-demo-server.bat remote
+  bin\start-demo-server.bat remote smartsite.top:8081 --duration 60 --interval 1000
+  bin\start-demo-server.bat remote https://smartsite.top:8081 --db demo_remote
+  ```
+
+  The optional positional argument right after `remote` is the target: either `host[:port]`
+  (`https://` is assumed because the published port is TLS-only) or a full `http(s)://` URL. Without
+  it the endpoint comes from `RTDB_REMOTE_URL`, then the default. The 8081 listener serves the
+  `smartsite.top` certificate, so a bare IP fails certificate validation — use the host name.
+  When the extra options contain `--duration` / `--rate` / `--points-per-tick` / `--total-points` /
+  `--once` / `--dry-run` / `--list`, the implicit `--once` is dropped (streaming runs still pass
+  `--verify`). The database can be overridden with `RTDB_REMOTE_DB`.
+  Token precedence: `--token` → `RTDB_TOKEN` → `bin\rtdb.remote.token` (`*.token` is gitignored) →
+  a **`role=write`, non-expiring `demo-remote` token** minted after signing in with
+  `RTDB_DEMO_USER` / `RTDB_DEMO_PASSWORD` (default `admin` / `ss-rtdb`), then cached in
+  `bin\rtdb.remote.token` for later runs. A `console login` token is deliberately not reused: it is
+  single-session, so any concurrent admin sign-in (browser console, another script) revokes it and a
+  long run starts failing with `401 E_AUTH` midway; `demo-remote` tokens are unaffected. Delete the
+  cache file to mint a new one. Exit codes: `0` passed, `2` verification mismatch, `3` unreachable or
+  credentials rejected (retried twice);
 - `run` forwards all remaining arguments unchanged; `run --help` shows the full client help;
 - an unknown action exits with `1`; all other exit codes match the client (`0/2/3`);
 - the script runs inside `src\`, so relative paths resolve from there: a token in the SEA release
@@ -403,3 +429,6 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-18 | §3.5 and `bin\demo-smart-site.bat` add **large-volume** examples (`--rate 20000 --duration 60 --verify`, `--points-per-tick 5000 --total-points 1000000`, `dry --points-per-tick 5000`), plus the capacity bound and a measured 21,823 points/s run | DeepSeek-V4.1-Flash |
 | 2026-10-18 | New §3.3.1 **variable-count mode** `--metrics <n>` (and config key `metrics`): the catalog is replicated with a `#k` metric-name suffix (1000 / 3000 / 6000 / 10000 variables = 44 tags × 23/69/137/228), each replica an independent signal stream with its own `counter.rateFrom` group; `bin\start-demo-server.bat` gains the `vars <pts/s> <seconds>` ladder (one `perf_vars_<count>` database per point) and `bench … --metrics` forwarding | Step-5-Preview |
 | 2026-10-18 | Quality wording aligned with the implementation: the engine now accepts u8 quality flags with `quality.store` / `quality.onReject` storage policies while the simulator still sends no `q`; §6 troubleshooting gains `E_QUALITY_REJECTED` and illegal-quality rows | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5 adds `bin\start-demo-server.bat remote [client options]`: write-and-verify smoke test against the published instance `https://smartsite.top:8081` (one 44-point batch by default; `--duration` and friends switch to streaming), with `RTDB_REMOTE_URL` / `RTDB_REMOTE_DB` overrides and a three-step token fallback (`RTDB_TOKEN` → `bin\rtdb.remote.token` → `RTDB_DEMO_USER`/`RTDB_DEMO_PASSWORD` sign-in) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5: `remote` now accepts a positional target (`host[:port]` with an implicit `https://`, or a full URL), e.g. `remote smartsite.top:8081 --duration 60`; documented that a bare IP fails certificate validation because 8081 serves the `smartsite.top` certificate | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5: `remote` now mints a `role=write`, non-expiring `demo-remote` token after signing in and caches it in `bin\rtdb.remote.token`. The `console login` token is single-session and was revoked by any concurrent admin sign-in, which aborted a 60 s run at ~50 s with `401 E_AUTH` (observed). Retry delay now uses `ping` instead of `timeout`, which aborts when stdin is redirected | DeepSeek-V4.1-Flash |
