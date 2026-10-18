@@ -246,4 +246,5 @@ main()
 | 2026-10-17 | `listMetrics` 返回的 `MetricSummary` 增加 `valueType` 字段 | GLM-5.3-Flash |
 | 2026-10-17 | `queryRange` 返回的 `Series` 新增可选 `received`（服务器接收时间窗口，块/批次粒度） | GLM-5.3-Flash |
 | 2026-10-17 | `RtdbEngine` 新增第五查询原语 `queryAt`（任意时刻批量插值取值，`step`/`linear`，`state` 来源标记；详见《插值功能详细设计》） | GLM-5.3-Flash |
+| 2026-10-18 | 新增 `hasMetric(database, metricName)`（仅存在性判断，段级 metric 名集合缓存）；修复 `readBlockValueType` 探测长度不足导致 `listMetrics` 对同一 metric 逐块重探（HTTP 侧每个查询请求都会做存在性校验，实测把接口从 ~1.4 s 降到 ~0.15 s） | DeepSeek-V4.1-Flash |
 

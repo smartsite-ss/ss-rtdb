@@ -134,6 +134,7 @@ More than 100 000 windows in a single `queryAggregate` throws `E_INVALID_RANGE`.
 ```ts
 await rtdb.listDatabases();                  // string[]
 await rtdb.listMetrics('plant_a');           // MetricSummary[] — { metricName, firstTs, lastTs, valueType }
+await rtdb.hasMetric('plant_a', 'm.kwh');    // boolean — existence only (cached per-segment name set); far cheaper than listMetrics
 await rtdb.setRetention('plant_a', 90);      // persists {dataDir}/plant_a/retention.json
 await rtdb.runRetention();                   // sweep now (also runs on a timer)
 await rtdb.backup('plant_a', '/mnt/backups/2026-10-17');
@@ -251,3 +252,4 @@ main()
 | 2026-10-17 | `MetricSummary` returned by `listMetrics` now includes the `valueType` field | GLM-5.3-Flash |
 | 2026-10-17 | `Series` returned by `queryRange` gains the optional `received` field (server receive-time window, block/batch granularity) | GLM-5.3-Flash |
 | 2026-10-17 | `RtdbEngine` adds the fifth query primitive `queryAt` (batch point-in-time interpolated lookup, `step`/`linear`, `state` provenance markers; see the Interpolation Detailed Design) | GLM-5.3-Flash |
+| 2026-10-18 | Adds `hasMetric(database, metricName)` (existence only, cached per-segment name sets); fixes `readBlockValueType` probing too few bytes, which made `listMetrics` re-probe every block of the same metric (the HTTP layer validates the metric on every query; measured ~1.4 s → ~0.15 s per endpoint) | DeepSeek-V4.1-Flash |

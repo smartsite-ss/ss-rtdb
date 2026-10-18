@@ -13,14 +13,14 @@ REM   bin\demo-smart-site.bat dry                      Print one write batch, se
 REM   bin\demo-smart-site.bat once                     Write one batch, then verify
 REM   bin\demo-smart-site.bat stream [seconds]         Stream and verify (default 60 seconds)
 REM   bin\demo-smart-site.bat run [client options]     Forward any client options unchanged
-REM
+REM   bin\start-demo-server.bat bench 20000 300000 --token-file rtdb.token
 REM Examples:
 REM   bin\demo-smart-site.bat list
 REM   bin\demo-smart-site.bat once --token-file rtdb.token
 REM   bin\demo-smart-site.bat stream 60 --glitch-rate 0.002 --token-file ..\release\sea\rtdb.token
 REM   bin\demo-smart-site.bat run --devices hvac-chiller --interval 500 --duration 10 --verify
 REM   bin\demo-smart-site.bat run --help
-REM
+REM   
 REM Large-volume tests (the batch size is decoupled from the 44-tag catalog, so a
 REM single client can saturate the write path):
 REM   Target throughput - 20000 points/s for 60 s, then verify the written range:
@@ -29,7 +29,7 @@ REM   Fixed batches - 5000 points every second until 1000000 points are written:
 REM   bin\demo-smart-site.bat run --points-per-tick 5000 --interval 1000 --total-points 1000000
 REM   Rehearse the same batch size without writing (prints one wire batch):
 REM   bin\demo-smart-site.bat dry --points-per-tick 5000
-REM
+REM   
 REM Notes:
 REM   - The script always runs from the repository "src" directory, so relative
 REM     paths such as ..\release\sea\rtdb.token resolve from there.
