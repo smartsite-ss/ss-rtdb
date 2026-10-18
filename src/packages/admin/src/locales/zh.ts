@@ -54,6 +54,7 @@ export const zh: Record<MessageKey, string> = {
   'tabs.metrics': '指标',
   'tabs.backup': '备份',
   'tabs.access': '访问控制',
+  'tabs.apiDocs': '接口文档',
 
   'status.title': '状态',
   'status.note': 'GET /api/v1/status · {state}',
@@ -160,11 +161,11 @@ export const zh: Record<MessageKey, string> = {
   'metrics.quickAll': '全部',
   'metrics.aggregate': '聚合方式',
   'metrics.aggregate.none': '无（原始点）',
-  'metrics.window': '聚合窗口',
+  'metrics.window': '时间窗口',
   'metrics.unit.s': '秒',
   'metrics.unit.m': '分',
   'metrics.unit.h': '时',
-  'metrics.limitNote': '条数上限对原始点查询与插值网格生效（单次最多 10 000 个采样点）；一次聚合最多返回 100 000 个窗口。',
+  'metrics.limitNote': '条数上限仅对原始点查询生效。聚合单次最多返回 100 000 个窗口；插值按窗口步长采样（单次最多 10 000 个采样点）。',
   'metrics.exportXls': '导出 XLS',
   'metrics.hint.raw':
     '原始点按存储时刻直接连线，不做插值：相邻采样点之间是直线，采样间隔很大时看起来会像一段斜坡，长区间建议改用聚合。布尔值按 0/1 绘制。',
@@ -175,7 +176,7 @@ export const zh: Record<MessageKey, string> = {
   'metrics.interpolation': '插值查询',
   'metrics.interpolation.none': '无（使用上方原始/聚合）',
   'metrics.hint.at':
-    '插值查询经 POST /api/v1/query/at 在均匀网格上重采样：step 保持前值，linear 在相邻实测点之间线性插值（仅 f64/i64）。state 标记每个采样点：exact＝实测点，interpolated / extrapolated＝推算值，no-data＝无数据。',
+    '插值查询经 POST /api/v1/query/at 按「时间窗口」为步长重采样（起点、起点+窗口、…）：step 保持前值，linear 在相邻实测点之间线性插值（仅 f64/i64）。state 标记每个采样点：exact＝实测点，interpolated / extrapolated＝推算值，no-data＝无数据。',
   'metrics.xls.timestamp': '时间戳(ms)',
   'metrics.xls.time': '时间',
   'metrics.xls.value': '值',
@@ -191,7 +192,8 @@ export const zh: Record<MessageKey, string> = {
   'metrics.error.selectMetric': '请先选择指标。',
   'metrics.error.invalidTime': '请填写有效的开始与结束时间。',
   'metrics.error.endBeforeStart': '结束时间不能早于开始时间。',
-  'metrics.error.invalidWindow': '聚合窗口必须是正整数。',
+  'metrics.error.invalidWindow': '时间窗口必须是正整数。',
+  'metrics.error.tooManySamples': '当前窗口在该区间内会产生 {samples} 个采样点，超过单次 {max} 个的上限，请增大窗口。',
 
   'backup.title': '备份',
   'backup.database': '数据库',

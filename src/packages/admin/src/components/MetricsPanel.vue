@@ -44,7 +44,7 @@ const DEFAULT_LIMIT = 2_000;
 const DEFAULT_WINDOW_SECONDS = 60;
 /** A raw interval above this multiple of the median counts as a gap in the hint line */
 const GAP_FACTOR = 3;
-/** Server-side cap of one `query/at` call; the interpolation grid is clamped to it */
+/** Server-side cap of one `query/at` call; a window that would exceed it is rejected instead of clamped */
 const MAX_QUERY_AT_TIMESTAMPS = 10_000;
 
 const AGGREGATE_TYPES: RtdbAggregateType[] = Object.values(RTDB_AGGREGATE_TYPE);
@@ -245,13 +245,26 @@ function resolveWindowMs(): number {
   return parsed * WINDOW_UNITS[windowUnit.value] * 1_000;
 }
 
-/** Uniform evaluation grid over `[start, end]` with `count` samples (both endpoints included) */
-function buildInterpolationGrid(start: number, end: number, count: number): number[] {
-  const clamped = Math.min(Math.max(count, 1), MAX_QUERY_AT_TIMESTAMPS);
-  if (clamped === 1 || end === start) return [start];
+/**
+ * Evaluation grid for interpolation: a fixed stride equal to the window width, anchored at `start`
+ * (`start, start + step, … ≤ end`). Aggregation windows and interpolation samples therefore share the
+ * same time grid, and the sample count follows the window instead of the row limit.
+ *
+ * @throws when the window produces more than `MAX_QUERY_AT_TIMESTAMPS` samples (the caller reports it)
+ */
+function buildInterpolationGrid(start: number, end: number, stepMs: number): number[] {
+  if (stepMs <= 0) return [start];
+  const samples = Math.floor((end - start) / stepMs) + 1;
+  if (samples > MAX_QUERY_AT_TIMESTAMPS) {
+    throw new Error(
+      t('metrics.error.tooManySamples', {
+        samples: String(samples),
+        max: String(MAX_QUERY_AT_TIMESTAMPS),
+      }),
+    );
+  }
   const grid: number[] = [];
-  const step = (end - start) / (clamped - 1);
-  for (let index = 0; index < clamped; index += 1) grid.push(Math.round(start + index * step));
+  for (let index = 0; index < samples; index += 1) grid.push(start + index * stepMs);
   return grid;
 }
 
@@ -273,10 +286,12 @@ async function runQuery(): Promise<void> {
     if (start <= 0 || end <= 0) throw new Error(t('metrics.error.invalidTime'));
     if (end < start) throw new Error(t('metrics.error.endBeforeStart'));
     if (mode !== 'none') {
+      // Interpolation is window-driven as well: the window is the resampling stride.
+      if (windowMs <= 0) throw new Error(t('metrics.error.invalidWindow'));
       const points = await props.client.queryAt(
         database,
         metricName,
-        buildInterpolationGrid(start, end, limit),
+        buildInterpolationGrid(start, end, windowMs),
         mode,
       );
       return { raw: null as RtdbJsonSeries | null, windows: null as RtdbAggregateWindow[] | null, at: points };
@@ -473,7 +488,7 @@ watch(
             min="1"
             step="1"
             style="width: 110px"
-            :disabled="busy || (aggregateType !== 'none' && interpolationMode === 'none')"
+            :disabled="busy || aggregateType !== 'none' || interpolationMode !== 'none'"
           />
         </div>
         <button class="primary" :disabled="busy" @click="runQuery">{{ t('metrics.query') }}</button>
@@ -498,9 +513,9 @@ watch(
               min="1"
               step="1"
               style="width: 90px"
-              :disabled="busy || aggregateType === 'none' || interpolationMode !== 'none'"
+              :disabled="busy || (aggregateType === 'none' && interpolationMode === 'none')"
             />
-            <select v-model="windowUnit" :disabled="busy || aggregateType === 'none' || interpolationMode !== 'none'">
+            <select v-model="windowUnit" :disabled="busy || (aggregateType === 'none' && interpolationMode === 'none')">
               <option value="s">{{ t('metrics.unit.s') }}</option>
               <option value="m">{{ t('metrics.unit.m') }}</option>
               <option value="h">{{ t('metrics.unit.h') }}</option>

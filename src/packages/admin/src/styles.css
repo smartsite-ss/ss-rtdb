@@ -242,6 +242,31 @@ button.small {
   font-weight: 600;
 }
 
+/* External link rendered next to the tabs (right-aligned); opens the server's API reference */
+.tab-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 14px;
+  margin-left: auto;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.tab-link:hover {
+  color: var(--primary);
+  border-bottom-color: var(--border-strong);
+  text-decoration: none;
+}
+
+.tab-link-mark {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
 /* ---------- Panels and cards ---------- */
 
 .panel {

@@ -53,6 +53,7 @@ export const en = {
   'tabs.metrics': 'Metrics',
   'tabs.backup': 'Backup',
   'tabs.access': 'Access control',
+  'tabs.apiDocs': 'API docs',
 
   'status.title': 'Status',
   'status.note': 'GET /api/v1/status · {state}',
@@ -164,7 +165,7 @@ export const en = {
   'metrics.unit.m': 'm',
   'metrics.unit.h': 'h',
   'metrics.limitNote':
-    'Limit applies to raw queries and to the interpolation grid (at most 10 000 samples per call); one aggregation call returns at most 100 000 windows.',
+    'Limit applies to raw queries only. Aggregation returns at most 100 000 windows; interpolation samples on the window grid (at most 10 000 samples per call).',
   'metrics.exportXls': 'Export XLS',
   'metrics.hint.raw':
     'Raw points are plotted exactly as stored: no interpolation, each sample is joined to the next, so a long sampling gap looks like a straight ramp. Use aggregation for long ranges. Booleans are plotted as 0/1.',
@@ -175,7 +176,7 @@ export const en = {
   'metrics.interpolation': 'Interpolation',
   'metrics.interpolation.none': 'none (raw / aggregated above)',
   'metrics.hint.at':
-    'Interpolation resamples the series at a uniform grid via POST /api/v1/query/at: step holds the previous stored value, linear interpolates between neighbouring samples (f64/i64 only). state marks each sample: exact = a real stored point, interpolated / extrapolated = computed, no-data = nothing available.',
+    'Interpolation resamples the series on a fixed grid whose step is the Window value (start, start + window, …) via POST /api/v1/query/at: step holds the previous stored value, linear interpolates between neighbouring samples (f64/i64 only). state marks each sample: exact = a real stored point, interpolated / extrapolated = computed, no-data = nothing available.',
   'metrics.xls.timestamp': 'Timestamp (ms)',
   'metrics.xls.time': 'Time',
   'metrics.xls.value': 'Value',
@@ -191,7 +192,9 @@ export const en = {
   'metrics.error.selectMetric': 'Select a metric first.',
   'metrics.error.invalidTime': 'Provide a valid start and end time.',
   'metrics.error.endBeforeStart': 'The end time must not precede the start time.',
-  'metrics.error.invalidWindow': 'The aggregation window must be a positive integer.',
+  'metrics.error.invalidWindow': 'The window must be a positive integer.',
+  'metrics.error.tooManySamples':
+    'The window yields {samples} samples over this range, above the {max} samples per call limit. Increase the window.',
 
   'backup.title': 'Backup',
   'backup.database': 'Database',

@@ -17,7 +17,7 @@
 
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,8 +25,12 @@ import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
 import { RtdbEngine } from '../../core/src/engine.ts';
 import { measureDatabaseSize } from '../../core/src/size.ts';
 import type { AggregateType, RangeOptions, WritePoint } from '../../core/src/types.ts';
+import { API_DOCS_CONTENT_TYPE, API_DOCS_PATH, API_DOCS_SPEC_CONTENT_TYPE, API_DOCS_SPEC_PATH, buildOpenApiDocument, renderApiDocsPage } from './api-docs.ts';
 import { AuthVerifier, STATIC_TOKEN_ID, hashPassword, loadOrCreateAuthToken } from './auth.ts';
 import type { AuthPrincipal, AuthScope } from './auth.ts';
+import { createInfluxCompatStats } from './compat/influx/context.ts';
+import type { InfluxCompatContext, InfluxCompatStats } from './compat/influx/context.ts';
+import { InfluxCompatRouter } from './compat/influx/router.ts';
 import { reportedDatabaseDirectory, toEngineOptions, validateServerConfig } from './config.ts';
 import type { ServerConfig } from './config.ts';
 import { HttpFailure, SERVER_ERROR_CODE, toHttpErrorResponse } from './http-error.ts';
@@ -39,6 +43,7 @@ import type { TokenRecord } from './tokens.ts';
 import { TokenUsageTracker } from './token-usage.ts';
 import { USER_ROLE, UserStore, isUserRole } from './users.ts';
 import type { UserRecord, UserRole } from './users.ts';
+import { SERVER_VERSION } from './version.ts';
 
 /* ---------- Constants ---------- */
 
@@ -66,6 +71,12 @@ const METRICS_PREFIX = '/api/v1/metrics/';
 const PROMETHEUS_METRICS_PATH = '/metrics';
 /** Liveness probe (S14); always exempt from authentication */
 const HEALTHZ_PATH = '/healthz';
+/** InfluxDB-shaped health probe (`{status:"pass"}`); always exempt from authentication */
+const HEALTH_PATH = '/health';
+/** Built-in API reference (public, like `/status`): the contract shape is not sensitive */
+const API_DOCS_ROUTE = API_DOCS_PATH;
+/** Machine-readable OpenAPI 3.1 document generated from the same endpoint table */
+const API_DOCS_SPEC_ROUTE = API_DOCS_SPEC_PATH;
 const RETENTION_PREFIX = '/api/v1/retention/';
 const BACKUP_PREFIX = '/api/v1/backup/';
 
@@ -121,6 +132,9 @@ export class RtdbServer {
   private tagsIgnoredCount = 0;
   /** Per-token last-use / write-rate statistics (in memory; reset on restart) */
   private readonly tokenUsage = new TokenUsageTracker();
+  /** InfluxDB compatibility surface (null when `compat.influx.enabled=false`) */
+  private readonly influxCompat: InfluxCompatRouter | null;
+  private readonly influxCompatStats: InfluxCompatStats = createInfluxCompatStats();
 
   constructor(options: RtdbServerOptions) {
     this.config = options.config;
@@ -130,6 +144,9 @@ export class RtdbServer {
     } else {
       this.engine = new RtdbEngine(toEngineOptions(options.config));
     }
+    this.influxCompat = this.config.compat.influx.enabled
+      ? new InfluxCompatRouter(this.buildInfluxCompatContext())
+      : null;
   }
 
   /** Bound address (null when not started) */
@@ -144,6 +161,11 @@ export class RtdbServer {
       throw new RtdbError(ERROR_CODE.Internal, 'rtdb-server is already started');
     }
     validateServerConfig(this.config);
+    if (this.config.compat.influx.enabled && this.config.compat.influx.tagFolding === 'ignore') {
+      this.logger.warn(
+        'compat.influx.tagFolding=ignore: Line Protocol tags are dropped on InfluxDB writes (distinct series can collapse)',
+      );
+    }
     this.userStore = this.buildUserStore();
     this.tokenStore = this.buildTokenStore();
     this.auth = this.buildAuthVerifier();
@@ -337,6 +359,29 @@ export class RtdbServer {
       this.handleHealthz(response);
       return;
     }
+    if (pathname === HEALTH_PATH) {
+      if (method !== 'GET') throw methodNotAllowed('GET');
+      this.handleHealth(response);
+      return;
+    }
+    // Built-in API reference: public and configuration-aware (it only lists routes this instance serves).
+    if (pathname === API_DOCS_SPEC_ROUTE) {
+      if (method !== 'GET') throw methodNotAllowed('GET');
+      this.handleApiDocsSpec(response);
+      return;
+    }
+    if (pathname === API_DOCS_ROUTE || pathname === `${API_DOCS_ROUTE}/`) {
+      if (method !== 'GET') throw methodNotAllowed('GET');
+      this.handleApiDocs(response);
+      return;
+    }
+
+    // InfluxDB compatibility surface (`/write`, `/api/v2/*`, `/api/v3/*`, `/query`, `/ping`).
+    // Native `/api/v1/*` routes below always win; the adapter never shadows them.
+    if (this.influxCompat !== null) {
+      const handled = await this.influxCompat.handle(request, response, url);
+      if (handled) return;
+    }
     if (pathname === DATABASES_PATH) {
       if (method !== 'GET') throw methodNotAllowed('GET');
       await this.handleDatabases(request, response);
@@ -485,9 +530,18 @@ export class RtdbServer {
     scope: AuthScope,
     database: string | null = null,
   ): AuthPrincipal | null {
+    return this.requireAuthHeaders(request.headers, scope, database);
+  }
+
+  /** Same as {@link requireAuth} but takes pre-normalized headers (InfluxDB `Token` scheme, query credentials) */
+  private requireAuthHeaders(
+    headers: IncomingHttpHeaders,
+    scope: AuthScope,
+    database: string | null = null,
+  ): AuthPrincipal | null {
     const auth = this.auth;
     if (auth === null) throw new RtdbError(ERROR_CODE.Internal, 'Authenticator not initialized');
-    const principal = auth.authenticate(request.headers);
+    const principal = auth.authenticate(headers);
     if (auth.isScopeProtected(scope)) {
       if (principal === null) {
         throw new RtdbError(ERROR_CODE.Auth, `Authentication failed (scope=${scope})`);
@@ -502,6 +556,40 @@ export class RtdbServer {
     }
     this.tokenUsage.touch(principal?.tokenId, database);
     return principal;
+  }
+
+  /** Build the compatibility context once; auth and usage accounting stay owned by this server */
+  private buildInfluxCompatContext(): InfluxCompatContext {
+    return {
+      config: this.config,
+      engine: this.engine,
+      logger: this.logger,
+      stats: this.influxCompatStats,
+      requireAuth: (headers, scope, database) => this.requireAuthHeaders(headers, scope, database ?? null),
+      recordWrite: (principal, accepted, bytes, database) =>
+        this.tokenUsage.recordWrite(principal?.tokenId, accepted, bytes, database),
+    };
+  }
+
+  /** Built-in API reference page (`GET /api/docs`); public and generated from the live configuration */
+  private handleApiDocs(response: ServerResponse): void {
+    this.sendText(response, 200, renderApiDocsPage(this.config), API_DOCS_CONTENT_TYPE);
+  }
+
+  /** OpenAPI 3.1 document (`GET /api/docs/openapi.json`), same source table as the HTML page */
+  private handleApiDocsSpec(response: ServerResponse): void {
+    this.sendText(response, 200, JSON.stringify(buildOpenApiDocument(this.config), null, 2), API_DOCS_SPEC_CONTENT_TYPE);
+  }
+
+  /** InfluxDB-shaped health probe (`GET /health`), used by Grafana/Telegraf connectivity checks */
+  private handleHealth(response: ServerResponse): void {
+    this.sendJson(response, 200, {
+      name: 'ss-rtdb',
+      message: 'ready for queries and writes',
+      status: 'pass',
+      version: SERVER_VERSION,
+      checks: [],
+    });
   }
 
   private async handleStatus(response: ServerResponse): Promise<void> {
@@ -531,13 +619,26 @@ export class RtdbServer {
       },
       gc: stats.gc,
       query: stats.query,
+      compat: {
+        influx: {
+          enabled: this.config.compat.influx.enabled,
+          tagFolding: this.config.compat.influx.tagFolding,
+          fieldFolding: this.config.compat.influx.fieldFolding,
+          influxql: this.config.compat.influx.influxql,
+          ...this.influxCompatStats,
+        },
+      },
     });
   }
 
   /** Prometheus text exposition of the §3.4 status metrics (S14); exempt from authentication like `/status` */
   private async handlePrometheusMetrics(response: ServerResponse): Promise<void> {
     const stats = await this.engine.stats();
-    const body = encodePrometheusMetrics({ stats, tagsIgnored: this.tagsIgnoredCount });
+    const body = encodePrometheusMetrics({
+      stats,
+      tagsIgnored: this.tagsIgnoredCount,
+      compat: this.config.compat.influx.enabled ? this.influxCompatStats : null,
+    });
     this.sendText(response, 200, body, PROMETHEUS_METRICS_CONTENT_TYPE);
   }
 

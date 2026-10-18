@@ -62,6 +62,35 @@ export type { HttpErrorBody, HttpErrorResponse } from './http-error.ts';
 export { PROMETHEUS_METRICS_CONTENT_TYPE, encodePrometheusMetrics } from './metrics.ts';
 export type { PrometheusMetricsInput } from './metrics.ts';
 
+/* ---------- Built-in API reference (`/api/docs`, `/api/docs/openapi.json`) ---------- */
+export {
+  API_DOCS_CONTENT_TYPE,
+  API_DOCS_PATH,
+  API_DOCS_SPEC_CONTENT_TYPE,
+  API_DOCS_SPEC_PATH,
+  API_DOC_ENDPOINTS,
+  API_DOC_FAMILIES,
+  API_DOC_GROUPS,
+  API_DOC_UNSUPPORTED,
+  apiDocFamilyOf,
+  apiDocGroupOf,
+  buildOpenApiDocument,
+  renderApiDocsPage,
+  visibleApiDocEndpoints,
+} from './api-docs.ts';
+export type {
+  ApiDocBody,
+  ApiDocEndpoint,
+  ApiDocFamily,
+  ApiDocFamilyMeta,
+  ApiDocField,
+  ApiDocGroup,
+  ApiDocMethod,
+  ApiDocParameter,
+  ApiDocScope,
+  ApiDocUnsupported,
+} from './api-docs.ts';
+
 /* ---------- Service (§3.1 / §3.4) ---------- */
 export { RtdbServer } from './server.ts';
 export type { RtdbServerAddress, RtdbServerOptions } from './server.ts';

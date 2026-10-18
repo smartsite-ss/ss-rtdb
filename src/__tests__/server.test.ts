@@ -1875,6 +1875,20 @@ const EXPECTED_PROMETHEUS_METRIC_NAMES = [
   'rtdb_query_duration_max_seconds',
 ] as const;
 
+/** InfluxDB 兼容层计数（仅在兼容层启用时暴露，见 HTTP 接口详细设计 §6.11） */
+const EXPECTED_COMPAT_METRIC_NAMES = [
+  'rtdb_compat_influx_requests_total',
+  'rtdb_compat_influx_write_points_total',
+  'rtdb_compat_influx_write_duplicates_total',
+  'rtdb_compat_influx_truncated_points_total',
+  'rtdb_compat_influx_rejected_lines_total',
+  'rtdb_compat_influx_tags_folded_total',
+  'rtdb_compat_influx_tags_dropped_total',
+  'rtdb_compat_influx_influxql_queries_total',
+  'rtdb_compat_influx_unmapped_metrics_total',
+  'rtdb_compat_influx_cardinality_warn',
+] as const;
+
 /** 解析 Prometheus 文本暴露格式（0.0.4）；任一行不可解析即断言失败 */
 function parsePrometheusText(text: string): Map<string, PrometheusFamily> {
   assert.ok(text.endsWith('\n'), '文本格式要求以换行结尾');
@@ -1977,8 +1991,9 @@ describe('server: Prometheus /metrics 与 /healthz（S14）', () => {
       assert.equal(response.headers.get('content-type'), PROMETHEUS_METRICS_CONTENT_TYPE);
       const families = parsePrometheusText(await response.text());
 
-      assert.deepEqual([...families.keys()].sort(), [...EXPECTED_PROMETHEUS_METRIC_NAMES].sort());
-      for (const name of EXPECTED_PROMETHEUS_METRIC_NAMES) {
+      const expectedNames = [...EXPECTED_PROMETHEUS_METRIC_NAMES, ...EXPECTED_COMPAT_METRIC_NAMES];
+      assert.deepEqual([...families.keys()].sort(), [...expectedNames].sort());
+      for (const name of expectedNames) {
         const entry = families.get(name) as PrometheusFamily;
         assert.ok(entry.help.length > 0, `${name} 缺少 HELP`);
         assert.ok(entry.type === 'gauge' || entry.type === 'counter', `${name} 类型非法：${entry.type}`);

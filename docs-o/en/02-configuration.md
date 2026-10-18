@@ -124,6 +124,18 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `admin.staticDir` | `""` | Override the console asset directory; empty = bundled `packages/admin/dist`. |
 | `admin.exposePaths` | `false` | `false`: `GET /api/v1/databases/:db` reports the directory **relative to the working directory** (`rtdb-data/plant_a`); `true`: the resolved absolute path (host layout is disclosed). |
 | `cors.allowedOrigins` | `[]` | Opt-in CORS origins; `["*"]` allows any. Empty disables CORS entirely. |
+| `compat.influx.enabled` | `true` | Master switch for the InfluxDB compatibility surface (`/write`, `/api/v2/write`, `/api/v3/write_lp`, `/ping`, `/query`). |
+| `compat.influx.metricPrefix` | `""` | Prefix of folded metric names; use `influx.` during migration to separate them from native metrics. |
+| `compat.influx.tagFolding` | `metric` | `metric` folds tags into the name; `ignore` drops them (explicitly lossy). |
+| `compat.influx.fieldFolding` | `metric` | `metric` emits one metric per field; `reject` rejects multi-field lines. |
+| `compat.influx.duplicatePolicy` | `last` | In-request `(metric, millisecond)` resolution: `last` or `first`. |
+| `compat.influx.maxBodyBytes` | `26214400` | Compatibility write body cap (compressed and decoded, 25 MiB). |
+| `compat.influx.defaultOrg` | `""` | Fallback `org` for v2 writes; empty = required. |
+| `compat.influx.allowQueryCredentials` | `false` | Accept `?u=&p=` / `?access_token=` (credentials leak into access logs). |
+| `compat.influx.rejectNoSync` | `false` | Treat `no_sync` as an error; by default it is accepted with `X-Rtdb-NoSync: ignored`. |
+| `compat.influx.influxql` | `read-only` | `off` disables `/query` and `/api/v3/query_influxql`; `read-only` enables the subset. |
+| `compat.influx.versionHeader` | `2.7.8` | `X-Influxdb-Version` value on `/ping` (declares the compatibility baseline). |
+| `compat.influx.cardinalityWarnThreshold` | `100000` | Warn once when the folded metric count exceeds this value. |
 | `write.walEnabled` | `true` | Write-ahead log. Set `false` only when data can be re-generated. |
 | `write.fsyncPolicy` | `wal` | `wal` = group fsync after each WAL append; `none` = rely on the OS. |
 | `write.blockTargetPoints` | `16384` | Primary block-finalize trigger (points per block). |
@@ -155,6 +167,21 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `retentionDays` | 0 | 3 650 |
 | `storage.segment.maxPerDay` | 1 | 1 000 |
 
+### Compatibility layer (`compat.influx`)
+
+The compatibility layer is a **side adapter**: it never changes the `/api/v1/*` contract or the auth model
+(writes still need the `write` scope, queries the `query` scope).
+
+- `measurement + tags + field` is folded into one metric name `measurement|field|key=value...` (tag keys sorted,
+  `\`, `|`, `=` escaped). `tagFolding=ignore` drops tags and can collapse distinct series; it is opt-in.
+- The timestamp unit comes from `precision` (`ns/us/ms/s/m/h` and full names); storage stays millisecond.
+  Points landing in the same millisecond are merged according to `duplicatePolicy`.
+- A duplicate `(metric, millisecond)` from a **later request** is not overwritten (append-only storage keeps the
+  first point). This is a documented difference from InfluxDB's last-write-wins.
+- Capabilities tied to a specific InfluxDB generation (Flux `/api/v2/query`, SQL `/api/v3/query_sql`, bucket
+  management `/api/v2/buckets`, `/api/v3/configure/*`) answer **501** with a `hint` pointing at the replacement
+  endpoint instead of pretending to succeed.
+
 ## 4. Environment variables
 
 | Variable | Maps to |
@@ -175,6 +202,18 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `RTDB_ADMIN_ENABLED` | `admin.enabled` |
 | `RTDB_ADMIN_EXPOSE_PATHS` | `admin.exposePaths` (`true`/`1`, `false`/`0`) |
 | `RTDB_CORS_ALLOWED_ORIGINS` | `cors.allowedOrigins` (comma separated) |
+| `RTDB_COMPAT_INFLUX_ENABLED` | `compat.influx.enabled` (`true`/`1`, `false`/`0`) |
+| `RTDB_COMPAT_INFLUX_METRIC_PREFIX` | `compat.influx.metricPrefix` |
+| `RTDB_COMPAT_INFLUX_TAG_FOLDING` | `compat.influx.tagFolding` |
+| `RTDB_COMPAT_INFLUX_FIELD_FOLDING` | `compat.influx.fieldFolding` |
+| `RTDB_COMPAT_INFLUX_DUPLICATE_POLICY` | `compat.influx.duplicatePolicy` |
+| `RTDB_COMPAT_INFLUX_MAX_BODY_BYTES` | `compat.influx.maxBodyBytes` |
+| `RTDB_COMPAT_INFLUX_DEFAULT_ORG` | `compat.influx.defaultOrg` |
+| `RTDB_COMPAT_INFLUX_ALLOW_QUERY_CREDENTIALS` | `compat.influx.allowQueryCredentials` |
+| `RTDB_COMPAT_INFLUX_REJECT_NO_SYNC` | `compat.influx.rejectNoSync` |
+| `RTDB_COMPAT_INFLUX_INFLUXQL` | `compat.influx.influxql` |
+| `RTDB_COMPAT_INFLUX_VERSION_HEADER` | `compat.influx.versionHeader` |
+| `RTDB_COMPAT_INFLUX_CARDINALITY_WARN_THRESHOLD` | `compat.influx.cardinalityWarnThreshold` |
 | `RTDB_LOG_LEVEL` | `log.level` |
 
 Additional variables used by the CLI only:
@@ -301,3 +340,4 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 | 2026-10-17 | Added `auth.bootstrapUsername` / `auth.bootstrapPassword` (defaults `admin` / `ss-rtdb`), their environment variables and §6.4 "Default administrator on first start" | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Documented the runtime `conf/rtdb-server.json` (auto-loaded from the working directory, shipped by the repository and the release package) and `admin.exposePaths` with `RTDB_ADMIN_EXPOSE_PATHS` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `admin.exposePaths` now defaults to `false`: the reported database directory is relative to the working directory; `true` opts into the absolute path | DeepSeek-V4.1-Flash |
+| 2026-10-18 | Added the §3 "Compatibility layer (`compat.influx`)" block: 12 configuration keys and 12 `RTDB_COMPAT_INFLUX_*` environment variables (write compatibility on by default, InfluxQL `read-only`, tag/field folding, precision and the no-cross-request-overwrite caveat) | DeepSeek-V4.1-Flash |

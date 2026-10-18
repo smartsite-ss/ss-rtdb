@@ -34,6 +34,22 @@ export interface PrometheusMetricsInput {
   stats: EngineStats;
   /** Line Protocol tag fragments ignored this session (server-layer counter, not part of `EngineStats`) */
   tagsIgnored: number;
+  /** InfluxDB compatibility counters (null when the compatibility layer is disabled) */
+  compat?: InfluxCompatCounters | null;
+}
+
+/** Minimal structural copy of the compat counters to keep `metrics.ts` free of handler imports */
+export interface InfluxCompatCounters {
+  requests: number;
+  writePoints: number;
+  duplicates: number;
+  truncatedPoints: number;
+  rejectedLines: number;
+  tagsFolded: number;
+  tagsDropped: number;
+  influxqlQueries: number;
+  unmappedMetrics: number;
+  cardinalityWarn: boolean;
 }
 
 interface PrometheusSample {
@@ -49,7 +65,7 @@ interface PrometheusSample {
  * The output always ends with a trailing newline (required by the text format).
  */
 export function encodePrometheusMetrics(input: PrometheusMetricsInput): string {
-  const { stats, tagsIgnored } = input;
+  const { stats, tagsIgnored, compat } = input;
   const lines: string[] = [];
 
   appendFamily(lines, 'rtdb_uptime_seconds', 'Seconds elapsed since the engine was opened.', 'gauge', [
@@ -119,6 +135,39 @@ export function encodePrometheusMetrics(input: PrometheusMetricsInput): string {
   appendFamily(lines, 'rtdb_query_duration_max_seconds', 'Longest observed query latency over the recent sample window.', 'gauge', [
     { value: stats.query.maxMs / MILLISECONDS_PER_SECOND },
   ]);
+
+  if (compat !== undefined && compat !== null) {
+    appendFamily(lines, 'rtdb_compat_influx_requests_total', 'InfluxDB compatibility requests handled.', 'counter', [
+      { value: compat.requests },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_write_points_total', 'Points accepted through InfluxDB write endpoints.', 'counter', [
+      { value: compat.writePoints },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_write_duplicates_total', 'InfluxDB write points discarded as duplicates.', 'counter', [
+      { value: compat.duplicates },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_truncated_points_total', 'Points merged because of ns-to-ms truncation.', 'counter', [
+      { value: compat.truncatedPoints },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_rejected_lines_total', 'Line Protocol lines rejected in partial-write mode.', 'counter', [
+      { value: compat.rejectedLines },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_tags_folded_total', 'Tag fragments folded into metric names.', 'counter', [
+      { value: compat.tagsFolded },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_tags_dropped_total', 'Tag fragments dropped (tagFolding=ignore).', 'counter', [
+      { value: compat.tagsDropped },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_influxql_queries_total', 'InfluxQL subset queries executed.', 'counter', [
+      { value: compat.influxqlQueries },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_unmapped_metrics_total', 'Metric names skipped because they cannot be unfolded.', 'counter', [
+      { value: compat.unmappedMetrics },
+    ]);
+    appendFamily(lines, 'rtdb_compat_influx_cardinality_warn', '1 when folded metric cardinality crossed the warn threshold.', 'gauge', [
+      { value: compat.cardinalityWarn ? 1 : 0 },
+    ]);
+  }
 
   return `${lines.join('\n')}\n`;
 }

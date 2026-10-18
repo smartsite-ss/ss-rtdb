@@ -119,6 +119,18 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `admin.staticDir` | `""` | 覆盖控制台静态资源目录；留空 = 内置的 `packages/admin/dist`。 |
 | `admin.exposePaths` | `false` | `false`：`GET /api/v1/databases/:db` 返回**相对工作目录**的路径（如 `rtdb-data/plant_a`）；`true`：返回解析后的绝对路径（会暴露主机目录结构）。 |
 | `cors.allowedOrigins` | `[]` | 显式开启的 CORS 来源；`["*"]` 允许任意。留空则完全关闭 CORS。 |
+| `compat.influx.enabled` | `true` | InfluxDB 兼容层总开关（`/write`、`/api/v2/write`、`/api/v3/write_lp`、`/ping`、`/query`）。 |
+| `compat.influx.metricPrefix` | `""` | 折叠后指标名前缀；迁移期可设为 `influx.` 与原生指标区分。 |
+| `compat.influx.tagFolding` | `metric` | `metric` = tag 折叠进指标名；`ignore` = 丢弃 tag（显式降级，存在丢数风险）。 |
+| `compat.influx.fieldFolding` | `metric` | `metric` = 每字段一个指标；`reject` = 多字段行整行拒绝。 |
+| `compat.influx.duplicatePolicy` | `last` | 同一请求内同 `(指标, 毫秒)` 的取舍：`last` \| `first`。 |
+| `compat.influx.maxBodyBytes` | `26214400` | 兼容写入请求体上限（压缩前与解压后，25 MiB）。 |
+| `compat.influx.defaultOrg` | `""` | v2 写入缺少 `org` 时的兜底值；留空 = 必填。 |
+| `compat.influx.allowQueryCredentials` | `false` | 允许 `?u=&p=` / `?access_token=` 凭据（会进入访问日志，不推荐）。 |
+| `compat.influx.rejectNoSync` | `false` | `no_sync` 是否视为错误；默认接受并回 `X-Rtdb-NoSync: ignored`。 |
+| `compat.influx.influxql` | `read-only` | `off` 关闭 `/query` 与 `/api/v3/query_influxql`；`read-only` 开启 InfluxQL 只读子集。 |
+| `compat.influx.versionHeader` | `2.7.8` | `/ping` 的 `X-Influxdb-Version` 取值（兼容基线声明，不改变真实产品版本）。 |
+| `compat.influx.cardinalityWarnThreshold` | `100000` | 折叠后指标数超过该值打印一次 `WARN`。 |
 | `write.walEnabled` | `true` | 预写日志。仅当数据可重新生成时才设为 `false`。 |
 | `write.fsyncPolicy` | `wal` | `wal` = 每次 WAL 追加后成组 fsync；`none` = 依赖操作系统。 |
 | `write.blockTargetPoints` | `16384` | 块封块的主触发条件（每块点数）。 |
@@ -150,6 +162,15 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `retentionDays` | 0 | 3 650 |
 | `storage.segment.maxPerDay` | 1 | 1 000 |
 
+### 兼容层（`compat.influx`）
+
+兼容层是**旁路适配器**，不改变 `/api/v1/*` 原生契约与鉴权语义（写入仍需 `write` 权限域、查询仍需 `query` 权限域）：
+
+- 行协议中的 `measurement + tags + field` 折叠为单一指标名 `measurement|field|key=value...`（tag 按 key 升序，`\` `|` `=` 转义）。`tagFolding=ignore` 会丢弃 tag，可能造成不同序列塌缩，默认关闭。
+- 时间精度由请求 `precision` 决定（`ns/us/ms/s/m/h` 及全称），内部统一存毫秒；同一毫秒多个点按 `duplicatePolicy` 合并。
+- **跨请求**的同 `(指标, 毫秒)` 点不会覆盖（存储为追加式，先写者胜），这是与 InfluxDB `last-write-wins` 的已知差异。
+- 不支持的代际能力（Flux `/api/v2/query`、SQL `/api/v3/query_sql`、桶/库管理 `/api/v2/buckets`、`/api/v3/configure/*`）返回 **501** 并在 `hint` 中给出替代端点，不会伪造成功。
+
 ## 4. 环境变量
 
 | 变量 | 对应配置项 |
@@ -170,6 +191,18 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `RTDB_ADMIN_ENABLED` | `admin.enabled` |
 | `RTDB_ADMIN_EXPOSE_PATHS` | `admin.exposePaths`（`true`/`1`、`false`/`0`） |
 | `RTDB_CORS_ALLOWED_ORIGINS` | `cors.allowedOrigins`（逗号分隔） |
+| `RTDB_COMPAT_INFLUX_ENABLED` | `compat.influx.enabled`（`true`/`1`、`false`/`0`） |
+| `RTDB_COMPAT_INFLUX_METRIC_PREFIX` | `compat.influx.metricPrefix` |
+| `RTDB_COMPAT_INFLUX_TAG_FOLDING` | `compat.influx.tagFolding` |
+| `RTDB_COMPAT_INFLUX_FIELD_FOLDING` | `compat.influx.fieldFolding` |
+| `RTDB_COMPAT_INFLUX_DUPLICATE_POLICY` | `compat.influx.duplicatePolicy` |
+| `RTDB_COMPAT_INFLUX_MAX_BODY_BYTES` | `compat.influx.maxBodyBytes` |
+| `RTDB_COMPAT_INFLUX_DEFAULT_ORG` | `compat.influx.defaultOrg` |
+| `RTDB_COMPAT_INFLUX_ALLOW_QUERY_CREDENTIALS` | `compat.influx.allowQueryCredentials` |
+| `RTDB_COMPAT_INFLUX_REJECT_NO_SYNC` | `compat.influx.rejectNoSync` |
+| `RTDB_COMPAT_INFLUX_INFLUXQL` | `compat.influx.influxql` |
+| `RTDB_COMPAT_INFLUX_VERSION_HEADER` | `compat.influx.versionHeader` |
+| `RTDB_COMPAT_INFLUX_CARDINALITY_WARN_THRESHOLD` | `compat.influx.cardinalityWarnThreshold` |
 | `RTDB_LOG_LEVEL` | `log.level` |
 
 仅 CLI 使用的额外变量：
@@ -293,3 +326,4 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 | 2026-10-17 | 新增 `auth.bootstrapUsername` / `auth.bootstrapPassword`（默认 `admin` / `ss-rtdb`）、对应环境变量与 §6.4「首次启动的默认管理员与登录」 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 补充运行期 `conf/rtdb-server.json`（由工作目录自动加载，仓库与发布包均自带）与 `admin.exposePaths` / `RTDB_ADMIN_EXPOSE_PATHS` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `admin.exposePaths` 默认改为 `false`：数据库目录按工作目录相对路径报告，`true` 才返回绝对路径 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 新增 §3「兼容层（`compat.influx`）」12 个配置项说明与 12 个 `RTDB_COMPAT_INFLUX_*` 环境变量（默认开启写入兼容、InfluxQL `read-only`，并说明 tag/field 折叠、precision、跨请求不覆盖等语义） | DeepSeek-V4.1-Flash |

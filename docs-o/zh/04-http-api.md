@@ -76,7 +76,10 @@
 | ---- | ---- | ------ | ---- |
 | `GET` | `/api/v1/status` | none | 运行时指标 |
 | `GET` | `/metrics` | none | Prometheus 暴露格式 |
-| `GET` | `/healthz` | none | 存活探针 |
+| `GET` | `/healthz` | none | 存活探针（`{"status":"ok"}`） |
+| `GET` | `/health` | none | InfluxDB 形状健康探针（`{"status":"pass",...}`） |
+| `GET` | `/api/docs` | none | 内置 HTML 接口参考（按运行配置生成） |
+| `GET` | `/api/docs/openapi.json` | none | 当前实服务路由的 OpenAPI 3.1 文档 |
 | `GET` | `/api/v1/databases` | query | 列出数据库 |
 | `GET` | `/api/v1/databases/:db` | query | 某库的磁盘占用、按天明细与保留策略覆盖值 |
 | `GET` | `/api/v1/metrics/:db` | query | 列出某库的指标 |
@@ -95,6 +98,10 @@
 | `POST` | `/api/v1/auth/login` | none（需用户名 + 口令） | 换取 API 令牌 |
 | `GET` | `/api/v1/auth/session` | 任意有效凭据 | 当前凭据的身份与权限域 |
 | `POST` | `/api/v1/auth/logout` | 任意有效凭据 | 吊销当前 API 令牌 |
+| `GET` | `/ping` | none | InfluxDB 兼容存活探针（204 + `X-Influxdb-Version`） |
+| `POST` | `/write`、`/api/v2/write`、`/api/v3/write_lp` | write | InfluxDB 行协议兼容写入（tag/field 折叠，见 §10） |
+| `GET` `POST` | `/query`、`/api/v3/query_influxql` | query | InfluxQL 只读子集（见 §10） |
+| `*` | `/api/v2/query`、`/api/v3/query_sql`、`/api/v2/buckets*`、`/api/v3/configure/*` | — | 明确 `501` + `hint`（不支持 Flux / SQL / 桶管理） |
 | `GET` | `/admin/` | none | Web 控制台（静态资源） |
 | `GET` | `/` | none | 302 跳转到 `/admin/`；`admin.enabled=false` 时仍为 404 |
 
@@ -498,9 +505,43 @@ curl http://127.0.0.1:6180/metrics      # Prometheus 文本暴露格式
   "segments": { "openFiles": 3, "bytesToday": 610000000 },
   "cache":  { "blocks": 256, "blockHitRate": 0.93, "heapUsedMb": 180, "externalMb": 64 },
   "gc":     { "count": 12, "totalMs": 340, "maxMs": 41 },
-  "query":  { "count": 5000, "p50Ms": 2, "p95Ms": 11, "p99Ms": 28, "maxMs": 96 }
+  "query":  { "count": 5000, "p50Ms": 2, "p95Ms": 11, "p99Ms": 28, "maxMs": 96 },
+  "compat": { "influx": { "enabled": true, "tagFolding": "metric", "fieldFolding": "metric",
+                          "influxql": "read-only", "requests": 42, "writePoints": 8640000,
+                          "duplicates": 17, "truncatedPoints": 0, "rejectedLines": 0,
+                          "tagsFolded": 8640000, "tagsDropped": 0, "influxqlQueries": 3,
+                          "unmappedMetrics": 0, "cardinalityWarn": false } }
 }
 ```
+
+`/metrics` 同步暴露 `rtdb_compat_influx_*` 计数族（仅在兼容层启用时出现）。
+
+### 8.1 内置接口参考（`/api/docs`）
+
+服务端用同一张「路由元数据表」同时生成参考页面与 OpenAPI 文档，因此对外公布的契约不会与实际注册的
+路由脱节。
+
+| 方法 | 路径 | 权限域 | 用途 |
+| ---- | ---- | ------ | ---- |
+| `GET` | `/api/docs` | none | 自包含 HTML 参考：按两大 API 族分类、分组端点、权限域、参数、请求字段、响应形状、`501` 表 |
+| `GET` | `/api/docs/openapi.json` | none | OpenAPI 3.1 文档（`paths`、`components.securitySchemes`、错误 schema） |
+
+- **两大 API 族分开展示**：页面分为 **ss-rtdb 原生 API**（`/api/v1/*`、`/metrics`、`/healthz`、`/health`、
+  `/api/docs`）与 **InfluxDB 兼容 API**（`/write`、`/api/v2/*`、`/api/v3/*`、`/query`、`/ping`）两段。
+  每段有独立的彩色标题、独立侧栏分组与端点计数（原生：探针与指标、库与指标、写入、查询原语、保留与备份、
+  登录与会话、用户与令牌、控制台与文档；InfluxDB：行协议写入、InfluxQL 查询、连通性探针），
+  首页各有一张族概览卡片；两族的分组不会交错。
+- **公开**：与 `/status`、`/metrics` 一样无需凭据。页面只描述契约形状，不列出任何库、指标或令牌数据。
+- **随配置变化**：`compat.influx.enabled=false` 时 InfluxDB 整族（区块、侧栏分组与 `501` 表）消失；
+  `admin.enabled=false` 时控制台相关行（`/admin/`、`/`）与顶栏 Console 链接消失；
+  `compat.influx.influxql=off` 时 `/query` 仍列出，但注明「否则返回 501」。
+- **离线友好**：CSS 与筛选脚本全部内联，不引用 CDN，适配隔离的工业内网；按 `/` 聚焦端点筛选框。
+  筛选匹配路径、摘要、族名与组名，并同步隐藏空分组 / 空族，`501` 表同样可筛选。
+- OpenAPI 文档跳过 `/` 跳转与 `/admin/` 静态托管（不属于机器契约），公开操作标记为 `security: []`；
+  每个 operation 同时带族与组的标签（`tags: ["native","write"]`、`tags: ["influx","influx-write"]`）
+  并附 `x-family`，便于生成端区分两套接口。
+- 控制台导航栏的 **接口文档** 入口会在新标签页打开 `/api/docs`；其地址跟随已保存的 API 基址，
+  独立部署的控制台因此指向远端实例（见 [07 — Web 管理端](./07-web-admin.md) §4）。
 
 ## 9. CORS
 
@@ -509,7 +550,111 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 预检 `OPTIONS` 的响应为 `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` 与
 `Access-Control-Allow-Headers: Authorization, Content-Type`，缓存 600 秒。
 
-## 10. 下一步
+## 10. InfluxDB 兼容层
+
+兼容层由 `compat.influx.enabled` 控制（默认开启），是**旁路适配器**：不改 `/api/v1/*` 契约，写入仍走
+`engine.writeBatch`、查询仍走四原语，鉴权仍使用同一套用户/令牌账本。完整决策、差异矩阵与不可保真清单见
+`docs-e/03-详细设计/HTTP接口详细设计.md`。
+
+### 10.1 端点
+
+| 方法 | 路径 | 说明 |
+| ---- | ---- | ---- |
+| `POST` | `/write?db=<db>&precision=ns\|us\|ms\|s\|m\|h` | v1 行协议写入 |
+| `POST` | `/api/v2/write?org=<org>&bucket=<bucket>&precision=ns\|us\|ms\|s` | v2 行协议写入（`Authorization: Token <t>` 或 `Bearer`） |
+| `POST` | `/api/v3/write_lp?db=<db>&precision=<单位>&no_sync=&accept_partial=` | v3 行协议写入（`precision` 支持 `nanosecond` 等全称） |
+| `GET` `POST` | `/query?db=<db>&q=<InfluxQL>&epoch=ms` | v1 InfluxQL 只读子集；`POST` 支持表单或 JSON `{db,q}` |
+| `GET` `POST` | `/api/v3/query_influxql?db=<db>&q=<InfluxQL>&format=json` | v3 路径，响应与 v1 相同 |
+| `GET` | `/ping` | `204` + `X-Influxdb-Version` / `X-Rtdb-Version` / `X-Rtdb-Compat` |
+| `*` | `/api/v2/query`、`/api/v3/query_sql`、`/api/v2/buckets*`、`/api/v3/configure/*`、`/api/v2/setup`、`/api/v2/signin`、`/api/v2/tasks*` | `501 {"code":"not implemented","message":…,"hint":…}` |
+
+写入成功统一 `204 No Content`（与 InfluxDB 一致），并返回计数头：
+`X-Rtdb-Accepted`、`X-Rtdb-Duplicates`、`X-Rtdb-Truncated-Points`、`X-Rtdb-Database`（v2 桶名规范化结果）；
+`no_sync` 被接受但不改变服务端持久化策略，回 `X-Rtdb-NoSync: ignored`。
+`accept_partial=true` 且存在被拒行时返回 `200` + `{"accepted":N,"duplicates":N,"truncated":N,"rejected":[{line_number,error_message}]}`（最多 100 条）。
+默认是**整批原子**：任一行非法则整批 `400`，不写入任何点。
+
+### 10.2 数据模型映射
+
+```
+cpu,host=srv01,region=us usage_idle=97.2,usage_user=2i 1700000000000000000
+→ cpu|usage_idle|host=srv01|region=us = 97.2 (f64)
+→ cpu|usage_user|host=srv01|region=us = 2 (i64)
+```
+
+- `measurement|field|key=value...`，tag key 升序；`\`、`|`、`=` 转义为 `\\`、`\|`、`\=`。
+- `tagFolding=metric`（默认）保证不同 tag 组合不会塌缩；`ignore` 为显式降级并计入 `tagsDropped`。
+- `fieldFolding=metric`（默认）每字段一个指标；`reject` 拒绝多字段行。
+- 值类型遵循 InfluxDB：`42` 是浮点、`42i` 是 64 位整数、`42u` 返回 `400`（不支持无符号）。
+- 折叠后指标名 ≤512 字节、字符串值 ≤256 字节，超限 `400` 并给出行号。
+
+### 10.3 认证
+
+`Token` / `Bearer` / `Basic` 三种方案均可；`?u=&p=` 与 `?access_token=` 仅在
+`compat.influx.allowQueryCredentials=true` 时接受（凭据会进入访问日志，不推荐）。权限域映射：
+写入 → `write`，InfluxQL → `query`。缺失/非法凭据返回 `401`，角色不足返回 `403`。
+
+### 10.4 错误体
+
+| 族 | 形状 |
+| -- | ---- |
+| v2（`/api/v2/*`） | `{"code":"invalid\|not found\|unauthorized\|forbidden\|request too large\|too many requests\|not implemented","message":"…","hint"?,"data"?}` |
+| v1 / v3（`/api/v1`、`/write`、`/query`、`/api/v3/*`） | `{"error":"…","hint"?,"data"?}` |
+
+行级失败（原子模式）附带 `data: [{ "line_number": 2, "error_message": "…" }]`；HTTP 头
+`X-Rtdb-Error-Code` 携带原生 ss-rtdb 错误码，便于排障。`429` 带 `Retry-After: 1`。
+
+### 10.5 InfluxQL 只读子集
+
+```sql
+SELECT <field | * | mean|sum|count|min|max|first|last(field)> [, …]
+FROM <measurement>
+[WHERE time <op> <RFC3339 | 整数(ns) | now() [- duration]> [AND tag =|!= 'value']…]
+[GROUP BY time(<duration>) [, tag…] [fill(none|null|0|previous)]]
+[ORDER BY time ASC|DESC] [LIMIT n] [OFFSET n]
+
+SHOW DATABASES | MEASUREMENTS [ON db] | TAG KEYS [FROM m] | TAG VALUES [FROM m] WITH KEY = "k"
+     | FIELD KEYS [FROM m] | RETENTION POLICIES [ON db]
+```
+
+语义约定：
+
+- `mean()` 是**等权平均**（用 `sum/count` 计算，与 InfluxQL 一致）；原生 `avg` 是时间加权，二者不要混用。
+- `GROUP BY time()` 的窗口按 epoch 对齐（起点向上取整到窗口边界），与 InfluxDB 一致；`fill` 默认 `null`。
+- `count()` 无 `GROUP BY time` 时走精确计数；`last()` 走索引回溯；`first()` 按窗口做有界扫描（≤2000 个窗口）。
+- 多语句（`;`）、多 measurement、`OR`、正则、子查询、`INTO`、`DELETE`/`DROP`/`CREATE` 一律 `501` 并给出原因。
+
+`epoch` 默认返回 RFC3339（毫秒精度），`epoch=ms|s|m|h|u|us|ns` 返回整数。
+
+### 10.6 与 InfluxDB 的已知差异
+
+| 差异 | 说明 |
+| ---- | ---- |
+| 跨请求重复点不覆盖 | 存储为追加式，先写者胜；InfluxDB 为 last-write-wins。同请求内按 `duplicatePolicy`（默认 last）合并。 |
+| ns → ms 截断 | 同一毫秒多点合并，`X-Rtdb-Truncated-Points` 计数。 |
+| 字段类型永久锁定 | InfluxDB 可按 shard 变更；ss-rtdb 一律 `400 E_TYPE_MISMATCH`。 |
+| 无桶/组织/控制面 | `/api/v2/buckets`、`/api/v3/configure/*`、`setup`、`tasks`、Flux、SQL 返回 `501`。 |
+| `X-Influxdb-Version` | 仅声明兼容基线（默认 `2.7.8`，可配），真实版本见 `X-Rtdb-Version`。 |
+
+### 10.7 示例
+
+```bash
+# v2 客户端（Telegraf / Vector 的 influxdb_v2 输出）
+curl -XPOST "http://127.0.0.1:6180/api/v2/write?org=smart-site&bucket=plant-a&precision=ns" \
+  -H "Authorization: Token $TOKEN" -H "Content-Type: text/plain" \
+  --data-binary 'cpu,host=srv01 usage_idle=97.2,usage_user=2i 1700000000000000000'
+
+# v3 客户端（gzip + accept_partial）
+gzip -c points.lp | curl -XPOST "http://127.0.0.1:6180/api/v3/write_lp?db=plant_a&precision=nanosecond&accept_partial=true" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Encoding: gzip" --data-binary @-
+
+# InfluxQL（Grafana InfluxQL 数据源）
+curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlencode "epoch=ms" \
+  --data-urlencode "q=SELECT mean(usage_idle) FROM cpu WHERE host = 'srv01' GROUP BY time(5m) fill(none)" \
+  -H "Authorization: Token $TOKEN"
+```
+
+## 11. 下一步
 
 - [05 — 客户端 SDK](./05-client-sdks.md) —— 从 Node 或 Python 使用这些端点。
 
@@ -531,4 +676,7 @@ CORS **默认关闭**。若需要让部署在其他来源的浏览器控制台�
 | 2026-10-17 | §7.3 登录改为**单会话语义**：签发新令牌前自动吊销同用户旧的 `console login` 令牌（其它 label 与静态令牌不受影响） | GLM-5.3-Flash |
 | 2026-10-17 | §4.1 `query/range` 响应新增 `series.received`（服务器接收时间窗口，块/批次粒度；用于补传识别与链路时延观测），示例同步 | GLM-5.3-Flash |
 | 2026-10-17 | 新增 §4.5 `POST /api/v1/query/at`（任意时刻插值取值：`step`/`linear` 模式、`state` 来源标记、批量 ≤10 000）与端点索引行，原「读取值」顺延为 §4.6 | GLM-5.3-Flash |
+| 2026-10-18 | 新增 §10「InfluxDB 兼容层」：三族行协议写入（tag/field 折叠、precision、gzip、204、`accept_partial`）、`/ping`、InfluxQL 只读子集（`/query`、`/api/v3/query_influxql`）、错误族、已知差异与示例；端点索引补 `/health`、`/ping`、写入/查询/501 行；§8 status 补 `compat.influx` 计数并说明 `rtdb_compat_influx_*` 指标；原「下一步」顺延为 §11 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 新增 §8.1「内置接口参考」：`GET /api/docs`（自包含 HTML、公开、随配置过滤）与 `GET /api/docs/openapi.json`（OpenAPI 3.1，同源于路由元数据表）；端点索引补两行；说明控制台「接口文档」导航入口 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §8.1 改为按**两大 API 族**（ss-rtdb 原生 / InfluxDB 兼容）分类展示：独立区块、独立侧栏分组与计数；筛选同时匹配族名/组名并覆盖 `501` 表；OpenAPI 操作打上 `[族, 组]` 标签并附 `x-family` | DeepSeek-V4.1-Flash |
 

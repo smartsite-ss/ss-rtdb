@@ -70,6 +70,51 @@ export interface CorsConfig {
   allowedOrigins: string[];
 }
 
+/** InfluxDB compatibility: how tags/fields are folded into a metric name */
+export type InfluxTagFolding = 'metric' | 'ignore';
+export type InfluxFieldFolding = 'metric' | 'reject';
+export type InfluxDuplicatePolicy = 'last' | 'first';
+/** InfluxDB compatibility: InfluxQL read-only subset availability */
+export type InfluxQlMode = 'off' | 'read-only';
+
+/**
+ * InfluxDB compatibility layer (`/write`, `/api/v2/write`, `/api/v3/write_lp`, `/ping`, `/query`).
+ *
+ * The layer is a side adapter: it never changes the native `/api/v1/*` contract, writes through the same
+ * `engine.writeBatch` and queries through the same four primitives. See
+ * `docs-e/03-详细设计/HTTP接口详细设计.md` for the full endpoint contract.
+ */
+export interface InfluxCompatConfig {
+  /** Master switch (default on): write endpoints, `/ping`, InfluxQL and the 501 table */
+  enabled: boolean;
+  /** Prefix prepended to folded metric names (e.g. `influx.` to separate them from native metrics) */
+  metricPrefix: string;
+  /** `metric` folds tags into the name; `ignore` drops them (explicitly lossy) */
+  tagFolding: InfluxTagFolding;
+  /** `metric` emits one metric per field; `reject` rejects multi-field lines */
+  fieldFolding: InfluxFieldFolding;
+  /** In-request duplicate `(metric, ms)` resolution: InfluxDB keeps the last write */
+  duplicatePolicy: InfluxDuplicatePolicy;
+  /** Wire and decoded body cap for compatibility writes (InfluxDB default is 25 MiB) */
+  maxBodyBytes: number;
+  /** Fallback `org` for `/api/v2/write` when the client omits it (empty = required) */
+  defaultOrg: string;
+  /** Accept `?u=&p=` / `?access_token=` credentials (disabled by default: credentials leak into logs) */
+  allowQueryCredentials: boolean;
+  /** Treat `no_sync` as an error instead of accepting it with an explicit `X-Rtdb-NoSync: ignored` header */
+  rejectNoSync: boolean;
+  /** `off` disables `/query` and `/api/v3/query_influxql`; `read-only` enables the supported subset */
+  influxql: InfluxQlMode;
+  /** Value of the `X-Influxdb-Version` header (`/ping`); declares the compatibility baseline */
+  versionHeader: string;
+  /** Warn once when the folded metric count exceeds this threshold */
+  cardinalityWarnThreshold: number;
+}
+
+export interface CompatConfig {
+  influx: InfluxCompatConfig;
+}
+
 export interface ServerConfig {
   port: number;
   host: string;
@@ -80,6 +125,7 @@ export interface ServerConfig {
   auth: AuthConfig;
   admin: AdminConfig;
   cors: CorsConfig;
+  compat: CompatConfig;
   write: {
     walEnabled: boolean;
     fsyncPolicy: 'wal' | 'none';
@@ -145,6 +191,22 @@ export const SERVER_CONFIG_DEFAULTS: ServerConfig = {
   },
   admin: { enabled: true, staticDir: '', exposePaths: false },
   cors: { allowedOrigins: [] },
+  compat: {
+    influx: {
+      enabled: true,
+      metricPrefix: '',
+      tagFolding: 'metric',
+      fieldFolding: 'metric',
+      duplicatePolicy: 'last',
+      maxBodyBytes: 26_214_400,
+      defaultOrg: '',
+      allowQueryCredentials: false,
+      rejectNoSync: false,
+      influxql: 'read-only',
+      versionHeader: '2.7.8',
+      cardinalityWarnThreshold: 100_000,
+    },
+  },
   write: {
     walEnabled: true,
     fsyncPolicy: 'wal',
@@ -233,6 +295,18 @@ function applyEnvironment(raw: JsonObject, env: NodeJS.ProcessEnv): void {
   setBooleanAt(raw, ['admin', 'enabled'], env.RTDB_ADMIN_ENABLED);
   setBooleanAt(raw, ['admin', 'exposePaths'], env.RTDB_ADMIN_EXPOSE_PATHS);
   setStringListAt(raw, ['cors', 'allowedOrigins'], env.RTDB_CORS_ALLOWED_ORIGINS);
+  setBooleanAt(raw, ['compat', 'influx', 'enabled'], env.RTDB_COMPAT_INFLUX_ENABLED);
+  setStringAt(raw, ['compat', 'influx', 'metricPrefix'], env.RTDB_COMPAT_INFLUX_METRIC_PREFIX);
+  setStringAt(raw, ['compat', 'influx', 'tagFolding'], env.RTDB_COMPAT_INFLUX_TAG_FOLDING);
+  setStringAt(raw, ['compat', 'influx', 'fieldFolding'], env.RTDB_COMPAT_INFLUX_FIELD_FOLDING);
+  setStringAt(raw, ['compat', 'influx', 'duplicatePolicy'], env.RTDB_COMPAT_INFLUX_DUPLICATE_POLICY);
+  setNumberAt(raw, ['compat', 'influx', 'maxBodyBytes'], env.RTDB_COMPAT_INFLUX_MAX_BODY_BYTES);
+  setStringAt(raw, ['compat', 'influx', 'defaultOrg'], env.RTDB_COMPAT_INFLUX_DEFAULT_ORG);
+  setBooleanAt(raw, ['compat', 'influx', 'allowQueryCredentials'], env.RTDB_COMPAT_INFLUX_ALLOW_QUERY_CREDENTIALS);
+  setBooleanAt(raw, ['compat', 'influx', 'rejectNoSync'], env.RTDB_COMPAT_INFLUX_REJECT_NO_SYNC);
+  setStringAt(raw, ['compat', 'influx', 'influxql'], env.RTDB_COMPAT_INFLUX_INFLUXQL);
+  setStringAt(raw, ['compat', 'influx', 'versionHeader'], env.RTDB_COMPAT_INFLUX_VERSION_HEADER);
+  setNumberAt(raw, ['compat', 'influx', 'cardinalityWarnThreshold'], env.RTDB_COMPAT_INFLUX_CARDINALITY_WARN_THRESHOLD);
   if (env.RTDB_LOG_LEVEL !== undefined && isLogLevel(env.RTDB_LOG_LEVEL)) {
     setAtPath(raw, ['log', 'level'], env.RTDB_LOG_LEVEL);
   }
@@ -244,6 +318,8 @@ function normalizeServerConfig(raw: JsonObject): ServerConfig {
   const auth = readObject(raw, 'auth');
   const admin = readObject(raw, 'admin');
   const cors = readObject(raw, 'cors');
+  const compat = readObject(raw, 'compat');
+  const influxCompat = readObject(compat, 'influx');
   const write = readObject(raw, 'write');
   const storage = readObject(raw, 'storage');
   const segment = readObject(storage, 'segment');
@@ -281,6 +357,28 @@ function normalizeServerConfig(raw: JsonObject): ServerConfig {
       exposePaths: asBoolean(admin.exposePaths, defaults.admin.exposePaths),
     },
     cors: { allowedOrigins: asStringList(cors.allowedOrigins, defaults.cors.allowedOrigins) },
+    compat: {
+      influx: {
+        enabled: asBoolean(influxCompat.enabled, defaults.compat.influx.enabled),
+        metricPrefix: asString(influxCompat.metricPrefix, defaults.compat.influx.metricPrefix),
+        tagFolding: influxCompat.tagFolding === 'ignore' ? 'ignore' : 'metric',
+        fieldFolding: influxCompat.fieldFolding === 'reject' ? 'reject' : 'metric',
+        duplicatePolicy: influxCompat.duplicatePolicy === 'first' ? 'first' : 'last',
+        maxBodyBytes: Math.max(1_024, asInteger(influxCompat.maxBodyBytes, defaults.compat.influx.maxBodyBytes)),
+        defaultOrg: asString(influxCompat.defaultOrg, defaults.compat.influx.defaultOrg),
+        allowQueryCredentials: asBoolean(
+          influxCompat.allowQueryCredentials,
+          defaults.compat.influx.allowQueryCredentials,
+        ),
+        rejectNoSync: asBoolean(influxCompat.rejectNoSync, defaults.compat.influx.rejectNoSync),
+        influxql: influxCompat.influxql === 'off' ? 'off' : 'read-only',
+        versionHeader: asString(influxCompat.versionHeader, defaults.compat.influx.versionHeader),
+        cardinalityWarnThreshold: Math.max(
+          0,
+          asInteger(influxCompat.cardinalityWarnThreshold, defaults.compat.influx.cardinalityWarnThreshold),
+        ),
+      },
+    },
     write: {
       walEnabled: asBoolean(write.walEnabled, defaults.write.walEnabled),
       fsyncPolicy: write.fsyncPolicy === 'none' ? 'none' : defaults.write.fsyncPolicy,

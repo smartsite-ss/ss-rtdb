@@ -99,6 +99,12 @@ const client = computed(
 const isBundledForm = computed(() => normalizeApiBaseUrl(apiBaseUrlInput.value).length === 0);
 const isSignedIn = computed(() => appliedSettings.value.accessToken.trim().length > 0);
 
+/**
+ * Built-in API reference of the targeted server (`GET /api/docs`). It follows the *applied* base URL, so
+ * the bundled form resolves relatively and a standalone console points at its remote instance.
+ */
+const apiDocsUrl = computed(() => `${normalizeApiBaseUrl(appliedSettings.value.apiBaseUrl)}/api/docs`);
+
 /** Apply + persist a connection pair (base URL and token) without touching the notes. */
 function applyConnection(apiBaseUrl: string, accessToken: string): void {
   const next: AdminSettings = {
@@ -297,6 +303,9 @@ onMounted(refreshSession);
         >
           {{ t(tab.labelKey) }}
         </button>
+        <a class="tab-link" :href="apiDocsUrl" target="_blank" rel="noopener noreferrer">
+          {{ t('tabs.apiDocs') }}<span class="tab-link-mark" aria-hidden="true">↗</span>
+        </a>
       </nav>
 
       <StatusPanel v-if="activeTab === 'status'" :client="client" />

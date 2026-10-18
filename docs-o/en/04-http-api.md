@@ -77,7 +77,10 @@ Every non-2xx response is JSON:
 | ------ | ---- | ----- | ------- |
 | `GET` | `/api/v1/status` | none | Runtime metrics |
 | `GET` | `/metrics` | none | Prometheus exposition |
-| `GET` | `/healthz` | none | Liveness probe |
+| `GET` | `/healthz` | none | Liveness probe (`{"status":"ok"}`) |
+| `GET` | `/health` | none | InfluxDB-shaped health probe (`{"status":"pass",...}`) |
+| `GET` | `/api/docs` | none | Built-in HTML API reference (generated from the running configuration) |
+| `GET` | `/api/docs/openapi.json` | none | OpenAPI 3.1 document for the served routes |
 | `GET` | `/api/v1/databases` | query | List databases |
 | `GET` | `/api/v1/databases/:db` | query | On-disk footprint, per-day detail and retention override of one database |
 | `GET` | `/api/v1/metrics/:db` | query | List metrics of a database |
@@ -96,6 +99,10 @@ Every non-2xx response is JSON:
 | `POST` | `/api/v1/auth/login` | none (needs user name + password) | Exchange credentials for an API token |
 | `GET` | `/api/v1/auth/session` | any valid credential | Identity and scopes of the current credential |
 | `POST` | `/api/v1/auth/logout` | any valid credential | Revoke the current API token |
+| `GET` | `/ping` | none | InfluxDB-compatible liveness probe (204 + `X-Influxdb-Version`) |
+| `POST` | `/write`, `/api/v2/write`, `/api/v3/write_lp` | write | InfluxDB Line Protocol writes (tag/field folding, see §10) |
+| `GET` `POST` | `/query`, `/api/v3/query_influxql` | query | InfluxQL read-only subset (see §10) |
+| `*` | `/api/v2/query`, `/api/v3/query_sql`, `/api/v2/buckets*`, `/api/v3/configure/*` | — | Explicit `501` + `hint` (Flux / SQL / bucket management unsupported) |
 | `GET` | `/admin/` | none | Web console (static) |
 | `GET` | `/` | none | 302 redirect to `/admin/`; still 404 when `admin.enabled=false` |
 
@@ -516,9 +523,48 @@ curl http://127.0.0.1:6180/metrics      # Prometheus text exposition
   "segments": { "openFiles": 3, "bytesToday": 610000000 },
   "cache":  { "blocks": 256, "blockHitRate": 0.93, "heapUsedMb": 180, "externalMb": 64 },
   "gc":     { "count": 12, "totalMs": 340, "maxMs": 41 },
-  "query":  { "count": 5000, "p50Ms": 2, "p95Ms": 11, "p99Ms": 28, "maxMs": 96 }
+  "query":  { "count": 5000, "p50Ms": 2, "p95Ms": 11, "p99Ms": 28, "maxMs": 96 },
+  "compat": { "influx": { "enabled": true, "tagFolding": "metric", "fieldFolding": "metric",
+                          "influxql": "read-only", "requests": 42, "writePoints": 8640000,
+                          "duplicates": 17, "truncatedPoints": 0, "rejectedLines": 0,
+                          "tagsFolded": 8640000, "tagsDropped": 0, "influxqlQueries": 3,
+                          "unmappedMetrics": 0, "cardinalityWarn": false } }
 }
 ```
+
+`/metrics` exposes the matching `rtdb_compat_influx_*` families (only while the layer is enabled).
+
+### 8.1 Built-in API reference (`/api/docs`)
+
+The server generates its own reference page and OpenAPI document from one route-metadata table, so the
+published contract cannot drift from the routes that are actually registered.
+
+| Method | Path | Scope | Purpose |
+| ------ | ---- | ----- | ------- |
+| `GET` | `/api/docs` | none | Self-contained HTML reference: two API families, grouped endpoints, scopes, parameters, request fields, response shapes, `501` table |
+| `GET` | `/api/docs/openapi.json` | none | OpenAPI 3.1 document (`paths`, `components.securitySchemes`, error schema) |
+
+- **Two API families, shown apart**: the reference is split into **ss-rtdb native API** (`/api/v1/*`,
+  `/metrics`, `/healthz`, `/health`, `/api/docs`) and **InfluxDB compatibility** (`/write`, `/api/v2/*`,
+  `/api/v3/*`, `/query`, `/ping`). Each family is its own page section with a coloured header, its own
+  sidebar group (native: probes/metrics, catalog, write, query, retention & backup, sign-in, admin,
+  console; InfluxDB: Line Protocol writes, InfluxQL queries, connectivity probes) and its own endpoint
+  count; the intro shows one summary card per family. Groups of a family never interleave.
+- **Public**: like `/status` and `/metrics`, no credential is required. The page documents shapes only —
+  it lists no database, metric or token data.
+- **Configuration-aware**: with `compat.influx.enabled = false` the whole InfluxDB family (its section,
+  sidebar group and the `501` table) disappears; with `admin.enabled = false` the console rows
+  (`/admin/`, `/`) and the top-bar Console link disappear. `compat.influx.influxql = off` keeps `/query`
+  listed with its "otherwise 501" note.
+- **Offline-friendly**: inline CSS and a small inline filter script — no CDN, which matters on air-gapped
+  industrial networks. Press `/` to focus the endpoint filter; it matches the path, summary, family and
+  group names, hides empty groups/families, and also filters the `501` table.
+- The OpenAPI document skips the `/` redirect and the static `/admin/` hosting (not part of the machine
+  contract), marks public operations with `security: []`, and tags every operation with both its family
+  and its group (`tags: ["native","write"]`, `tags: ["influx","influx-write"]`) plus `x-family`, so
+  generated clients can keep the two surfaces apart.
+- The console's **API docs** nav entry opens `/api/docs` in a new tab; its URL follows the configured API
+  base URL, so a standalone console points at its remote instance (see [07 — Web admin](./07-web-admin.md) §4).
 
 ## 9. CORS
 
@@ -527,7 +573,118 @@ CORS is **off by default**. Set `cors.allowedOrigins` (e.g. `["https://rtdb-admi
 answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` and
 `Access-Control-Allow-Headers: Authorization, Content-Type`, cached for 600 s.
 
-## 10. Next steps
+## 10. InfluxDB compatibility layer
+
+The layer is controlled by `compat.influx.enabled` (on by default) and is a **side adapter**: the `/api/v1/*`
+contract, the write path (`engine.writeBatch`) and the auth ledger (users/tokens/scopes) are unchanged. The full
+decision record, difference matrix and fidelity caveats live in `docs-e/03-详细设计/HTTP接口详细设计.md`.
+
+### 10.1 Endpoints
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `POST` | `/write?db=<db>&precision=ns\|us\|ms\|s\|m\|h` | v1 Line Protocol |
+| `POST` | `/api/v2/write?org=<org>&bucket=<bucket>&precision=ns\|us\|ms\|s` | v2 Line Protocol (`Authorization: Token <t>` or `Bearer`) |
+| `POST` | `/api/v3/write_lp?db=<db>&precision=<unit>&no_sync=&accept_partial=` | v3 Line Protocol (`precision` also accepts full names) |
+| `GET` `POST` | `/query?db=<db>&q=<InfluxQL>&epoch=ms` | v1 InfluxQL read-only subset (POST takes a form or JSON `{db,q}`) |
+| `GET` `POST` | `/api/v3/query_influxql?db=<db>&q=<InfluxQL>&format=json` | v3 path, same response shape |
+| `GET` | `/ping` | `204` + `X-Influxdb-Version` / `X-Rtdb-Version` / `X-Rtdb-Compat` |
+| `*` | `/api/v2/query`, `/api/v3/query_sql`, `/api/v2/buckets*`, `/api/v3/configure/*`, `/api/v2/setup`, `/api/v2/signin`, `/api/v2/tasks*` | `501 {"code":"not implemented","message":…,"hint":…}` |
+
+Successful writes always answer `204 No Content` (as InfluxDB does) with counters in
+`X-Rtdb-Accepted`, `X-Rtdb-Duplicates`, `X-Rtdb-Truncated-Points` and `X-Rtdb-Database` (resolved v2 bucket).
+`no_sync` is accepted but never changes the server-side durability policy (`X-Rtdb-NoSync: ignored`).
+With `accept_partial=true` and rejected lines the response is `200` plus
+`{"accepted":N,"duplicates":N,"truncated":N,"rejected":[{line_number,error_message}]}` (at most 100 items).
+The default is **atomic**: one invalid line rejects the whole batch with `400` and writes nothing.
+
+### 10.2 Data model mapping
+
+```
+cpu,host=srv01,region=us usage_idle=97.2,usage_user=2i 1700000000000000000
+→ cpu|usage_idle|host=srv01|region=us = 97.2 (f64)
+→ cpu|usage_user|host=srv01|region=us = 2 (i64)
+```
+
+- `measurement|field|key=value...`, tag keys sorted; `\`, `|`, `=` escape as `\\`, `\|`, `\=`.
+- `tagFolding=metric` (default) keeps distinct tag sets distinct; `ignore` is explicitly lossy and counted in
+  `tagsDropped`.
+- `fieldFolding=metric` (default) emits one metric per field; `reject` rejects multi-field lines.
+- Value typing follows InfluxDB: `42` is a float, `42i` an i64, `42u` returns `400` (u64 unsupported).
+- Folded metric names are capped at 512 bytes and string values at 256 bytes; violations return `400` with the
+  line number.
+
+### 10.3 Authentication
+
+`Token`, `Bearer` and `Basic` are all accepted; `?u=&p=` / `?access_token=` only with
+`compat.influx.allowQueryCredentials=true` (URL credentials end up in access logs). Scope mapping: writes →
+`write`, InfluxQL → `query`. Missing/invalid credentials → `401`; insufficient role → `403`.
+
+### 10.4 Error bodies
+
+| Family | Shape |
+| ------ | ----- |
+| v2 (`/api/v2/*`) | `{"code":"invalid\|not found\|unauthorized\|forbidden\|request too large\|too many requests\|not implemented","message":"…","hint"?,"data"?}` |
+| v1 / v3 (`/write`, `/query`, `/api/v3/*`) | `{"error":"…","hint"?,"data"?}` |
+
+Atomic line failures carry `data: [{ "line_number": 2, "error_message": "…" }]`. The `X-Rtdb-Error-Code` header
+reports the native ss-rtdb error code; `429` includes `Retry-After: 1`.
+
+### 10.5 InfluxQL read-only subset
+
+```sql
+SELECT <field | * | mean|sum|count|min|max|first|last(field)> [, …]
+FROM <measurement>
+[WHERE time <op> <RFC3339 | integer(ns) | now() [- duration]> [AND tag =|!= 'value']…]
+[GROUP BY time(<duration>) [, tag…] [fill(none|null|0|previous)]]
+[ORDER BY time ASC|DESC] [LIMIT n] [OFFSET n]
+
+SHOW DATABASES | MEASUREMENTS [ON db] | TAG KEYS [FROM m] | TAG VALUES [FROM m] WITH KEY = "k"
+     | FIELD KEYS [FROM m] | RETENTION POLICIES [ON db]
+```
+
+Semantics:
+
+- `mean()` is the **point-equal-weight** mean (computed as `sum/count`, matching InfluxQL); the native `avg` is
+  time-weighted — do not mix them.
+- `GROUP BY time()` windows are epoch-aligned (the first window starts at the next boundary) and `fill` defaults
+  to `null`, matching InfluxDB.
+- `count()` without `GROUP BY time` uses the exact count, `last()` uses index backtracking, and `first()` performs
+  a bounded per-window scan (≤2000 windows).
+- Multi-statement (`;`), multiple measurements, `OR`, regex, subqueries, `INTO`, `DELETE`/`DROP`/`CREATE` all answer
+  `501` with a reason.
+
+`epoch` defaults to RFC3339 with millisecond precision; `epoch=ms|s|m|h|u|us|ns` returns integers.
+
+### 10.6 Known differences from InfluxDB
+
+| Difference | Detail |
+| ---------- | ------ |
+| Cross-request duplicates are not overwritten | Append-only storage keeps the first point; InfluxDB is last-write-wins. In-request duplicates follow `duplicatePolicy` (default `last`). |
+| ns → ms truncation | Points sharing a millisecond are merged and counted in `X-Rtdb-Truncated-Points`. |
+| Field type is locked forever | InfluxDB can change it per shard; ss-rtdb returns `400 E_TYPE_MISMATCH`. |
+| No bucket/org/control plane | `/api/v2/buckets`, `/api/v3/configure/*`, `setup`, `tasks`, Flux and SQL answer `501`. |
+| `X-Influxdb-Version` | Declares only the compatibility baseline (default `2.7.8`, configurable); the real version is in `X-Rtdb-Version`. |
+
+### 10.7 Examples
+
+```bash
+# v2 clients (Telegraf / Vector influxdb_v2 output)
+curl -XPOST "http://127.0.0.1:6180/api/v2/write?org=smart-site&bucket=plant-a&precision=ns" \
+  -H "Authorization: Token $TOKEN" -H "Content-Type: text/plain" \
+  --data-binary 'cpu,host=srv01 usage_idle=97.2,usage_user=2i 1700000000000000000'
+
+# v3 clients (gzip + accept_partial)
+gzip -c points.lp | curl -XPOST "http://127.0.0.1:6180/api/v3/write_lp?db=plant_a&precision=nanosecond&accept_partial=true" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Encoding: gzip" --data-binary @-
+
+# InfluxQL (Grafana InfluxQL data source)
+curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlencode "epoch=ms" \
+  --data-urlencode "q=SELECT mean(usage_idle) FROM cpu WHERE host = 'srv01' GROUP BY time(5m) fill(none)" \
+  -H "Authorization: Token $TOKEN"
+```
+
+## 11. Next steps
 
 - [05 — Client SDKs](./05-client-sdks.md) — use these endpoints from Node or Python.
 
@@ -549,3 +706,6 @@ answered with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS` an
 | 2026-10-17 | §7.3 login is now **single-session**: issuing a new token first revokes the same user's previous `console login` tokens (other labels and the static token are unaffected) | GLM-5.3-Flash |
 | 2026-10-17 | §4.1 `query/range` response adds `series.received` (server receive-time window, block/batch granularity; for backfill identification and link-latency observation), example updated | GLM-5.3-Flash |
 | 2026-10-17 | Added §4.5 `POST /api/v1/query/at` (point-in-time interpolated lookup: `step`/`linear` modes, `state` provenance markers, batches ≤10 000) and the endpoint-index row; "Reading values" renumbered to §4.6 | GLM-5.3-Flash |
+| 2026-10-18 | Added §10 "InfluxDB compatibility layer": three Line Protocol write endpoints (tag/field folding, precision, gzip, 204, `accept_partial`), `/ping`, InfluxQL read-only subset (`/query`, `/api/v3/query_influxql`), error families, known differences and examples; endpoint index gains `/health`, `/ping`, write/query/501 rows; §8 status gains `compat.influx` counters and the `rtdb_compat_influx_*` families; "Next steps" renumbered to §11 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | Added §8.1 "Built-in API reference": `GET /api/docs` (self-contained HTML, public, configuration-aware) and `GET /api/docs/openapi.json` (OpenAPI 3.1 generated from the same route-metadata table); two endpoint-index rows; noted the console **API docs** nav entry | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §8.1 now describes the reference as **two API families** (ss-rtdb native vs InfluxDB compatibility): separate page sections, sidebar groups and counts; the search also matches family/group names and the `501` table; OpenAPI operations are tagged `[family, group]` with `x-family` | DeepSeek-V4.1-Flash |
