@@ -26,6 +26,7 @@ import type { AdminSettings } from './settings';
 import { describeError } from './async';
 import { t, toggleLocale } from './i18n';
 import type { MessageKey } from './locales/en';
+import brandIcon from './assets/brand/logo-icon-64.png';
 import AccessPanel from './components/AccessPanel.vue';
 import BackupPanel from './components/BackupPanel.vue';
 import ConnectionDialog from './components/ConnectionDialog.vue';
@@ -320,7 +321,7 @@ onUnmounted(() => {
   <div v-else class="admin-shell">
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <span class="brand-mark" aria-hidden="true">ss</span>
+        <img class="brand-mark" :src="brandIcon" alt="" />
         <div class="sidebar-brand-text">
           <strong>ss-rtdb</strong>
           <small>{{ t('app.brandNote') }}</small>

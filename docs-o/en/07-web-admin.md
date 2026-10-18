@@ -20,6 +20,11 @@ npm run build --workspace @ss/rtdb-admin
 
 Output: `packages/admin/dist/`. The build uses `base: './'` so the bundle works from any path.
 
+Brand assets live in `packages/admin/src/assets/brand/` (taken from the Smart Site logo v3 set: `logo-full.png`
+for the light-text lockup, `logo-icon-256.png` / `logo-icon-64.png` for the icon, and `favicon.png`), shared by
+the sign-in page, the sidebar brand slot and the browser tab; swapping the brand means replacing that directory
+(and pointing the favicon link in `index.html` at the new file).
+
 Without this build the server still runs; `/admin` simply returns 404.
 
 ## 2. Bundled form
@@ -198,4 +203,5 @@ The console ships two locales and starts in **English**:
 | 2026-10-18 | Access-control token table hides retired `console login` sessions by default (tick "Show retired sessions" to inspect them) and reports how many are hidden | DeepSeek-V4.1-Flash |
 | 2026-10-18 | Inventory live values and the `Updated` column now **auto-refresh every 5 s** by default (one `query/last-batch` per visible page; paused on the preview tab or a hidden tab), with the manual button and an on/off switch kept | DeepSeek-V4.1-Flash |
 | 2026-10-18 | Sidebar navigation reordered: **Metrics** now follows **Databases** (Overview holds Status; the Data group is Databases / Metrics / Backup) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | Branding and sign-in page reworked: adopts the Smart Site logo v3 set (`src/assets/brand/` — horizontal lockup on the sign-in page, card icon, sidebar icon and favicon); the sign-in page is now a dark brand panel (grid / glow / feature list / version and site link) plus a white card (icon heading, password visibility toggle, server address, collapsible token section, copyright) with a narrow-screen layout; §1 documents the brand assets | DeepSeek-V4.1-Flash |
 | 2026-10-18 | Console now uses a **sign-in gate + sidebar workspace**: an unauthenticated visitor only sees the full-screen sign-in page (server address, password sign-in, token sign-in, connectivity test) and the workspace mounts after the session is verified; the layout is re-cut into a grouped left sidebar (Overview / Data / Security) + top bar + content, connection settings move into a **Connection** dialog, the status panel is grouped into five card sections, and narrow screens collapse the sidebar and scroll wide tables; §2 / §3 / §4 / §5 / §6 updated | DeepSeek-V4.1-Flash |

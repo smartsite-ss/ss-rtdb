@@ -1,0 +1,37 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - img "Smart Site" [ref=e5]
+    - button "中文" [ref=e6] [cursor=pointer]
+  - main [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e9]: ss-rtdb
+      - heading "One engine for real-time and historical data" [level=1] [ref=e10]
+      - paragraph [ref=e11]: Embed it in your process or run it as a service — same engine, same on-disk format, no migration.
+    - generic [ref=e12]:
+      - generic [ref=e14]:
+        - heading "Sign in" [level=2] [ref=e15]
+        - paragraph [ref=e16]: Use your administrator account to open the console.
+      - generic [ref=e17]:
+        - generic [ref=e18]: User name
+        - textbox "User name" [ref=e19]: admin
+      - generic [ref=e20]:
+        - generic [ref=e21]: Password
+        - generic [ref=e22]:
+          - textbox "Password" [ref=e23]: ss-rtdb
+          - button "Show password" [ref=e24] [cursor=pointer]
+      - generic [ref=e28]:
+        - generic [ref=e29]: Server address
+        - textbox "Server address" [ref=e30]:
+          - /placeholder: http://127.0.0.1:6180
+        - generic [ref=e31]: Targeting the origin that served this page.
+      - button "Sign in" [ref=e32] [cursor=pointer]
+      - group [ref=e33]:
+        - generic "Use an existing token instead" [ref=e34] [cursor=pointer]
+      - paragraph [ref=e35]: First start creates the default administrator admin / ss-rtdb.
+  - contentinfo [ref=e36]:
+    - generic [ref=e37]: ss-rtdb v0.1.0
+    - generic [aria-hidden] [ref=e38]: ·
+    - link "smartsite.top" [ref=e39] [cursor=pointer]:
+      - /url: https://smartsite.top/
+      - text: smartsite.top
+      - generic [aria-hidden] [ref=e40]: ↗

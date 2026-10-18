@@ -52,9 +52,13 @@ export const zh: Record<MessageKey, string> = {
   'app.login.tokenHint': '在别处签发的令牌可以直接粘贴在这里，无需输入密码。',
   'app.login.tokenEmpty': '请先填写令牌。',
   'login.token': 'Bearer 令牌',
+  'login.hero.title': '一个引擎，承载实时与历史数据',
+  'login.hero.desc': '既可嵌入进程内，也可作为独立服务运行——同一套引擎、同一套磁盘格式，无需迁移。',
   'login.point.api': '仅使用公开 REST API，无需在构建期写入服务地址',
   'login.point.static': '同一份静态产物可内置部署，也可独立部署',
   'login.point.monitor': '实时状态、数据库、指标、备份与访问控制',
+  'login.showPassword': '显示密码',
+  'login.hidePassword': '隐藏密码',
 
   'nav.group.overview': '总览',
   'nav.group.data': '数据',
