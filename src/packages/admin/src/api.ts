@@ -91,6 +91,16 @@ export interface RtdbStatusReport {
   write: { pointsPerSec: number; buffered: number; duplicates: number; tagsIgnored: number };
   wal: { pendingBytes: number; outstandingBatches: number; pendingPoints: number; lastFsyncMs: number };
   segments: { openFiles: number; bytesToday: number };
+  cpu: { percent: number; systemPercent: number; userMs: number; systemMs: number };
+  memory: {
+    rssMb: number;
+    heapTotalMb: number;
+    heapUsedMb: number;
+    externalMb: number;
+    systemTotalMb: number;
+    systemPercent: number;
+    heapPercent: number;
+  };
   cache: { blocks: number; blockHitRate: number; heapUsedMb: number; externalMb: number };
   gc: { count: number; totalMs: number; maxMs: number };
   query: { count: number; p50Ms: number; p95Ms: number; p99Ms: number; maxMs: number };
@@ -306,6 +316,32 @@ export class RtdbAdminApiClient {
       ...(before === undefined ? {} : { before }),
     });
     return body.point ?? null;
+  }
+
+  /**
+   * Latest point of many metrics in **one** round trip (`POST /api/v1/query/last-batch`).
+   *
+   * Returns a name → point map in response (= request) order; unknown or empty metrics map to `null`. The
+   * inventory page feeds its visible rows here, so a 10 000-metric database still issues one request per page
+   * instead of one request per row.
+   */
+  async queryLastBatch(
+    database: string,
+    metricNames: readonly string[],
+    before?: number,
+  ): Promise<Record<string, RtdbJsonPoint | null>> {
+    const body = await this.request<{ points: Array<{ metricName: string; point: RtdbJsonPoint | null }> }>(
+      'POST',
+      '/api/v1/query/last-batch',
+      {
+        db: database,
+        metricNames,
+        ...(before === undefined ? {} : { before }),
+      },
+    );
+    const latest: Record<string, RtdbJsonPoint | null> = {};
+    for (const entry of body.points ?? []) latest[entry.metricName] = entry.point ?? null;
+    return latest;
   }
 
   async queryRange(database: string, metricName: string, start: number, end: number, limit: number): Promise<RtdbJsonSeries> {

@@ -217,7 +217,8 @@ export const API_DOC_ENDPOINTS: readonly ApiDocEndpoint[] = [
     group: 'observability',
     method: 'GET',
     path: '/api/v1/status',
-    summary: 'Runtime metrics and counters (uptime, write rate, WAL, cache, query latency, compat counters).',
+    summary:
+      'Runtime metrics and counters (uptime, write rate, WAL, process CPU / memory usage, cache, query latency, compat counters).',
     scope: 'none',
     success: { status: 200, description: 'JSON status snapshot.' },
     notes: ['Always public, even when `auth.enabled` is true.'],
@@ -363,6 +364,31 @@ export const API_DOC_ENDPOINTS: readonly ApiDocEndpoint[] = [
       ],
     },
     success: { status: 200, description: '`{"point":{"t":…,"v":…,"vt":…}}` (`point` is `null` when empty).' },
+  },
+  {
+    group: 'query',
+    method: 'POST',
+    path: '/api/v1/query/last-batch',
+    summary: 'Latest point at or before a timestamp for many metrics in one round trip.',
+    scope: 'query',
+    body: {
+      mediaTypes: ['application/json'],
+      fields: [
+        { name: 'db', type: 'string', required: true, description: 'Database name.' },
+        {
+          name: 'metricNames',
+          type: 'string[]',
+          required: true,
+          description: 'Metric names, 1…1000; the response echoes this order.',
+        },
+        { name: 'before', type: 'integer', required: false, description: 'Upper bound, ms epoch; default = latest overall.' },
+      ],
+    },
+    success: {
+      status: 200,
+      description:
+        '`{"points":[{"metricName":…,"point":{"t":…,"v":…,"vt":…}|null},…]}` — unknown or empty metrics yield `null`.',
+    },
   },
   {
     group: 'query',

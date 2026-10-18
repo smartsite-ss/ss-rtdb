@@ -99,6 +99,12 @@ for (const at of atPoints) console.log(at.timestamp, at.value, at.state);
 // last —— `before` 时刻或之前的最新点（省略 = 全局最新）
 const last = await client.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
 
+// last-batch —— 一次请求取回多指标最新点；Map 保持请求顺序，无点或未知指标为 null
+const latest = await client.queryLastBatch('plant_a', [
+  'station01.powerMeter.kwh',
+  'station01.temperature',
+]);
+
 // count —— 默认索引估算，可请求精确值
 const count = await client.queryCount('plant_a', 'station01.powerMeter.kwh',
   { start: startMs, end: endMs, exact: false });
@@ -121,6 +127,10 @@ await client.backup('plant_a', '/mnt/backups/2026-10-17');   // 服务端侧拷�
 // 可选：按天时间段（含首末；不传则整库）。返回 partial / range / days
 await client.backup('plant_a', '/mnt/backups/2026-09', { startDay: '2026-09-01', endDay: '2026-09-30' });
 ```
+
+`StatusReport` 除了写入 / WAL / 缓存 / 查询统计外，还包含 `cpu`（`percent` 单核百分比、
+`systemPercent` 整机占比、`userMs` / `systemMs` 累计值）与 `memory`（`rssMb`、`heapTotalMb`、
+`heapUsedMb`、`externalMb`、`systemTotalMb`、`systemPercent`、`heapPercent`）。
 
 ### 1.6 用户与令牌（管理面）
 
@@ -226,6 +236,9 @@ for at in at_points:
 
 last = client.query_last("plant_a", "station01.powerMeter.kwh", before=end_ms)
 
+latest = client.query_last_batch("plant_a",
+                                  ["station01.powerMeter.kwh", "station01.temperature"])
+
 count = client.query_count("plant_a", "station01.powerMeter.kwh",
                            start=start_ms, end=end_ms, exact=False)
 
@@ -289,4 +302,6 @@ except RtdbClientError as error:
 | 2026-10-17 | 双 SDK `queryRange`/`query_range` 返回值新增可选 `received`（服务器接收时间窗口，块/批次粒度），Python `Series.received` 同步 | GLM-5.3-Flash |
 | 2026-10-17 | 双 SDK 新增 `queryAt`/`query_at`（任意时刻插值取值，`step`/`linear`，`state` 来源标记），示例同步 | GLM-5.3-Flash |
 | 2026-10-18 | Node SDK `backup` 新增可选时间段参数 `{ startDay, endDay }`（按天粒度），返回值增加 `partial` / `range` / `days`；示例同步 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 两个 SDK 新增批量最新点接口（`queryLastBatch` → `Map<string, ClientPoint \\| null>`、`query_last_batch` → `Dict[str, Optional[Point]]`），走 `POST /api/v1/query/last-batch`，保持请求顺序、未知指标为 `null` | Step-5-Preview |
 
+| 2026-10-18 | §1.5 补充 `StatusReport` 的 `cpu` / `memory` 字段 | DeepSeek-V4.1-Flash |

@@ -312,6 +312,74 @@ button.small {
   font-size: 12px;
 }
 
+/* ---------- Pagination bar (metric inventory + range dialog) ---------- */
+
+/**
+ * Navigation on the left, "showing a–b of n" + page size on the right. The page-size label sits on the
+ * same baseline as the select (instead of stacking above it, which made the label float out of alignment
+ * with every other control in the bar).
+ */
+.toolbar.pagination {
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.pagination-nav,
+.pagination-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.pagination-nav {
+  gap: 8px;
+}
+
+.pagination-meta {
+  flex: 1 1 auto;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.pagination .page-status {
+  min-width: 92px;
+  padding: 3px 10px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.pagination .page-range {
+  white-space: nowrap;
+}
+
+.pagination .page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination .page-size-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pagination .page-size select {
+  width: auto;
+  min-width: 68px;
+}
+
 /* ---------- Stat grid ---------- */
 
 .stat-grid {

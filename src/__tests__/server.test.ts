@@ -434,6 +434,62 @@ describe('server: 查询四原语', () => {
     }
   });
 
+  it('query/last-batch 批量取最新点：顺序保持、未知指标为 null、空数组与非字符串被拒', async () => {
+    const { server, baseUrl } = await startTestServer();
+    try {
+      const write = await postJson(baseUrl, '/api/v1/write?db=query', [
+        { metricName: 'flow', t: BASE, v: 10 },
+        { metricName: 'flow', t: BASE + 1000, v: 20 },
+        { metricName: 'temp', t: BASE + 500, v: 36.5 },
+      ]);
+      assert.equal(write.status, 200);
+
+      const batch = await postJson(baseUrl, '/api/v1/query/last-batch', {
+        db: 'query',
+        metricNames: ['temp', 'flow', 'gone'],
+      });
+      assert.equal(batch.status, 200);
+      const body = (await batch.json()) as {
+        points: Array<{ metricName: string; point: { t: number; v: unknown } | null }>;
+      };
+      // Response order echoes the request (the console zips it with its own page list).
+      assert.deepEqual(
+        body.points.map((entry) => entry.metricName),
+        ['temp', 'flow', 'gone'],
+      );
+      assert.equal(body.points[0].point?.v, 36.5);
+      assert.equal(body.points[1].point?.t, BASE + 1000);
+      assert.equal(body.points[1].point?.v, 20);
+      // A name the server does not know is a null slot, not a failed batch.
+      assert.equal(body.points[2].point, null);
+
+      // `before` is inclusive: BASE + 999 selects the point at BASE, BASE + 1000 would select the next one.
+      const bounded = await postJson(baseUrl, '/api/v1/query/last-batch', {
+        db: 'query',
+        metricNames: ['flow'],
+        before: BASE + 999,
+      });
+      const boundedBody = (await bounded.json()) as { points: Array<{ point: { v: unknown } | null }> };
+      assert.equal(boundedBody.points[0].point?.v, 10);
+
+      const empty = await postJson(baseUrl, '/api/v1/query/last-batch', { db: 'query', metricNames: [] });
+      assert.equal(empty.status, 400);
+      assert.equal((await readErrorBody(empty)).error, ERROR_CODE.InvalidPoint);
+
+      const badType = await postJson(baseUrl, '/api/v1/query/last-batch', { db: 'query', metricNames: [1] });
+      assert.equal(badType.status, 400);
+
+      const tooMany = await postJson(baseUrl, '/api/v1/query/last-batch', {
+        db: 'query',
+        metricNames: Array.from({ length: 1001 }, (_, index) => `m${index}`),
+      });
+      assert.equal(tooMany.status, 413);
+      assert.equal((await readErrorBody(tooMany)).error, ERROR_CODE.BatchTooLarge);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('query/range 响应携带服务器接收时间窗口 received（缓冲点即查即有）', async () => {
     const { server, baseUrl } = await startTestServer();
     try {
@@ -1863,6 +1919,14 @@ const EXPECTED_PROMETHEUS_METRIC_NAMES = [
   'rtdb_wal_last_fsync_timestamp_seconds',
   'rtdb_segments_open_files',
   'rtdb_segments_bytes_today',
+  'rtdb_process_cpu_percent',
+  'rtdb_process_cpu_system_percent',
+  'rtdb_process_cpu_user_seconds_total',
+  'rtdb_process_cpu_system_seconds_total',
+  'rtdb_process_resident_memory_bytes',
+  'rtdb_process_memory_usage_percent',
+  'rtdb_process_heap_total_bytes',
+  'rtdb_process_heap_usage_percent',
   'rtdb_cache_blocks',
   'rtdb_cache_block_hit_rate',
   'rtdb_process_heap_used_bytes',
@@ -1963,6 +2027,16 @@ describe('server: Prometheus /metrics 与 /healthz（S14）', () => {
       write: { acceptedPoints: 0, bufferedPoints: 7, duplicatePoints: 2, pointsPerSec: 0 },
       wal: { pendingBytes: 100, outstandingBatches: 1, pendingPoints: 5, lastFsyncMs: 2_000 },
       segments: { openFiles: 4, bytesToday: 1_000 },
+      cpu: { percent: 12.5, systemPercent: 1.25, userMs: 1_500, systemMs: 500 },
+      memory: {
+        rssMb: 96,
+        heapTotalMb: 40,
+        heapUsedMb: 1.5,
+        externalMb: 2,
+        systemTotalMb: 8_192,
+        systemPercent: 1.17,
+        heapPercent: 3.75,
+      },
       cache: { blocks: 8, blockHitRate: 0.5, heapUsedMb: 1.5, externalMb: 2 },
       gc: { count: 3, totalMs: 250, maxMs: 12 },
       query: { count: 9, p50Ms: 1, p95Ms: 2, p99Ms: 3, maxMs: 4 },
@@ -1972,6 +2046,14 @@ describe('server: Prometheus /metrics 与 /healthz（S14）', () => {
     assert.equal(families.size, EXPECTED_PROMETHEUS_METRIC_NAMES.length);
     assert.equal(prometheusSampleValue(families, 'rtdb_uptime_seconds'), 12.5);
     assert.equal(prometheusSampleValue(families, 'rtdb_wal_last_fsync_timestamp_seconds'), 2);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_cpu_percent'), 12.5);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_cpu_system_percent'), 1.25);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_cpu_user_seconds_total'), 1.5);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_cpu_system_seconds_total'), 0.5);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_resident_memory_bytes'), 96 * 1_048_576);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_memory_usage_percent'), 1.17);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_heap_total_bytes'), 40 * 1_048_576);
+    assert.equal(prometheusSampleValue(families, 'rtdb_process_heap_usage_percent'), 3.75);
     assert.equal(prometheusSampleValue(families, 'rtdb_process_heap_used_bytes'), 1.5 * 1_048_576);
     assert.equal(prometheusSampleValue(families, 'rtdb_process_external_bytes'), 2 * 1_048_576);
     assert.equal(prometheusSampleValue(families, 'rtdb_gc_pause_total_seconds'), 0.25);

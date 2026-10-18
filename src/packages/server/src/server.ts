@@ -22,7 +22,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
-import { RtdbEngine } from '../../core/src/engine.ts';
+import { MAX_QUERY_LAST_METRICS, RtdbEngine } from '../../core/src/engine.ts';
 import { measureDatabaseSize } from '../../core/src/size.ts';
 import type { AggregateType, RangeOptions, WritePoint } from '../../core/src/types.ts';
 import { API_DOCS_CONTENT_TYPE, API_DOCS_PATH, API_DOCS_SPEC_CONTENT_TYPE, API_DOCS_SPEC_PATH, buildOpenApiDocument, renderApiDocsPage } from './api-docs.ts';
@@ -426,6 +426,11 @@ export class RtdbServer {
       await this.handleQueryLast(request, response);
       return;
     }
+    if (pathname === '/api/v1/query/last-batch') {
+      if (method !== 'POST') throw methodNotAllowed('POST');
+      await this.handleQueryLastBatch(request, response);
+      return;
+    }
     if (pathname === '/api/v1/query/count') {
       if (method !== 'POST') throw methodNotAllowed('POST');
       await this.handleQueryCount(request, response);
@@ -611,6 +616,21 @@ export class RtdbServer {
         lastFsyncMs: stats.wal.lastFsyncMs,
       },
       segments: { openFiles: stats.segments.openFiles, bytesToday: stats.segments.bytesToday },
+      cpu: {
+        percent: stats.cpu.percent,
+        systemPercent: stats.cpu.systemPercent,
+        userMs: stats.cpu.userMs,
+        systemMs: stats.cpu.systemMs,
+      },
+      memory: {
+        rssMb: stats.memory.rssMb,
+        heapTotalMb: stats.memory.heapTotalMb,
+        heapUsedMb: stats.memory.heapUsedMb,
+        externalMb: stats.memory.externalMb,
+        systemTotalMb: stats.memory.systemTotalMb,
+        systemPercent: stats.memory.systemPercent,
+        heapPercent: stats.memory.heapPercent,
+      },
       cache: {
         blocks: stats.cache.blocks,
         blockHitRate: stats.cache.blockHitRate,
@@ -740,6 +760,58 @@ export class RtdbServer {
     const before = body.before === undefined ? undefined : requireIntegerField(body.before, 'before');
     const point = await this.engine.queryLast(database, metricName, before === undefined ? {} : { before });
     this.sendJson(response, 200, { point: point === null ? null : encodePoint(point) });
+  }
+
+  /**
+   * Batch latest-point query (`query/last-batch`): one round trip for a whole inventory page.
+   *
+   * The console used to issue one `query/last` per row, which is 100+ requests for a single page and thousands
+   * for a large inventory. Unknown metric names are **not** an error here (see `engine.queryLastMany`): a name
+   * deleted between `metrics/{db}` and this call resolves to `null` instead of failing the page.
+   */
+  private async handleQueryLastBatch(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const principal = this.requireAuth(request, 'query');
+    const body = requireJsonObject(
+      this.parseJsonBody(await this.readRequestBody(request), 'query/last-batch'),
+      'query/last-batch',
+    );
+    const database = requireDatabaseName(readOptionalString(body.db));
+    this.tokenUsage.touch(principal?.tokenId, database);
+
+    const requested = body.metricNames;
+    if (!Array.isArray(requested) || requested.length === 0) {
+      throw new RtdbError(
+        ERROR_CODE.InvalidPoint,
+        'query/last-batch body.metricNames must be a non-empty string array',
+      );
+    }
+    if (requested.length > MAX_QUERY_LAST_METRICS) {
+      throw new RtdbError(
+        ERROR_CODE.BatchTooLarge,
+        `query/last-batch accepts at most ${MAX_QUERY_LAST_METRICS} metric names per call (got ${requested.length})`,
+      );
+    }
+    const metricNames: string[] = [];
+    for (let index = 0; index < requested.length; index += 1) {
+      const value = requested[index];
+      if (typeof value !== 'string') {
+        throw new RtdbError(
+          ERROR_CODE.InvalidPoint,
+          `query/last-batch body.metricNames[${index}] must be a string`,
+        );
+      }
+      metricNames.push(requireMetricName(value));
+    }
+
+    await this.requireDatabaseExists(database);
+    const before = body.before === undefined ? undefined : requireIntegerField(body.before, 'before');
+    const points = await this.engine.queryLastMany(database, metricNames, before === undefined ? {} : { before });
+    this.sendJson(response, 200, {
+      points: metricNames.map((metricName, index) => {
+        const point = points[index] ?? null;
+        return { metricName, point: point === null ? null : encodePoint(point) };
+      }),
+    });
   }
 
   private async handleQueryCount(request: IncomingMessage, response: ServerResponse): Promise<void> {

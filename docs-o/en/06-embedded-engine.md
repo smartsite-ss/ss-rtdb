@@ -183,12 +183,19 @@ const stats = await rtdb.stats();
 | `write` | `pointsPerSec`, `bufferedPoints`, `duplicatePoints` |
 | `wal` | `pendingBytes`, `pendingPoints`, `outstandingBatches`, `lastFsyncMs` |
 | `segments` | `openFiles`, `bytesToday` |
+| `cpu` | `percent` (percent of one core, may exceed 100), `systemPercent` (whole machine, 0–100), `userMs`, `systemMs` |
+| `memory` | `rssMb`, `heapTotalMb`, `heapUsedMb`, `externalMb`, `systemTotalMb`, `systemPercent`, `heapPercent` |
 | `cache` | `blocks`, `blockHitRate`, `heapUsedMb`, `externalMb` |
 | `gc` | `count`, `totalMs`, `maxMs` |
 | `query` | `count`, `p50Ms`, `p95Ms`, `p99Ms`, `maxMs` |
 
 Watch `wal.pendingBytes` and `write.buffered` — sustained growth means the sink cannot keep up; watch
 `cache.blockHitRate` to size `cacheBlocks`.
+
+`cpu.percent` is the delta between two consecutive `stats()` calls with a 1-second sampling floor (denser
+calls reuse the previous value); `cpu.userMs` / `cpu.systemMs` are cumulative since `open()`.
+`memory.rssMb` is the process resident set, `memory.systemPercent` = RSS / host total memory, and
+`memory.heapPercent` = `heapUsedMb` / `heapTotalMb`.
 
 ---
 
@@ -254,3 +261,4 @@ main()
 | 2026-10-17 | `RtdbEngine` adds the fifth query primitive `queryAt` (batch point-in-time interpolated lookup, `step`/`linear`, `state` provenance markers; see the Interpolation Detailed Design) | GLM-5.3-Flash |
 | 2026-10-18 | Adds `hasMetric(database, metricName)` (existence only, cached per-segment name sets); fixes `readBlockValueType` probing too few bytes, which made `listMetrics` re-probe every block of the same metric (the HTTP layer validates the metric on every query; measured ~1.4 s → ~0.15 s per endpoint) | DeepSeek-V4.1-Flash |
 | 2026-10-18 | The periodic flush fallback now runs in slices: the event loop is yielded every 2 metrics and the whole sweep performs a single segment `fsync` (measured at 20k points/s: the worst single-sweep stall dropped from ~210–275 ms to ≤58 ms; the residual jitter comes from the write batches themselves) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §7 `stats()` gains the `cpu` / `memory` groups (process CPU and memory usage) | DeepSeek-V4.1-Flash |

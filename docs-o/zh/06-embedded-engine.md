@@ -177,12 +177,18 @@ const stats = await rtdb.stats();
 | `write` | `pointsPerSec`、`bufferedPoints`、`duplicatePoints` |
 | `wal` | `pendingBytes`、`pendingPoints`、`outstandingBatches`、`lastFsyncMs` |
 | `segments` | `openFiles`、`bytesToday` |
+| `cpu` | `percent`（单核百分比，可 >100）、`systemPercent`（占整机 0–100）、`userMs`、`systemMs` |
+| `memory` | `rssMb`、`heapTotalMb`、`heapUsedMb`、`externalMb`、`systemTotalMb`、`systemPercent`、`heapPercent` |
 | `cache` | `blocks`、`blockHitRate`、`heapUsedMb`、`externalMb` |
 | `gc` | `count`、`totalMs`、`maxMs` |
 | `query` | `count`、`p50Ms`、`p95Ms`、`p99Ms`、`maxMs` |
 
 关注 `wal.pendingBytes` 与 `write.buffered` —— 持续增长说明下游跟不上；
 关注 `cache.blockHitRate` 以便调整 `cacheBlocks`。
+
+`cpu.percent` 是相邻两次 `stats()` 之间的增量占用率，采样窗口最短 1 秒（更密的调用沿用上一次结果）；
+`cpu.userMs` / `cpu.systemMs` 是自 `open()` 起的累计值。`memory.rssMb` 是进程常驻内存，
+`memory.systemPercent` = RSS / 主机总内存，`memory.heapPercent` = `heapUsedMb` / `heapTotalMb`。
 
 ---
 
@@ -249,3 +255,4 @@ main()
 | 2026-10-18 | 新增 `hasMetric(database, metricName)`（仅存在性判断，段级 metric 名集合缓存）；修复 `readBlockValueType` 探测长度不足导致 `listMetrics` 对同一 metric 逐块重探（HTTP 侧每个查询请求都会做存在性校验，实测把接口从 ~1.4 s 降到 ~0.15 s） | DeepSeek-V4.1-Flash |
 | 2026-10-18 | 周期性兜底刷盘改为切片执行：每 2 个指标让出一次事件循环、整个 sweep 只做一次段 fsync（实测 20k 点/s 下单次 sweep 阻塞由 ~210–275 ms 降至 ≤58 ms，残余抖动主要来自单批写入本身） | DeepSeek-V4.1-Flash |
 
+| 2026-10-18 | §7 `stats()` 新增 `cpu` / `memory` 分组（进程 CPU 占用率与内存占用率） | DeepSeek-V4.1-Flash |

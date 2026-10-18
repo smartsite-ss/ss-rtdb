@@ -250,6 +250,15 @@ describe('引擎: status 指标补全', () => {
       assert.equal(initial.query.count, 0);
       assert.equal(typeof initial.cache.heapUsedMb, 'number');
       assert.equal(typeof initial.cache.externalMb, 'number');
+      assert.equal(typeof initial.cpu.percent, 'number');
+      assert.ok(initial.cpu.percent >= 0);
+      assert.ok(initial.cpu.systemPercent >= 0);
+      assert.ok(initial.cpu.userMs >= 0 && initial.cpu.systemMs >= 0);
+      assert.ok(initial.memory.rssMb > 0);
+      assert.ok(initial.memory.heapTotalMb > 0);
+      assert.ok(initial.memory.systemTotalMb > 0);
+      assert.ok(initial.memory.systemPercent >= 0 && initial.memory.systemPercent <= 100);
+      assert.ok(initial.memory.heapPercent >= 0 && initial.memory.heapPercent <= 100);
       assert.ok(initial.gc.count >= 0 && initial.gc.maxMs >= 0);
 
       // 今日时间戳：日目录即「今天」，故 bytesToday 可被统计（固定 DAY_BASE 为过去日期，不适用）

@@ -6,7 +6,8 @@
 /**
  * `@ss/rtdb-client`: the Node.js SDK over the Form B HTTP protocol (aligned with "Detailed Design v2.2" §4)
  *
- * Scope: the six methods (`writeBatch` / `queryRange` / `queryLast` / `queryCount` / `queryAggregate` / `status`)
+ * Scope: the query/write surface (`writeBatch` / `queryRange` / `queryLast` / `queryLastBatch` / `queryCount` /
+ * `queryAggregate` / `status`)
  * and two built-in policies:
  *   - **Retry**: only for `429 E_RATE_LIMITED` and transport failures (network / timeout), with exponential
  *     backoff, at most `maxRetries` (default 3, capped at 3) extra attempts; business errors (`400` / `401` /
@@ -171,6 +172,32 @@ export interface StatusReport {
     /** Bytes occupied by today's day directories */
     bytesToday: number;
   };
+  cpu: {
+    /** Usage since the previous sample, percent of one core (may exceed 100) */
+    percent: number;
+    /** The same usage as a share of the whole machine ([0,100]) */
+    systemPercent: number;
+    /** Cumulative user CPU time since the engine was opened (ms) */
+    userMs: number;
+    /** Cumulative kernel CPU time since the engine was opened (ms) */
+    systemMs: number;
+  };
+  memory: {
+    /** Resident set size (MiB) */
+    rssMb: number;
+    /** Node heap total (MiB) */
+    heapTotalMb: number;
+    /** Node heap used (MiB) */
+    heapUsedMb: number;
+    /** Node external memory including ArrayBuffers (MiB) */
+    externalMb: number;
+    /** Host total memory (MiB) */
+    systemTotalMb: number;
+    /** RSS / host total memory ([0,100]) */
+    systemPercent: number;
+    /** Heap used / heap total ([0,100]) */
+    heapPercent: number;
+  };
   cache: {
     blocks: number;
     /** Decoded block cache hit rate this session ([0,1]) */
@@ -301,6 +328,54 @@ export class RtdbClient {
     return decodePoint(requireJsonPoint(record.point, 'query/last response point'));
   }
 
+  /**
+   * Latest point of **many** metrics in one round trip (`POST /api/v1/query/last-batch`).
+   *
+   * The returned `Map` keeps the response (= request) order so a caller can zip it with its own list; a metric with
+   * no point (or a name the server no longer knows) maps to `null`. At most 1000 names per call.
+   */
+  async queryLastBatch(
+    database: string,
+    metricNames: readonly string[],
+    options: LastQueryOptions = {},
+  ): Promise<Map<string, ClientPoint | null>> {
+    const databaseName = requireDatabaseName(database);
+    if (metricNames.length === 0) {
+      throw new RtdbClientError(
+        CLIENT_ERROR_CODE.InvalidArgument,
+        'queryLastBatch.metricNames must contain at least one metric name',
+      );
+    }
+    const requestBody: Record<string, unknown> = {
+      db: databaseName,
+      metricNames: metricNames.map((metricName) => requireMetricName(metricName)),
+    };
+    if (options.before !== undefined) requestBody.before = options.before;
+    const body = await this.request('POST', '/api/v1/query/last-batch', requestBody);
+    const record = requireObject(body, 'query/last-batch response body');
+    if (!Array.isArray(record.points)) {
+      throw new RtdbClientError(CLIENT_ERROR_CODE.Transport, 'query/last-batch response body.points must be an array');
+    }
+    const latest = new Map<string, ClientPoint | null>();
+    for (const entry of record.points) {
+      const item = requireObject(entry, 'query/last-batch response entry');
+      const metricName = item.metricName;
+      if (typeof metricName !== 'string') {
+        throw new RtdbClientError(
+          CLIENT_ERROR_CODE.Transport,
+          `query/last-batch response entry.metricName must be a string: ${String(metricName)}`,
+        );
+      }
+      latest.set(
+        metricName,
+        item.point === null || item.point === undefined
+          ? null
+          : decodePoint(requireJsonPoint(item.point, 'query/last-batch response point')),
+      );
+    }
+    return latest;
+  }
+
   async queryCount(database: string, metricName: string, options: CountQueryOptions): Promise<number> {
     const requestBody: Record<string, unknown> = {
       db: requireDatabaseName(database),
@@ -360,6 +435,8 @@ export class RtdbClient {
     const write = requireObject(record.write, 'status.write');
     const wal = requireObject(record.wal, 'status.wal');
     const segments = requireObject(record.segments, 'status.segments');
+    const cpu = requireObject(record.cpu, 'status.cpu');
+    const memory = requireObject(record.memory, 'status.memory');
     const cache = requireObject(record.cache, 'status.cache');
     const gc = requireObject(record.gc, 'status.gc');
     const query = requireObject(record.query, 'status.query');
@@ -382,6 +459,21 @@ export class RtdbClient {
       segments: {
         openFiles: readIntegerField(segments, 'openFiles'),
         bytesToday: readIntegerField(segments, 'bytesToday'),
+      },
+      cpu: {
+        percent: readNumberField(cpu, 'percent'),
+        systemPercent: readNumberField(cpu, 'systemPercent'),
+        userMs: readNumberField(cpu, 'userMs'),
+        systemMs: readNumberField(cpu, 'systemMs'),
+      },
+      memory: {
+        rssMb: readNumberField(memory, 'rssMb'),
+        heapTotalMb: readNumberField(memory, 'heapTotalMb'),
+        heapUsedMb: readNumberField(memory, 'heapUsedMb'),
+        externalMb: readNumberField(memory, 'externalMb'),
+        systemTotalMb: readNumberField(memory, 'systemTotalMb'),
+        systemPercent: readNumberField(memory, 'systemPercent'),
+        heapPercent: readNumberField(memory, 'heapPercent'),
       },
       cache: {
         blocks: readIntegerField(cache, 'blocks'),

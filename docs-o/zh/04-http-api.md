@@ -86,6 +86,7 @@
 | `POST` | `/api/v1/write?db=<db>` | write | 写入数据点（JSON 或行协议） |
 | `POST` | `/api/v1/query/range` | query | 时间区间内的原始点 |
 | `POST` | `/api/v1/query/last` | query | 某时刻或之前的最新点 |
+| `POST` | `/api/v1/query/last-batch` | query | 一次请求取回多指标（1…1000）的最新点 |
 | `POST` | `/api/v1/query/count` | query | 点数（估算或精确） |
 | `POST` | `/api/v1/query/aggregate` | query | 窗口聚合 |
 | `POST` | `/api/v1/query/at` | query | 任意时刻插值取值 |
@@ -247,6 +248,30 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 ```
 
 `before` 可选（默认取全局最新点）。这是“报表边界时刻或之前的值”这一需求所用的原语。
+
+### 4.2.1 `last-batch`
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/last-batch" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricNames":["station01.powerMeter.kwh","station01.temperature"]}'
+```
+
+```json
+{
+  "points": [
+    { "metricName": "station01.powerMeter.kwh", "point": { "t": 1760688001000, "v": 1030.25, "vt": 1 } },
+    { "metricName": "station01.temperature", "point": null }
+  ]
+}
+```
+
+与 `last` 相同的语义，但**一次请求取回多个指标**（1…1000 个名字；超出返回 `413 E_BATCH_TOO_LARGE`，
+空数组或非字符串返回 `400 E_INVALID_POINT`）。`points` 按请求顺序回显，调用方可以直接与自己的列表对齐。
+与 `last` 不同，**未知指标名不是错误**：返回 `"point": null` —— 看板总是按刚列出的指标批量取数，
+中途被删除的名字不该让另外 999 个一起失败。`before` 与 `last` 完全一致。
+
+凡是“按页取数”的场景都该用它：控制台的指标清单就用一次请求读取当前页所有行，而不是一行一次请求。
 
 ### 4.3 `count`
 
@@ -529,6 +554,9 @@ curl http://127.0.0.1:6180/metrics      # Prometheus 文本暴露格式
   "write":  { "pointsPerSec": 51230, "buffered": 0, "duplicates": 13, "tagsIgnored": 0 },
   "wal":    { "pendingBytes": 0, "outstandingBatches": 0, "pendingPoints": 0, "lastFsyncMs": 1760691600000 },
   "segments": { "openFiles": 3, "bytesToday": 610000000 },
+  "cpu":    { "percent": 12.5, "systemPercent": 1.56, "userMs": 15230, "systemMs": 3210 },
+  "memory": { "rssMb": 96.4, "heapTotalMb": 40.1, "heapUsedMb": 18.2, "externalMb": 6.1,
+              "systemTotalMb": 8192, "systemPercent": 1.18, "heapPercent": 45.39 },
   "cache":  { "blocks": 256, "blockHitRate": 0.93, "heapUsedMb": 180, "externalMb": 64 },
   "gc":     { "count": 12, "totalMs": 340, "maxMs": 41 },
   "query":  { "count": 5000, "p50Ms": 2, "p95Ms": 11, "p99Ms": 28, "maxMs": 96 },
@@ -540,7 +568,18 @@ curl http://127.0.0.1:6180/metrics      # Prometheus 文本暴露格式
 }
 ```
 
-`/metrics` 同步暴露 `rtdb_compat_influx_*` 计数族（仅在兼容层启用时出现）。
+`cpu` / `memory` 是**当前进程**的资源占用（不是全系统）：
+
+- `cpu.percent` 是两次 `stats()` 采样之间的占用率，分母是**单核**，多核满载可超过 100；
+  `cpu.systemPercent` 再除以主机逻辑核数，即“占整机 CPU 的百分比”（0–100）。
+- 采样窗口最小 1 秒：`/status` 与 `/metrics` 交错调用时，短于 1 秒的调用沿用上一次百分比，
+  避免窗口被压缩成毫秒级噪声。`cpu.userMs` / `cpu.systemMs` 是自 `open()` 起的累计 CPU 时间。
+- `memory.rssMb` 是操作系统实际持有的常驻内存；`memory.systemPercent` = RSS / 主机总内存；
+  `memory.heapPercent` = `heapUsedMb` / `heapTotalMb`；`systemTotalMb` 给出百分比的分母。
+  `cache.heapUsedMb` / `cache.externalMb` 是同一快照里的堆/外部内存，保留以兼容旧客户端。
+
+`/metrics` 同步暴露 `rtdb_process_cpu_*`、`rtdb_process_memory_*`、`rtdb_process_resident_memory_bytes`
+等进程资源族，以及 `rtdb_compat_influx_*` 计数族（后者仅在兼容层启用时出现）。
 
 ### 8.1 内置接口参考（`/api/docs`）
 
@@ -710,4 +749,6 @@ curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlen
 | 2026-10-18 | §8.1 改为按**两大 API 族**（ss-rtdb 原生 / InfluxDB 兼容）分类展示：独立区块、独立侧栏分组与计数；筛选同时匹配族名/组名并覆盖 `501` 表；OpenAPI 操作打上 `[族, 组]` 标签并附 `x-family` | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §3.3 明确 `duplicates` 只统计**批内**重复（跨请求重试在块合并阶段静默去重，判断幂等需看精确 `count`）；§10.5 补充 InfluxQL **可见性边界**（仅可见折叠形态指标，原生指标计入 `unmappedMetrics`） | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §6 备份新增**按天时间段**（`startDay`/`endDay`）：响应增加 `partial`/`range`/`days`，范围备份写 `manifest.json`、还原时按天合并（范围外数据不删）；端点索引行同步 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 新增 §4.2.1 **`POST /api/v1/query/last-batch`**：一次请求取 1…1000 个指标，响应按请求顺序回显，未知指标返回 `"point": null`；空数组/非字符串 `400 E_INVALID_POINT`，超过 1000 个返回 `413 E_BATCH_TOO_LARGE` | Step-5-Preview |
 
+| 2026-10-18 | §8 `/api/v1/status` 新增 `cpu` / `memory` 段（进程 CPU 占用率、常驻内存、内存与堆占用率），`/metrics` 新增 `rtdb_process_*` 进程资源指标族 | DeepSeek-V4.1-Flash |

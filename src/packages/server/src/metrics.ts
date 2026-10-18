@@ -103,6 +103,35 @@ export function encodePrometheusMetrics(input: PrometheusMetricsInput): string {
     { value: stats.segments.bytesToday },
   ]);
 
+  appendFamily(lines, 'rtdb_process_cpu_percent', 'Process CPU usage since the previous sample, percent of one core.', 'gauge', [
+    { value: stats.cpu.percent },
+  ]);
+  appendFamily(
+    lines,
+    'rtdb_process_cpu_system_percent',
+    'Process CPU usage since the previous sample, percent of the whole machine ([0,100]).',
+    'gauge',
+    [{ value: stats.cpu.systemPercent }],
+  );
+  appendFamily(lines, 'rtdb_process_cpu_user_seconds_total', 'Cumulative process user CPU time since the engine was opened.', 'counter', [
+    { value: stats.cpu.userMs / MILLISECONDS_PER_SECOND },
+  ]);
+  appendFamily(lines, 'rtdb_process_cpu_system_seconds_total', 'Cumulative process kernel CPU time since the engine was opened.', 'counter', [
+    { value: stats.cpu.systemMs / MILLISECONDS_PER_SECOND },
+  ]);
+  appendFamily(lines, 'rtdb_process_resident_memory_bytes', 'Resident set size (bytes).', 'gauge', [
+    { value: stats.memory.rssMb * BYTES_PER_MEBIBYTE },
+  ]);
+  appendFamily(lines, 'rtdb_process_memory_usage_percent', 'RSS as a percentage of host total memory ([0,100]).', 'gauge', [
+    { value: stats.memory.systemPercent },
+  ]);
+  appendFamily(lines, 'rtdb_process_heap_total_bytes', 'Node heap total (bytes).', 'gauge', [
+    { value: stats.memory.heapTotalMb * BYTES_PER_MEBIBYTE },
+  ]);
+  appendFamily(lines, 'rtdb_process_heap_usage_percent', 'Heap used / heap total ([0,100]).', 'gauge', [
+    { value: stats.memory.heapPercent },
+  ]);
+
   appendFamily(lines, 'rtdb_cache_blocks', 'Decoded block cache entries.', 'gauge', [{ value: stats.cache.blocks }]);
   appendFamily(lines, 'rtdb_cache_block_hit_rate', 'Decoded block cache hit rate this session ([0,1]).', 'gauge', [
     { value: stats.cache.blockHitRate },

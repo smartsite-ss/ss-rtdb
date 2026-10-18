@@ -9,10 +9,13 @@
 /**
  * Modal "query one metric" dialog, opened by the `Select` button of a metric-inventory row.
  *
- * The time range defaults to **today** (local midnight → now), because checking what a live tag recorded today
- * is the common case; the query itself is the same `POST /api/v1/query/range` call the preview tab issues, and
- * the returned points can be exported straight to CSV (raw ms epoch + local time with offset, one row per
- * point, exactly what was queried).
+ * The dialog **opens with the query already run** over **today** (local midnight → now), so the common "what did
+ * this tag record today" question needs no extra click; the query itself is the same
+ * `POST /api/v1/query/range` call the preview tab issues.
+ *
+ * The result is a **paged list**: 20 rows on open, with a page bar (50 / 100 / 200 rows available), because a day
+ * of one-second samples is 86 400 points and rendering them all would freeze the dialog. The **CSV export always
+ * contains every returned point**, independent of the page size.
  *
  * The dialog owns its query state only: the inventory keeps its own selection highlight, and every open starts
  * from today again, so the last range of one metric never leaks into the next one.
@@ -42,8 +45,9 @@ const props = defineProps<{
 const emit = defineEmits<{ close: [] }>();
 
 const DEFAULT_LIMIT = 2_000;
-/** Rows rendered in the preview table; the CSV export always contains every returned point */
-const PREVIEW_ROW_LIMIT = 500;
+/** Point-list page sizes: the dialog opens on a 20-row list; the CSV export always carries every point */
+const PAGE_SIZES = [20, 50, 100, 200] as const;
+const DEFAULT_PAGE_SIZE = 20;
 
 const { busy, errorMessage, run } = useAsyncAction();
 
@@ -54,6 +58,26 @@ const limitInput = ref(String(DEFAULT_LIMIT));
 const series = ref<RtdbJsonSeries | null>(null);
 /** Elapsed wall time of the last successful query (ms), shown in the summary line */
 const queryElapsedMs = ref<number | null>(null);
+/** Point-list page (1-based) and its size; every query starts again on page 1 */
+const currentPage = ref(1);
+const pageSize = ref<number>(DEFAULT_PAGE_SIZE);
+const pageCount = computed(() => Math.max(1, Math.ceil((series.value?.points.length ?? 0) / pageSize.value)));
+const pagePoints = computed<RtdbJsonPoint[]>(() => {
+  const offset = (currentPage.value - 1) * pageSize.value;
+  return series.value?.points.slice(offset, offset + pageSize.value) ?? [];
+});
+/** 1-based range of the rendered rows for the "showing a–b of n" note (`0–0` when empty) */
+const pageFirstRow = computed(() => (pagePoints.value.length === 0 ? 0 : (currentPage.value - 1) * pageSize.value + 1));
+const pageLastRow = computed(() => (currentPage.value - 1) * pageSize.value + pagePoints.value.length);
+
+function goToPage(page: number): void {
+  currentPage.value = Math.min(Math.max(1, Math.trunc(page)), pageCount.value);
+}
+
+/** Page-size change: back to page 1 (the visible slice changes completely) */
+function onPageSizeChange(): void {
+  currentPage.value = 1;
+}
 
 function resetRange(): void {
   const now = new Date();
@@ -63,11 +87,6 @@ function resetRange(): void {
 }
 
 resetRange();
-
-const previewRows = computed<RtdbJsonPoint[]>(() => series.value?.points.slice(0, PREVIEW_ROW_LIMIT) ?? []);
-
-/** Points beyond {@link PREVIEW_ROW_LIMIT}: exported but not rendered */
-const hiddenRowCount = computed(() => Math.max(0, (series.value?.points.length ?? 0) - PREVIEW_ROW_LIMIT));
 
 async function runQuery(): Promise<void> {
   const start = fromDateTimeLocalValue(startInput.value);
@@ -84,6 +103,8 @@ async function runQuery(): Promise<void> {
   if (result === undefined) return;
   queryElapsedMs.value = performance.now() - startedAt;
   series.value = result;
+  // A new result set always starts on the first page.
+  currentPage.value = 1;
 }
 
 /**
@@ -122,6 +143,8 @@ function onKeydown(event: KeyboardEvent): void {
 
 onMounted(() => {
   document.addEventListener('keydown', onKeydown);
+  // Open with today's list already loaded: the dialog exists to answer "what did this tag record today".
+  void runQuery();
 });
 
 onUnmounted(() => {
@@ -182,7 +205,7 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="point in previewRows" :key="point.t">
+                <tr v-for="point in pagePoints" :key="point.t">
                   <td class="mono">{{ formatDateTime(point.t) }}</td>
                   <td class="mono">{{ point.t }}</td>
                   <td class="mono">{{ formatPointValue(point.v) }}</td>
@@ -192,11 +215,56 @@ onUnmounted(() => {
               </tbody>
             </table>
           </div>
-          <p v-if="hiddenRowCount > 0" class="toolbar-note hint">
-            {{ t('metrics.dialog.truncated', { shown: PREVIEW_ROW_LIMIT, total: series.points.length }) }}
-          </p>
+
+          <div class="toolbar pagination">
+            <div class="pagination-nav">
+              <button class="small" :title="t('metrics.pageFirst')" :disabled="currentPage <= 1" @click="goToPage(1)">
+                «
+              </button>
+              <button
+                class="small"
+                :title="t('metrics.pagePrev')"
+                :disabled="currentPage <= 1"
+                @click="goToPage(currentPage - 1)"
+              >
+                {{ t('metrics.pagePrev') }}
+              </button>
+              <span class="page-status">{{ t('metrics.pageStatus', { page: currentPage, pages: pageCount }) }}</span>
+              <button
+                class="small"
+                :title="t('metrics.pageNext')"
+                :disabled="currentPage >= pageCount"
+                @click="goToPage(currentPage + 1)"
+              >
+                {{ t('metrics.pageNext') }}
+              </button>
+              <button
+                class="small"
+                :title="t('metrics.pageLast')"
+                :disabled="currentPage >= pageCount"
+                @click="goToPage(pageCount)"
+              >
+                »
+              </button>
+            </div>
+            <div class="pagination-meta">
+              <span class="toolbar-note page-range">
+                {{ t('metrics.pageRange', { from: pageFirstRow, to: pageLastRow, total: series.points.length }) }}
+              </span>
+              <label class="page-size">
+                <span class="page-size-label">{{ t('metrics.pageSize') }}</span>
+                <select v-model.number="pageSize" @change="onPageSizeChange">
+                  <option v-for="size in PAGE_SIZES" :key="size" :value="size">{{ size }}</option>
+                </select>
+              </label>
+              <span class="toolbar-note hint">
+                {{ t('metrics.dialog.exportHint', { total: series.points.length }) }}
+              </span>
+            </div>
+          </div>
         </template>
       </template>
+      <p v-else-if="busy" class="empty-hint">{{ t('metrics.dialog.loading') }}</p>
       <p v-else class="empty-hint">{{ t('metrics.dialog.prompt') }}</p>
     </div>
   </div>
@@ -237,7 +305,7 @@ onUnmounted(() => {
 }
 
 .dialog-table {
-  max-height: 420px;
+  max-height: 60vh;
   overflow-y: auto;
 }
 </style>

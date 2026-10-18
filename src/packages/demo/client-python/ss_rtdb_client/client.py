@@ -5,8 +5,8 @@
 
 """``ss-rtdb-client``: the Python SDK over the Form B HTTP protocol.
 
-Scope: the six methods (``write_batch`` / ``query_range`` / ``query_last`` / ``query_count`` /
-``query_aggregate`` / ``status``) plus one deliberately added helper
+Scope: the query/write surface (``write_batch`` / ``query_range`` / ``query_last`` / ``query_last_batch`` /
+``query_count`` / ``query_aggregate`` / ``status``) plus one deliberately added helper
 (``write_line_protocol``, see its docstring), and two built-in policies:
 
     - **Retry**: only for ``429 E_RATE_LIMITED`` and transport failures (network / timeout),
@@ -232,6 +232,49 @@ class RtdbClient:
         if point is None:
             return None
         return decode_point(point)
+
+    def query_last_batch(
+        self,
+        database: str,
+        metric_names: Sequence[str],
+        before: Optional[int] = None,
+    ) -> Dict[str, Optional[Point]]:
+        """Latest point of many metrics in one round trip (``POST /api/v1/query/last-batch``).
+
+        The returned dict keeps the response (= request) order; a metric without a point (or a name the
+        server no longer knows) maps to ``None``. At most 1000 names per call.
+        """
+        if len(metric_names) == 0:
+            raise RtdbClientError(
+                CLIENT_ERROR_CODE["InvalidArgument"],
+                "query_last_batch metric_names must contain at least one metric name",
+            )
+        body: Dict[str, Any] = {
+            "db": _require_database_name(database),
+            "metricNames": [_require_metric_name(name) for name in metric_names],
+        }
+        if before is not None:
+            body["before"] = before
+        response = self._request("POST", "/api/v1/query/last-batch", body)
+        record = _require_object(response, "query/last-batch response body")
+        entries = record.get("points")
+        if not isinstance(entries, list):
+            raise RtdbClientError(
+                CLIENT_ERROR_CODE["Transport"],
+                "query/last-batch response body.points must be a list",
+            )
+        latest: Dict[str, Optional[Point]] = {}
+        for entry in entries:
+            item = _require_object(entry, "query/last-batch response entry")
+            metric_name = item.get("metricName")
+            if not isinstance(metric_name, str):
+                raise RtdbClientError(
+                    CLIENT_ERROR_CODE["Transport"],
+                    "query/last-batch response entry.metricName must be a string",
+                )
+            point = item.get("point")
+            latest[metric_name] = None if point is None else decode_point(point)
+        return latest
 
     def query_count(
         self,

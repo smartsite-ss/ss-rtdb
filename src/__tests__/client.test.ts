@@ -210,6 +210,30 @@ describe('client: 六方法与 i64 vt 双向编解码', () => {
     }
   });
 
+  it('queryLastBatch 一次请求取回多指标最新点（顺序不变、未知指标为 null）', async () => {
+    const { server, baseUrl } = await startTestServer();
+    try {
+      const client = new RtdbClient({ baseUrl });
+      await client.writeBatch('query', [
+        { metricName: 'flow', timestamp: BASE, value: 10 },
+        { metricName: 'flow', timestamp: BASE + 1000, value: 20 },
+        { metricName: 'temp', timestamp: BASE + 500, value: 36.5 },
+      ]);
+
+      const latest = await client.queryLastBatch('query', ['flow', 'temp', 'gone']);
+      assert.deepEqual([...latest.keys()], ['flow', 'temp', 'gone']);
+      assert.equal(latest.get('flow')?.timestamp, BASE + 1000);
+      assert.equal(latest.get('flow')?.value, 20);
+      assert.equal(latest.get('temp')?.value, 36.5);
+      assert.equal(latest.get('gone'), null);
+
+      const bounded = await client.queryLastBatch('query', ['flow'], { before: BASE + 500 });
+      assert.equal(bounded.get('flow')?.value, 10);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('queryLast / queryCount / queryAggregate / status 与真实服务口径一致', async () => {
     const { server, baseUrl } = await startTestServer();
     try {
@@ -264,6 +288,11 @@ describe('client: 六方法与 i64 vt 双向编解码', () => {
       assert.ok(status.segments.bytesToday >= 0);
       assert.ok(status.cache.blockHitRate >= 0 && status.cache.blockHitRate <= 1);
       assert.ok(status.cache.heapUsedMb > 0);
+      assert.ok(status.cpu.percent >= 0);
+      assert.ok(status.cpu.systemPercent >= 0);
+      assert.ok(status.memory.rssMb > 0);
+      assert.ok(status.memory.systemTotalMb > 0);
+      assert.ok(status.memory.heapPercent >= 0 && status.memory.heapPercent <= 100);
       assert.equal(typeof status.gc.count, 'number');
       assert.ok(status.query.count >= 0);
     } finally {

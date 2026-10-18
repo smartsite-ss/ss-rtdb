@@ -101,6 +101,13 @@ for (const at of atPoints) console.log(at.timestamp, at.value, at.state);
 // last — latest point at or before `before` (omit for the latest overall)
 const last = await client.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
 
+// last-batch — newest point of many metrics in one round trip; the Map keeps the request order and a
+// metric without a point (or an unknown name) maps to null
+const latest = await client.queryLastBatch('plant_a', [
+  'station01.powerMeter.kwh',
+  'station01.temperature',
+]);
+
 // count — index estimate by default, exact when requested
 const count = await client.queryCount('plant_a', 'station01.powerMeter.kwh',
   { start: startMs, end: endMs, exact: false });
@@ -123,6 +130,10 @@ await client.backup('plant_a', '/mnt/backups/2026-10-17');   // server-side copy
 // Optional day range (inclusive; omit for a whole-database backup). Returns partial / range / days
 await client.backup('plant_a', '/mnt/backups/2026-09', { startDay: '2026-09-01', endDay: '2026-09-30' });
 ```
+
+Besides the write / WAL / cache / query counters, `StatusReport` carries `cpu` (`percent` of one core,
+`systemPercent` machine share, cumulative `userMs` / `systemMs`) and `memory` (`rssMb`, `heapTotalMb`,
+`heapUsedMb`, `externalMb`, `systemTotalMb`, `systemPercent`, `heapPercent`).
 
 ### 1.6 Users and tokens (admin)
 
@@ -228,6 +239,9 @@ for at in at_points:
 
 last = client.query_last("plant_a", "station01.powerMeter.kwh", before=end_ms)
 
+latest = client.query_last_batch("plant_a",
+                                  ["station01.powerMeter.kwh", "station01.temperature"])
+
 count = client.query_count("plant_a", "station01.powerMeter.kwh",
                            start=start_ms, end=end_ms, exact=False)
 
@@ -291,3 +305,5 @@ Same retry policy as the Node SDK: only `429` and transport failures are retried
 | 2026-10-17 | Both SDKs' `queryRange`/`query_range` results gain the optional `received` field (server receive-time window, block/batch granularity); Python `Series.received` in sync | GLM-5.3-Flash |
 | 2026-10-17 | Both SDKs add `queryAt`/`query_at` (point-in-time interpolated lookup, `step`/`linear`, `state` provenance markers), examples updated | GLM-5.3-Flash |
 | 2026-10-18 | Node SDK `backup` gains the optional day range `{ startDay, endDay }` and returns `partial` / `range` / `days`; example updated | DeepSeek-V4.1-Flash |
+| 2026-10-18 | Both SDKs gain the batch latest-point call (`queryLastBatch` → `Map<string, ClientPoint \\| null>` / `query_last_batch` → `Dict[str, Optional[Point]]`) over `POST /api/v1/query/last-batch`, keeping request order and mapping unknown metrics to `null` | Step-5-Preview |
+| 2026-10-18 | §1.5 documents the new `cpu` / `memory` fields of `StatusReport` | DeepSeek-V4.1-Flash |

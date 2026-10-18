@@ -34,6 +34,11 @@ const stats = computed<StatEntry[]>(() => {
   if (report === null) return [];
   return [
     { label: t('status.label.uptime'), value: formatDuration(report.uptimeMs) },
+    { label: t('status.label.cpuUsage'), value: formatNumber(report.cpu.percent), unit: t('status.unit.percent') },
+    { label: t('status.label.machineCpuShare'), value: formatNumber(report.cpu.systemPercent), unit: t('status.unit.percent') },
+    { label: t('status.label.rssMemory'), value: formatNumber(report.memory.rssMb), unit: t('status.unit.mib') },
+    { label: t('status.label.memoryUsage'), value: formatNumber(report.memory.systemPercent), unit: t('status.unit.percent') },
+    { label: t('status.label.heapUsage'), value: formatNumber(report.memory.heapPercent), unit: t('status.unit.percent') },
     { label: t('status.label.databases'), value: formatNumber(report.databases) },
     { label: t('status.label.metrics'), value: formatNumber(report.metrics) },
     {

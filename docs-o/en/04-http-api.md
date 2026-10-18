@@ -87,6 +87,7 @@ Every non-2xx response is JSON:
 | `POST` | `/api/v1/write?db=<db>` | write | Write points (JSON or Line Protocol) |
 | `POST` | `/api/v1/query/range` | query | Raw points in a time range |
 | `POST` | `/api/v1/query/last` | query | Latest point at or before a timestamp |
+| `POST` | `/api/v1/query/last-batch` | query | Latest point of many metrics (1…1000) in one round trip |
 | `POST` | `/api/v1/query/count` | query | Point count (estimated or exact) |
 | `POST` | `/api/v1/query/aggregate` | query | Windowed aggregation |
 | `POST` | `/api/v1/query/at` | query | Point-in-time interpolated lookup |
@@ -254,6 +255,32 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 
 `before` is optional (default = latest overall). This is the primitive for "value at or before a
 report boundary".
+
+### 4.2.1 `last-batch`
+
+```bash
+curl -X POST "http://127.0.0.1:6180/api/v1/query/last-batch" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"db":"plant_a","metricNames":["station01.powerMeter.kwh","station01.temperature"]}'
+```
+
+```json
+{
+  "points": [
+    { "metricName": "station01.powerMeter.kwh", "point": { "t": 1760688001000, "v": 1030.25, "vt": 1 } },
+    { "metricName": "station01.temperature", "point": null }
+  ]
+}
+```
+
+Same lookup as `last`, for **many metrics in one round trip** (1…1000 names; more is `413
+E_BATCH_TOO_LARGE`, an empty or non-string list is `400 E_INVALID_POINT`). `points` echoes the request
+order, so a caller can zip it with its own list. Unlike `last`, an **unknown metric name is not an
+error**: it comes back as `"point": null` — a dashboard page asks for the metrics it just listed, and a
+name deleted in between must not fail the other 999 entries. `before` behaves exactly as in `last`.
+
+Use it for anything page-shaped: the console's inventory reads every visible row in one request instead
+of one request per row.
 
 ### 4.3 `count`
 
@@ -552,6 +579,9 @@ curl http://127.0.0.1:6180/metrics      # Prometheus text exposition
   "write":  { "pointsPerSec": 51230, "buffered": 0, "duplicates": 13, "tagsIgnored": 0 },
   "wal":    { "pendingBytes": 0, "outstandingBatches": 0, "pendingPoints": 0, "lastFsyncMs": 1760691600000 },
   "segments": { "openFiles": 3, "bytesToday": 610000000 },
+  "cpu":    { "percent": 12.5, "systemPercent": 1.56, "userMs": 15230, "systemMs": 3210 },
+  "memory": { "rssMb": 96.4, "heapTotalMb": 40.1, "heapUsedMb": 18.2, "externalMb": 6.1,
+              "systemTotalMb": 8192, "systemPercent": 1.18, "heapPercent": 45.39 },
   "cache":  { "blocks": 256, "blockHitRate": 0.93, "heapUsedMb": 180, "externalMb": 64 },
   "gc":     { "count": 12, "totalMs": 340, "maxMs": 41 },
   "query":  { "count": 5000, "p50Ms": 2, "p95Ms": 11, "p99Ms": 28, "maxMs": 96 },
@@ -563,7 +593,21 @@ curl http://127.0.0.1:6180/metrics      # Prometheus text exposition
 }
 ```
 
-`/metrics` exposes the matching `rtdb_compat_influx_*` families (only while the layer is enabled).
+`cpu` / `memory` describe **this process** (not the whole machine):
+
+- `cpu.percent` is the usage between two `stats()` samples, expressed in percent of **one core**, so a
+  multi-core saturation can exceed 100. `cpu.systemPercent` divides it by the host's logical CPU count,
+  i.e. the share of the whole machine (0–100).
+- The sampling window has a 1-second floor: when `/status` and `/metrics` interleave, calls closer than
+  that reuse the previous percentage so the window cannot collapse into millisecond noise.
+  `cpu.userMs` / `cpu.systemMs` are cumulative CPU time since `open()`.
+- `memory.rssMb` is the resident set the OS actually holds; `memory.systemPercent` = RSS / host total memory;
+  `memory.heapPercent` = `heapUsedMb` / `heapTotalMb`; `systemTotalMb` is the denominator of the percentage.
+  `cache.heapUsedMb` / `cache.externalMb` are the same-snapshot heap/external values kept for older clients.
+
+`/metrics` exposes the matching `rtdb_process_cpu_*`, `rtdb_process_memory_*` and
+`rtdb_process_resident_memory_bytes` process families, plus the `rtdb_compat_influx_*` counters (the latter
+only while the compatibility layer is enabled).
 
 ### 8.1 Built-in API reference (`/api/docs`)
 
@@ -746,3 +790,5 @@ curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlen
 | 2026-10-18 | §8.1 now describes the reference as **two API families** (ss-rtdb native vs InfluxDB compatibility): separate page sections, sidebar groups and counts; the search also matches family/group names and the `501` table; OpenAPI operations are tagged `[family, group]` with `x-family` | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §3.3 clarifies that `duplicates` only counts **in-batch** duplicates (cross-request retries are de-duplicated silently during block merge, so idempotence must be verified via exact `count`); §10.5 adds the InfluxQL **visibility boundary** (only folded metric names are visible; native metrics are reported as `unmappedMetrics`) | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §6 backup gains a **day range** (`startDay`/`endDay`): the response adds `partial`/`range`/`days`, a range backup writes `manifest.json` and restores by merging those days (data outside the range is never deleted); endpoint index row updated | DeepSeek-V4.1-Flash |
+| 2026-10-18 | New §4.2.1 **`POST /api/v1/query/last-batch`**: 1…1000 metric names in one round trip, response echoes the request order, unknown names yield `"point": null`; empty/non-string list `400 E_INVALID_POINT`, over 1000 names `413 E_BATCH_TOO_LARGE` | Step-5-Preview |
+| 2026-10-18 | §8 `/api/v1/status` gains `cpu` / `memory` (process CPU usage, resident memory, memory and heap usage); `/metrics` gains the `rtdb_process_*` families | DeepSeek-V4.1-Flash |

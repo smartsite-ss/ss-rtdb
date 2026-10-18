@@ -45,7 +45,6 @@ import {
   fromDateTimeLocalValue,
   toDateTimeLocalValue,
 } from '../format';
-import { mapWithLimit } from '../concurrency';
 import { t } from '../i18n';
 import { downloadCsv } from '../csv-download';
 import { downloadXlsWorkbook } from '../xls-download';
@@ -61,12 +60,12 @@ const GAP_FACTOR = 3;
 /** Server-side cap of one `query/at` call; a window that would exceed it is rejected instead of clamped */
 const MAX_QUERY_AT_TIMESTAMPS = 10_000;
 /**
- * The live-value refresh issues one `query/last` per metric, and on a busy database one such query can take
- * ~1.5 s (block lookup on a 200 MB segment). The limits below deliberately leave most of the browser's 6
- * connections free for real queries: never occupy the pool with a background nicety.
+ * Inventory page sizes. A 10 000-metric database must neither render nor query every row at once: the table
+ * shows one page, and the live-value refresh asks for exactly that page in a **single** `query/last-batch`
+ * request (the previous implementation issued one `query/last` per row, capped at 50 rows).
  */
-const LIVE_METRIC_LIMIT = 50;
-const LIVE_CONCURRENCY = 3;
+const PAGE_SIZES = [50, 100, 200, 500] as const;
+const DEFAULT_PAGE_SIZE = 100;
 
 const AGGREGATE_TYPES: RtdbAggregateType[] = Object.values(RTDB_AGGREGATE_TYPE);
 const INTERPOLATION_MODES: RtdbInterpolationMode[] = Object.values(RTDB_INTERPOLATION_MODE);
@@ -118,12 +117,21 @@ const latestByMetric = ref<Record<string, RtdbJsonPoint | null>>({});
 const latestLoading = ref(false);
 /** Wall time of the last live-value refresh (`null` before the first one) */
 const latestLoadedAt = ref<number | null>(null);
-/** Progress of the running refresh (`done / total`), drives the button label */
-const latestProgress = ref({ done: 0, total: 0 });
-/** `true` when the database has more metrics than {@link LIVE_METRIC_LIMIT}, so only the first page is live */
-const latestCapped = computed(() => metrics.value.length > LIVE_METRIC_LIMIT);
 /** Monotonic refresh id: a newer refresh (or a database switch) invalidates the in-flight one */
 let latestRequestId = 0;
+
+/** Current inventory page (1-based) and its size; the table renders only this slice */
+const currentPage = ref(1);
+const pageSize = ref<number>(DEFAULT_PAGE_SIZE);
+const pageCount = computed(() => Math.max(1, Math.ceil(metrics.value.length / pageSize.value)));
+/** Rows of the current page — also the exact set the live-value refresh asks for */
+const pageMetrics = computed(() => {
+  const offset = (currentPage.value - 1) * pageSize.value;
+  return metrics.value.slice(offset, offset + pageSize.value);
+});
+/** 1-based range of the visible rows for the "showing a–b of n" note (`0–0` when the list is empty) */
+const pageFirstRow = computed(() => (pageMetrics.value.length === 0 ? 0 : (currentPage.value - 1) * pageSize.value + 1));
+const pageLastRow = computed(() => (currentPage.value - 1) * pageSize.value + pageMetrics.value.length);
 
 const hasPreview = computed(
   () => rawSeries.value !== null || aggregateWindows.value !== null || atPoints.value !== null,
@@ -250,42 +258,48 @@ function liveUpdatedAt(metricName: string): string {
 }
 
 /**
- * Load the newest point of every listed metric (`POST /api/v1/query/last`, one request per metric).
+ * Load the newest point of the **visible page** in one `POST /api/v1/query/last-batch` call.
  *
- * Bounded on purpose: at most {@link LIVE_METRIC_LIMIT} metrics and {@link LIVE_CONCURRENCY} requests in flight, so a
- * database with thousands of metrics cannot flood the console. A failed single metric simply shows `—`; the rows
- * stay usable and the next refresh retries it.
+ * Batching is what makes the inventory usable at 10 000 metrics: the request count follows the page, not the
+ * metric count (previously one `query/last` per row, capped at 50 rows). Values of pages refreshed earlier are
+ * kept, so scrolling back does not blank the columns; a metric the server no longer knows comes back as `null`
+ * and renders as `—`.
  */
 async function refreshLiveValues(): Promise<void> {
   const database = selectedDatabase.value;
-  if (database.length === 0 || metrics.value.length === 0) {
-    latestByMetric.value = {};
+  const targets = pageMetrics.value;
+  if (database.length === 0 || targets.length === 0) {
     latestLoadedAt.value = null;
     return;
   }
   const requestId = (latestRequestId += 1);
-  const targets = metrics.value.slice(0, LIVE_METRIC_LIMIT);
-  const snapshot: Record<string, RtdbJsonPoint | null> = {};
-  latestProgress.value = { done: 0, total: targets.length };
   latestLoading.value = true;
-  try {
-    await mapWithLimit(targets, LIVE_CONCURRENCY, async (metric) => {
-      try {
-        snapshot[metric.metricName] = await props.client.queryLast(database, metric.metricName);
-      } catch {
-        snapshot[metric.metricName] = null;
-      }
-      if (requestId === latestRequestId) {
-        latestProgress.value = { done: latestProgress.value.done + 1, total: targets.length };
-      }
-    });
-    // Switching database / reloading while a refresh is in flight: drop the stale snapshot.
-    if (requestId !== latestRequestId) return;
-    latestByMetric.value = snapshot;
-    latestLoadedAt.value = Date.now();
-  } finally {
-    if (requestId === latestRequestId) latestLoading.value = false;
-  }
+  const snapshot = await run(() =>
+    props.client.queryLastBatch(
+      database,
+      targets.map((metric) => metric.metricName),
+    ),
+  );
+  if (requestId !== latestRequestId) return;
+  latestLoading.value = false;
+  if (snapshot === undefined) return;
+  latestByMetric.value = { ...latestByMetric.value, ...snapshot };
+  latestLoadedAt.value = Date.now();
+}
+
+/** Jump to a page; when live values were already loaded, refresh the page that just became visible */
+async function goToPage(page: number): Promise<void> {
+  const target = Math.min(Math.max(1, Math.trunc(page)), pageCount.value);
+  if (target === currentPage.value) return;
+  currentPage.value = target;
+  // The user opted into live values: keep the newly visible rows filled instead of showing stale blanks.
+  if (latestLoadedAt.value !== null) await refreshLiveValues();
+}
+
+/** Page-size change: back to page 1 (the visible slice changes completely) and refresh if values were loaded */
+async function onPageSizeChange(): Promise<void> {
+  currentPage.value = 1;
+  if (latestLoadedAt.value !== null) await refreshLiveValues();
 }
 
 async function loadDatabases(): Promise<void> {
@@ -320,15 +334,18 @@ async function loadMetrics(): Promise<void> {
   latestLoadedAt.value = null;
   if (database.length === 0) {
     metrics.value = [];
+    currentPage.value = 1;
     selectedMetric.value = '';
     return;
   }
   const list = await run(() => props.client.listMetrics(database));
   if (list === undefined) return;
   metrics.value = list;
+  // A reload starts from the first page: the old page number may no longer exist.
+  currentPage.value = 1;
   selectedMetric.value = list.length > 0 ? list[0].metricName : '';
-  // Live values are NOT loaded automatically: one `query/last` per metric can take ~1.5 s on a busy database,
-  // and occupying the browser's connections in the background is exactly what makes real queries feel slow.
+  // Live values are NOT loaded automatically: the user opts in per page, so a reload never hides the
+  // inventory latency behind a background request they did not ask for.
 }
 
 /**
@@ -550,7 +567,11 @@ watch(
       <div class="card-title">
         <span>{{ activeTab === 'inventory' ? t('metrics.inventoryTitle') : t('metrics.previewTitle') }}</span>
         <span class="card-title-note">
-          {{ activeTab === 'inventory' ? 'GET /api/v1/metrics/{database}' : PREVIEW_ENDPOINTS }}
+          {{
+            activeTab === 'inventory'
+              ? 'GET /api/v1/metrics/{database} · POST /api/v1/query/last-batch'
+              : PREVIEW_ENDPOINTS
+          }}
         </span>
       </div>
 
@@ -583,14 +604,7 @@ watch(
           {{ t('metrics.exportCsv') }}
         </button>
         <button :disabled="busy || latestLoading || metrics.length === 0" @click="refreshLiveValues">
-          {{
-            latestLoading
-              ? t('metrics.refreshingProgress', {
-                  done: latestProgress.done,
-                  total: latestProgress.total,
-                })
-              : t('metrics.refreshLive')
-          }}
+          {{ latestLoading ? t('metrics.refreshing') : t('metrics.refreshLive') }}
         </button>
         <span class="toolbar-note">{{ t('metrics.count', { count: metrics.length }) }}</span>
         <span v-if="latestLoadedAt !== null" class="toolbar-note">
@@ -600,10 +614,6 @@ watch(
 
       <p v-if="!latestLoading && latestLoadedAt === null && metrics.length > 0" class="toolbar-note hint">
         {{ t('metrics.liveHint') }}
-      </p>
-
-      <p v-if="latestCapped" class="toolbar-note hint">
-        {{ t('metrics.liveCapped', { count: LIVE_METRIC_LIMIT }) }}
       </p>
 
       <p v-if="errorMessage.length > 0" class="alert error">{{ errorMessage }}</p>
@@ -623,7 +633,7 @@ watch(
           </thead>
           <tbody>
             <tr
-              v-for="metric in metrics"
+              v-for="metric in pageMetrics"
               :key="metric.metricName"
               :class="{ selected: metric.metricName === selectedMetric }"
             >
@@ -643,6 +653,50 @@ watch(
         </table>
       </div>
       <p v-else class="empty-hint">{{ t('metrics.empty') }}</p>
+
+      <div v-if="metrics.length > 0" class="toolbar pagination">
+        <div class="pagination-nav">
+          <button class="small" :title="t('metrics.pageFirst')" :disabled="busy || currentPage <= 1" @click="goToPage(1)">
+            «
+          </button>
+          <button
+            class="small"
+            :title="t('metrics.pagePrev')"
+            :disabled="busy || currentPage <= 1"
+            @click="goToPage(currentPage - 1)"
+          >
+            {{ t('metrics.pagePrev') }}
+          </button>
+          <span class="page-status">{{ t('metrics.pageStatus', { page: currentPage, pages: pageCount }) }}</span>
+          <button
+            class="small"
+            :title="t('metrics.pageNext')"
+            :disabled="busy || currentPage >= pageCount"
+            @click="goToPage(currentPage + 1)"
+          >
+            {{ t('metrics.pageNext') }}
+          </button>
+          <button
+            class="small"
+            :title="t('metrics.pageLast')"
+            :disabled="busy || currentPage >= pageCount"
+            @click="goToPage(pageCount)"
+          >
+            »
+          </button>
+        </div>
+        <div class="pagination-meta">
+          <span class="toolbar-note page-range">
+            {{ t('metrics.pageRange', { from: pageFirstRow, to: pageLastRow, total: metrics.length }) }}
+          </span>
+          <label class="page-size">
+            <span class="page-size-label">{{ t('metrics.pageSize') }}</span>
+            <select v-model.number="pageSize" :disabled="busy" @change="onPageSizeChange">
+              <option v-for="size in PAGE_SIZES" :key="size" :value="size">{{ size }}</option>
+            </select>
+          </label>
+        </div>
+      </div>
       </div>
 
       <!-- Tab 2: range preview (query + chart) -->

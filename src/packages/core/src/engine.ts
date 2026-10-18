@@ -41,6 +41,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { availableParallelism, totalmem } from 'node:os';
 import { join, resolve } from 'node:path';
 import { PerformanceObserver } from 'node:perf_hooks';
 
@@ -99,6 +100,14 @@ export const MAX_AGGREGATE_WINDOWS = 100_000;
 /** Maximum number of timestamps accepted by one `queryAt` call (exceeding throws `E_INVALID_POINT`) */
 export const MAX_QUERY_AT_TIMESTAMPS = 10_000;
 
+/**
+ * Maximum number of metric names accepted by one `queryLastMany` call (exceeding throws `E_INVALID_RANGE`).
+ *
+ * Sized for a console page: a dashboard asks for the metrics it just listed, so the batch stays in the same order
+ * of magnitude as one page (a 10 000-metric inventory is paged at ≤500 rows and refreshed page by page).
+ */
+export const MAX_QUERY_LAST_METRICS = 1_000;
+
 /** Milliseconds per day (day-expanding search step for the nearest-point helpers) */
 const DAY_MS = 86_400_000;
 
@@ -129,8 +138,28 @@ export interface BackupManifest {
 /** Number of most recent query latencies kept for the `status.query.*` percentiles (ring window over successful queries) */
 export const QUERY_LATENCY_SAMPLE_WINDOW = 1024;
 
-/** Bytes per MiB (base of `status.cache.heapUsedMb` / `externalMb`) */
+/** Bytes per MiB (base of `status.cache.heapUsedMb` / `externalMb` and `status.memory.*Mb`) */
 const MEBIBYTE = 1024 * 1024;
+
+/**
+ * Minimum wall-clock window between two CPU usage samples.
+ *
+ * `/status` and `/metrics` both call `stats()`, so a scraper and the console can interleave. Re-sampling on every
+ * call would shrink the window to a few milliseconds (noise) and let one consumer starve the other; below this
+ * threshold the previous percentage is returned unchanged while the cumulative counters still advance.
+ */
+const CPU_SAMPLE_MIN_INTERVAL_MS = 1_000;
+
+/** Logical CPU count of the host — denominator of `cpu.systemPercent` (fixed for the process lifetime) */
+const HOST_CPU_COUNT = Math.max(1, availableParallelism());
+
+/** Host total memory — denominator of `memory.systemPercent` (fixed for the process lifetime) */
+const HOST_TOTAL_MEMORY_BYTES = totalmem();
+
+/** Percentage fields are rounded to 2 decimals (they are display values, not accounting data) */
+function roundPercent(value: number): number {
+  return Math.round(value * 100) / 100;
+}
 
 /**
  * Metric buffers flushed per event-loop turn by the periodic fallback flush.
@@ -176,6 +205,35 @@ export interface EngineStats {
     openFiles: number;
     /** Bytes occupied by today's day directories across all databases (`.seg` + `.idx` + `.wal`) */
     bytesToday: number;
+  };
+  cpu: {
+    /**
+     * Process CPU usage measured between two consecutive `stats()` samples, in percent of one core
+     * (`process.cpuUsage()` delta / wall-clock delta; may exceed 100 on a multi-core host).
+     */
+    percent: number;
+    /** The same usage normalized by the host's logical CPU count ([0,100]; whole-machine share) */
+    systemPercent: number;
+    /** Cumulative process user CPU time since `open()` (ms) */
+    userMs: number;
+    /** Cumulative process kernel CPU time since `open()` (ms) */
+    systemMs: number;
+  };
+  memory: {
+    /** Resident set size (`process.memoryUsage().rss`, MiB) — the process footprint the OS actually holds */
+    rssMb: number;
+    /** V8 heap total, i.e. the heap the GC currently keeps committed (MiB) */
+    heapTotalMb: number;
+    /** V8 heap used (MiB) */
+    heapUsedMb: number;
+    /** External memory including ArrayBuffers (MiB) */
+    externalMb: number;
+    /** Host total memory (MiB) — denominator of `systemPercent` */
+    systemTotalMb: number;
+    /** RSS / host total memory ([0,100]) */
+    systemPercent: number;
+    /** `heapUsedMb` / `heapTotalMb` ([0,100]) */
+    heapPercent: number;
   };
   cache: {
     /** Decoded block cache entries */
@@ -367,6 +425,16 @@ export class RtdbEngine {
   /** Successful query count + the most recent latency samples (ring window, `QUERY_LATENCY_SAMPLE_WINDOW` entries) */
   private queryExecutionCount = 0;
   private readonly queryLatencySamplesMs: number[] = [];
+  /** CPU observation: baseline captured on `open()`, then a sliding window between `stats()` samples */
+  private cpuBaselineUserMicros = 0;
+  private cpuBaselineSystemMicros = 0;
+  private cpuSampleAtMs = 0;
+  private cpuSampleUserMicros = 0;
+  private cpuSampleSystemMicros = 0;
+  private cpuPercent = 0;
+  private cpuSystemPercent = 0;
+  private cpuTotalUserMs = 0;
+  private cpuTotalSystemMs = 0;
 
   constructor(options: EngineOptions) {
     if (typeof options.dataDir !== 'string' || options.dataDir.length === 0) {
@@ -441,6 +509,7 @@ export class RtdbEngine {
       this.retentionTimer.unref();
       this.opened = true;
       this.openedAt = Date.now();
+      this.resetCpuBaseline();
       this.startGcObserver();
     } catch (error) {
       this.lock.release();
@@ -565,6 +634,34 @@ export class RtdbEngine {
     const startedAt = performance.now();
     const before = opts?.before ?? Number.MAX_SAFE_INTEGER;
     return this.finishQuery(startedAt, this.latestPointAtOrBefore(database, metricName, before));
+  }
+
+  /**
+   * Batch "latest point" query (`POST /api/v1/query/last-batch`): one lookup per metric, one latency sample.
+   *
+   * Results are in request order. Unlike {@link queryLast} this does **not** reject unknown metric names: a batch
+   * is built from a just-listed inventory, and a metric deleted in between must not fail the other 999 entries
+   * (it comes back as `null`). The transport layer still validates the database and every name.
+   */
+  async queryLastMany(
+    database: string,
+    metricNames: readonly string[],
+    opts?: { before?: number },
+  ): Promise<Array<Point | null>> {
+    this.requireOpen();
+    const startedAt = performance.now();
+    if (metricNames.length === 0) {
+      throw new RtdbError(ERROR_CODE.InvalidRange, 'queryLastMany requires at least one metric name');
+    }
+    if (metricNames.length > MAX_QUERY_LAST_METRICS) {
+      throw new RtdbError(
+        ERROR_CODE.InvalidRange,
+        `queryLastMany accepts at most ${MAX_QUERY_LAST_METRICS} metric names per call (got ${metricNames.length})`,
+      );
+    }
+    const before = opts?.before ?? Number.MAX_SAFE_INTEGER;
+    const points = metricNames.map((metricName) => this.latestPointAtOrBefore(database, metricName, before));
+    return this.finishQuery(startedAt, points);
   }
 
   /**
@@ -855,6 +952,45 @@ export class RtdbEngine {
 
   /* ---------- Status instrumentation (§3.4) ---------- */
 
+  /** Reset the CPU observation window at `open()` (`process.cpuUsage()` is cumulative since process start) */
+  private resetCpuBaseline(): void {
+    const baseline = process.cpuUsage();
+    this.cpuBaselineUserMicros = baseline.user;
+    this.cpuBaselineSystemMicros = baseline.system;
+    this.cpuSampleUserMicros = baseline.user;
+    this.cpuSampleSystemMicros = baseline.system;
+    this.cpuSampleAtMs = Date.now();
+    this.cpuPercent = 0;
+    this.cpuSystemPercent = 0;
+    this.cpuTotalUserMs = 0;
+    this.cpuTotalSystemMs = 0;
+  }
+
+  /**
+   * Sample process CPU usage for the current `stats()` call.
+   *
+   * `percent` is a rate over the window since the previous sample, while `userMs` / `systemMs` stay cumulative
+   * since `open()`. Windows shorter than `CPU_SAMPLE_MIN_INTERVAL_MS` reuse the previous percentage so that an
+   * interleaved `/metrics` scrape cannot shrink the window to scheduler noise.
+   */
+  private sampleCpuUsage(): void {
+    const usage = process.cpuUsage();
+    this.cpuTotalUserMs = (usage.user - this.cpuBaselineUserMicros) / 1000;
+    this.cpuTotalSystemMs = (usage.system - this.cpuBaselineSystemMicros) / 1000;
+
+    const nowMs = Date.now();
+    const elapsedMs = nowMs - this.cpuSampleAtMs;
+    if (elapsedMs < CPU_SAMPLE_MIN_INTERVAL_MS) return;
+
+    const usedMicros = usage.user - this.cpuSampleUserMicros + (usage.system - this.cpuSampleSystemMicros);
+    const percent = (usedMicros / 1000 / elapsedMs) * 100;
+    this.cpuPercent = roundPercent(percent);
+    this.cpuSystemPercent = roundPercent(percent / HOST_CPU_COUNT);
+    this.cpuSampleUserMicros = usage.user;
+    this.cpuSampleSystemMicros = usage.system;
+    this.cpuSampleAtMs = nowMs;
+  }
+
   /** Register the GC observer (best-effort: unavailable platforms simply leave `gc.*` at zero) */
   private startGcObserver(): void {
     if (this.gcObserver !== null) return;
@@ -918,6 +1054,7 @@ export class RtdbEngine {
     }
 
     const cacheLookups = this.reader.blockCacheHitCount + this.reader.blockCacheMissCount;
+    this.sampleCpuUsage();
     const memory = process.memoryUsage();
     const sortedLatencies = [...this.queryLatencySamplesMs].sort((left, right) => left - right);
 
@@ -938,6 +1075,21 @@ export class RtdbEngine {
         lastFsyncMs: walLastFsyncMs,
       },
       segments: { openFiles: this.store.openDescriptorCount, bytesToday },
+      cpu: {
+        percent: this.cpuPercent,
+        systemPercent: this.cpuSystemPercent,
+        userMs: this.cpuTotalUserMs,
+        systemMs: this.cpuTotalSystemMs,
+      },
+      memory: {
+        rssMb: memory.rss / MEBIBYTE,
+        heapTotalMb: memory.heapTotal / MEBIBYTE,
+        heapUsedMb: memory.heapUsed / MEBIBYTE,
+        externalMb: memory.external / MEBIBYTE,
+        systemTotalMb: HOST_TOTAL_MEMORY_BYTES / MEBIBYTE,
+        systemPercent: HOST_TOTAL_MEMORY_BYTES === 0 ? 0 : roundPercent((memory.rss / HOST_TOTAL_MEMORY_BYTES) * 100),
+        heapPercent: memory.heapTotal === 0 ? 0 : roundPercent((memory.heapUsed / memory.heapTotal) * 100),
+      },
       cache: {
         blocks: this.reader.cachedBlockCount,
         blockHitRate: cacheLookups === 0 ? 0 : this.reader.blockCacheHitCount / cacheLookups,

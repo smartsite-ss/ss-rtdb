@@ -159,6 +159,11 @@ rtdbctl status --json
 uptimeMs: 12,345
 databases: 2
 metrics: 1,204
+cpu.percent: 12.50 %
+cpu.systemPercent: 1.56 %
+memory.rssMb: 96.40 MiB
+memory.systemPercent: 1.18 %
+memory.heapPercent: 45.39 %
 write.pointsPerSec: 51,230
 write.buffered: 0
 write.duplicates: 13
@@ -169,9 +174,12 @@ segments.openFiles: 3
 cache.blocks: 256
 ```
 
+`cpu.percent` 是**单核**百分比（多核满载可超过 100），`cpu.systemPercent` 是占整机 CPU 的比例；
+`memory.rssMb` 为常驻内存，`memory.systemPercent` = RSS / 主机总内存，`memory.heapPercent` = 堆已用 / 堆总量。
+
 `--json` 形式输出完整报告，还包括 `wal.pendingPoints`、`wal.lastFsyncMs`、
-`segments.bytesToday`、`cache.blockHitRate`、`cache.heapUsedMb`、`gc.*` 以及
-`query.p50/p95/p99/maxMs`。
+`segments.bytesToday`、`cpu.userMs`/`cpu.systemMs`、`memory.heapTotalMb`/`systemTotalMb`、
+`cache.blockHitRate`、`cache.heapUsedMb`、`gc.*` 以及 `query.p50/p95/p99/maxMs`。
 
 ### 2.5 `metrics`
 
@@ -331,3 +339,4 @@ systemctl start ss-rtdb
 | 2026-10-17 | §1 补充运行期配置文件 `conf/rtdb-server.json`（相对工作目录）及两种启动方式的差异 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增「交互式控制台按键」：`q` 安全退出、`r` 安全重启（就地重读配置），仅 TTY 生效 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §2.2 命令表与 §2.6 `backup` 新增 `--from` / `--to` 时间段参数（只复制范围内日目录、写 `manifest.json`、还原时按天合并） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §2.4 `status` 输出新增 `cpu.percent`、`cpu.systemPercent`、`memory.rssMb`、`memory.systemPercent`、`memory.heapPercent`，并补充单核百分比与整机占比的口径说明 | DeepSeek-V4.1-Flash |
