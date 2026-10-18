@@ -237,8 +237,11 @@ WatchdogSec=0
 | Hot query performance | ↑ `cache.blocks` (16…4 096) |
 | Durability vs. throughput | `write.fsyncPolicy: 'wal'` (safe) vs `'none'` (fast, OS-flushed) |
 | Memory ceiling under burst | `write.maxBufferBytes`, `write.maxPendingPoints` (→ `429` instead of OOM) |
+| Query memory ceiling | Query primitives scan **block cluster by block cluster**: `count exact` / aggregate / `queryAt` / `range` in either direction; memory grows with hit clusters and aggregate windows, not with the hit point count (effective 2026-10-18) |
 
 Reference budgets: idle footprint well under 100 MB RSS; 10 000 mixed-period metrics stay under ~500 MB.
+Query-side memory is decoupled from the hit point count (see the table above); long-range queries no
+longer grow linearly with the points hit.
 Targets: ≥50 000 points/s sustained write; ≥10× compression on full 16 384-point blocks; a 7-day range
 query on one metric ≈ ≤300 ms cold / ≤50 ms warm.
 
@@ -283,3 +286,4 @@ rtdbctl archive plant_a            # review cold archives
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Rewrote the consistency promise: a point is either in a segment (segment fsync precedes the WAL safe point) or in the WAL (group fsync per append); with `fsyncPolicy='wal'` neither a crash nor a power loss loses points | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Added §1.1 segment creation and rolling rules: three creation triggers (first write with sequence continuation / day rollover pre-creation / capacity rollover), three no-roll exceptions (empty segment, block never spans segments i.e. soft limit, sequence exhausted keeps appending), sealing actions and `.idx` rebuild wording | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §10 capacity tuning adds a "query memory ceiling" row: query primitives scan block cluster by block cluster, decoupling memory from the hit point count (`count exact` / aggregate / `queryAt` / descending `range` no longer materialize every hit point) | GLM-5.3-Flash |

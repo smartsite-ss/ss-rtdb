@@ -7,19 +7,30 @@
 
 <script setup lang="ts">
 /**
- * Metric browser: pick a database, pick a metric, then preview a time range either raw or window-aggregated.
+ * Metric browser: pick a database, pick a metric, then preview a time range raw, window-aggregated or
+ * point-in-time interpolated.
  *
  * Uses `GET /api/v1/databases`, `GET /api/v1/metrics/{db}` plus `POST /api/v1/query/range` /
- * `POST /api/v1/query/aggregate` only, so the preview is exactly the data a client of the public REST API
- * would receive. The panel also states the interpolation / aggregation rules next to the controls, because a
- * raw curve connects stored samples directly (no interpolation) while an `avg` window is time-weighted.
+ * `POST /api/v1/query/aggregate` / `POST /api/v1/query/at` only, so the preview is exactly the data a
+ * client of the public REST API would receive. The panel also states the interpolation / aggregation
+ * rules next to the controls, because a raw curve connects stored samples directly (no interpolation),
+ * an `avg` window is time-weighted, and the interpolation modes resample the series at a uniform grid
+ * (`step` = previous-value hold, `linear` = piecewise-linear) with per-point provenance markers.
  */
 
 import { computed, onMounted, ref, watch } from 'vue';
 import LineChart from './LineChart.vue';
 import TimeRangePicker from './TimeRangePicker.vue';
-import { RTDB_AGGREGATE_TYPE, RTDB_VALUE_TYPE, RtdbAdminApiClient } from '../api';
-import type { RtdbAggregateType, RtdbAggregateWindow, RtdbJsonPoint, RtdbJsonSeries, RtdbMetricSummary } from '../api';
+import { RTDB_AGGREGATE_TYPE, RTDB_INTERPOLATION_MODE, RTDB_VALUE_TYPE, RtdbAdminApiClient } from '../api';
+import type {
+  RtdbAggregateType,
+  RtdbAggregateWindow,
+  RtdbAtPoint,
+  RtdbInterpolationMode,
+  RtdbJsonPoint,
+  RtdbJsonSeries,
+  RtdbMetricSummary,
+} from '../api';
 import { useAsyncAction } from '../async';
 import { formatDateTime, fromDateTimeLocalValue, toDateTimeLocalValue } from '../format';
 import { t } from '../i18n';
@@ -33,8 +44,11 @@ const DEFAULT_LIMIT = 2_000;
 const DEFAULT_WINDOW_SECONDS = 60;
 /** A raw interval above this multiple of the median counts as a gap in the hint line */
 const GAP_FACTOR = 3;
+/** Server-side cap of one `query/at` call; the interpolation grid is clamped to it */
+const MAX_QUERY_AT_TIMESTAMPS = 10_000;
 
 const AGGREGATE_TYPES: RtdbAggregateType[] = Object.values(RTDB_AGGREGATE_TYPE);
+const INTERPOLATION_MODES: RtdbInterpolationMode[] = Object.values(RTDB_INTERPOLATION_MODE);
 
 /** `vt` marker → display name, mirroring the engine's `VALUE_TYPE_NAME` */
 const VALUE_TYPE_NAMES: Record<number, string> = {
@@ -63,13 +77,18 @@ const limitInput = ref(String(DEFAULT_LIMIT));
 const aggregateType = ref<'none' | RtdbAggregateType>('none');
 const windowValue = ref(String(DEFAULT_WINDOW_SECONDS));
 const windowUnit = ref<WindowUnit>('s');
-/** Exactly one of the two previews is non-null after a successful query */
+/** `none` = interpolation off; otherwise the preview resamples the series via `POST /api/v1/query/at` */
+const interpolationMode = ref<'none' | RtdbInterpolationMode>('none');
+/** Exactly one of the three previews is non-null after a successful query */
 const rawSeries = ref<RtdbJsonSeries | null>(null);
 const aggregateWindows = ref<RtdbAggregateWindow[] | null>(null);
+const atPoints = ref<RtdbAtPoint[] | null>(null);
 /** Elapsed wall time of the last successful query (ms), shown next to the summary line */
 const queryElapsedMs = ref<number | null>(null);
 
-const hasPreview = computed(() => rawSeries.value !== null || aggregateWindows.value !== null);
+const hasPreview = computed(
+  () => rawSeries.value !== null || aggregateWindows.value !== null || atPoints.value !== null,
+);
 
 /** Selected metric's stored span, offered as the "All" preset inside the range control */
 const spanStart = computed(() => metrics.value.find((entry) => entry.metricName === selectedMetric.value)?.firstTs ?? null);
@@ -90,6 +109,14 @@ const stringLevels = computed<string[]>(() => {
 
 const chartPoints = computed<{ t: number; value: number }[]>(() => {
   const points: { t: number; value: number }[] = [];
+  if (atPoints.value !== null) {
+    for (const point of atPoints.value) {
+      if (point.v === null) continue;
+      const value = RtdbAdminApiClient.toNumericValue({ t: point.t, v: point.v, vt: point.vt });
+      if (value !== null) points.push({ t: point.t, value });
+    }
+    return points;
+  }
   if (aggregateWindows.value !== null) {
     for (const window of aggregateWindows.value) {
       const value = RtdbAdminApiClient.toNumericValue({ t: window.start, v: window.v, vt: window.vt });
@@ -111,15 +138,29 @@ const chartPoints = computed<{ t: number; value: number }[]>(() => {
 });
 
 const sampleCount = computed(() => {
+  if (atPoints.value !== null) return atPoints.value.length;
   if (aggregateWindows.value !== null) return aggregateWindows.value.length;
   return rawSeries.value?.points.length ?? 0;
 });
 
 const skippedPointCount = computed(() => sampleCount.value - chartPoints.value.length);
 
+/** Provenance breakdown of the interpolation preview (zeroed for the other two preview kinds) */
+const atStateCounts = computed<Record<RtdbAtPoint['state'], number> | null>(() => {
+  if (atPoints.value === null) return null;
+  const counts: Record<RtdbAtPoint['state'], number> = {
+    exact: 0,
+    interpolated: 0,
+    extrapolated: 0,
+    'no-data': 0,
+  };
+  for (const point of atPoints.value) counts[point.state] += 1;
+  return counts;
+});
+
 /** Median / largest sampling interval of the raw curve, used to explain gaps in the hint line */
 const intervalStats = computed<{ medianMs: number; maxMs: number; gaps: number } | null>(() => {
-  if (aggregateWindows.value !== null) return null;
+  if (aggregateWindows.value !== null || atPoints.value !== null) return null;
   const points = chartPoints.value;
   if (points.length < 3) return null;
   const deltas: number[] = [];
@@ -155,6 +196,7 @@ function resetRange(): void {
 function clearPreview(): void {
   rawSeries.value = null;
   aggregateWindows.value = null;
+  atPoints.value = null;
 }
 
 async function loadDatabases(): Promise<void> {
@@ -203,6 +245,16 @@ function resolveWindowMs(): number {
   return parsed * WINDOW_UNITS[windowUnit.value] * 1_000;
 }
 
+/** Uniform evaluation grid over `[start, end]` with `count` samples (both endpoints included) */
+function buildInterpolationGrid(start: number, end: number, count: number): number[] {
+  const clamped = Math.min(Math.max(count, 1), MAX_QUERY_AT_TIMESTAMPS);
+  if (clamped === 1 || end === start) return [start];
+  const grid: number[] = [];
+  const step = (end - start) / (clamped - 1);
+  for (let index = 0; index < clamped; index += 1) grid.push(Math.round(start + index * step));
+  return grid;
+}
+
 async function runQuery(): Promise<void> {
   const database = selectedDatabase.value;
   const metricName = selectedMetric.value;
@@ -211,6 +263,7 @@ async function runQuery(): Promise<void> {
   const parsedLimit = Number(limitInput.value);
   const limit = Number.isInteger(parsedLimit) && parsedLimit > 0 ? parsedLimit : DEFAULT_LIMIT;
   const type = aggregateType.value;
+  const mode = interpolationMode.value;
   const windowMs = resolveWindowMs();
   const startedAt = performance.now();
 
@@ -219,18 +272,28 @@ async function runQuery(): Promise<void> {
     if (metricName.length === 0) throw new Error(t('metrics.error.selectMetric'));
     if (start <= 0 || end <= 0) throw new Error(t('metrics.error.invalidTime'));
     if (end < start) throw new Error(t('metrics.error.endBeforeStart'));
+    if (mode !== 'none') {
+      const points = await props.client.queryAt(
+        database,
+        metricName,
+        buildInterpolationGrid(start, end, limit),
+        mode,
+      );
+      return { raw: null as RtdbJsonSeries | null, windows: null as RtdbAggregateWindow[] | null, at: points };
+    }
     if (type === 'none') {
       const raw = await props.client.queryRange(database, metricName, start, end, limit);
-      return { raw, windows: null as RtdbAggregateWindow[] | null };
+      return { raw, windows: null as RtdbAggregateWindow[] | null, at: null as RtdbAtPoint[] | null };
     }
     if (windowMs <= 0) throw new Error(t('metrics.error.invalidWindow'));
     const windows = await props.client.queryAggregate(database, metricName, start, end, type, windowMs);
-    return { raw: null as RtdbJsonSeries | null, windows };
+    return { raw: null as RtdbJsonSeries | null, windows, at: null as RtdbAtPoint[] | null };
   });
   if (result === undefined) return;
   queryElapsedMs.value = performance.now() - startedAt;
   rawSeries.value = result.raw;
   aggregateWindows.value = result.windows;
+  atPoints.value = result.at;
 }
 
 /** `range`/`aggregate` export of the current preview as an Excel-readable `*.xls` */
@@ -249,6 +312,27 @@ function exportCurrent(): void {
           t('metrics.xls.value'),
           t('metrics.xls.type'),
           t('metrics.xls.quality'),
+        ],
+        rows,
+      },
+    ]);
+    return;
+  }
+  if (atPoints.value !== null) {
+    const rows = atPoints.value.map((point) => [
+      point.t,
+      formatDateTime(point.t),
+      point.v as XlsCellValue,
+      point.state,
+    ]);
+    downloadXlsWorkbook(`${fileName}-at.xls`, [
+      {
+        name: 'at',
+        columns: [
+          t('metrics.xls.timestamp'),
+          t('metrics.xls.time'),
+          t('metrics.xls.value'),
+          t('metrics.xls.state'),
         ],
         rows,
       },
@@ -360,7 +444,7 @@ watch(
     <div class="card">
       <div class="card-title">
         <span>{{ t('metrics.previewTitle') }}</span>
-        <span class="card-title-note">POST /api/v1/query/range · POST /api/v1/query/aggregate</span>
+        <span class="card-title-note">POST /api/v1/query/range · POST /api/v1/query/aggregate · POST /api/v1/query/at</span>
       </div>
 
       <div class="toolbar">
@@ -389,7 +473,7 @@ watch(
             min="1"
             step="1"
             style="width: 110px"
-            :disabled="busy || aggregateType !== 'none'"
+            :disabled="busy || (aggregateType !== 'none' && interpolationMode === 'none')"
           />
         </div>
         <button class="primary" :disabled="busy" @click="runQuery">{{ t('metrics.query') }}</button>
@@ -400,7 +484,7 @@ watch(
       <div class="toolbar">
         <div class="field">
           <label class="field-label">{{ t('metrics.aggregate') }}</label>
-          <select v-model="aggregateType" :disabled="busy">
+          <select v-model="aggregateType" :disabled="busy || interpolationMode !== 'none'">
             <option value="none">{{ t('metrics.aggregate.none') }}</option>
             <option v-for="type in AGGREGATE_TYPES" :key="type" :value="type">{{ type }}</option>
           </select>
@@ -414,20 +498,33 @@ watch(
               min="1"
               step="1"
               style="width: 90px"
-              :disabled="busy || aggregateType === 'none'"
+              :disabled="busy || aggregateType === 'none' || interpolationMode !== 'none'"
             />
-            <select v-model="windowUnit" :disabled="busy || aggregateType === 'none'">
+            <select v-model="windowUnit" :disabled="busy || aggregateType === 'none' || interpolationMode !== 'none'">
               <option value="s">{{ t('metrics.unit.s') }}</option>
               <option value="m">{{ t('metrics.unit.m') }}</option>
               <option value="h">{{ t('metrics.unit.h') }}</option>
             </select>
           </div>
         </div>
+        <div class="field">
+          <label class="field-label">{{ t('metrics.interpolation') }}</label>
+          <select v-model="interpolationMode" :disabled="busy || aggregateType !== 'none'">
+            <option value="none">{{ t('metrics.interpolation.none') }}</option>
+            <option v-for="mode in INTERPOLATION_MODES" :key="mode" :value="mode">{{ mode }}</option>
+          </select>
+        </div>
         <span class="toolbar-note">{{ t('metrics.limitNote') }}</span>
       </div>
 
       <p class="toolbar-note hint">
-        {{ aggregateType === 'none' ? t('metrics.hint.raw') : t('metrics.hint.aggregate') }}
+        {{
+          interpolationMode !== 'none'
+            ? t('metrics.hint.at')
+            : aggregateType === 'none'
+              ? t('metrics.hint.raw')
+              : t('metrics.hint.aggregate')
+        }}
       </p>
       <p v-if="intervalStats !== null" class="toolbar-note hint">
         {{
@@ -443,17 +540,26 @@ watch(
       <template v-if="hasPreview">
         <p class="toolbar-note">
           {{
-            aggregateWindows !== null
-              ? t('metrics.summaryAggregated', {
-                  windows: aggregateWindows.length,
+            atPoints !== null && atStateCounts !== null
+              ? t('metrics.summaryAt', {
+                  samples: atPoints.length,
                   plotted: chartPoints.length,
-                  skipped: skippedPointCount,
+                  exact: atStateCounts.exact,
+                  interpolated: atStateCounts.interpolated,
+                  extrapolated: atStateCounts.extrapolated,
+                  noData: atStateCounts['no-data'],
                 })
-              : t('metrics.summary', {
-                  points: rawSeries === null ? 0 : rawSeries.points.length,
-                  plotted: chartPoints.length,
-                  skipped: skippedPointCount,
-                })
+              : aggregateWindows !== null
+                ? t('metrics.summaryAggregated', {
+                    windows: aggregateWindows.length,
+                    plotted: chartPoints.length,
+                    skipped: skippedPointCount,
+                  })
+                : t('metrics.summary', {
+                    points: rawSeries === null ? 0 : rawSeries.points.length,
+                    plotted: chartPoints.length,
+                    skipped: skippedPointCount,
+                  })
           }}
           <template v-if="queryElapsedMs !== null">
             {{ t('metrics.elapsed', { duration: formatDuration(queryElapsedMs) }) }}

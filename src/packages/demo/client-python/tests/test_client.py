@@ -18,6 +18,7 @@ import unittest
 from ss_rtdb_client import (
     CLIENT_ERROR_CODE,
     AggregateWindow,
+    AtPoint,
     Point,
     RtdbClient,
     RtdbClientError,
@@ -295,6 +296,10 @@ class ErrorMappingTests(unittest.TestCase):
             client.query_range("db1", "", 0, 1)
         with self.assertRaises(RtdbClientError):
             client.query_aggregate("db1", "m", 0, 1, "median", 10)
+        with self.assertRaises(RtdbClientError):
+            client.query_at("db1", "m", [0], mode="nearest")
+        with self.assertRaises(RtdbClientError):
+            client.query_at("db1", "m", [])
         self.assertEqual(transport.calls, [])
 
 
@@ -352,6 +357,28 @@ class QueryParsingTests(unittest.TestCase):
             transport.parsed_body(0),
             {"db": "db1", "metricName": "cpu", "start": 0, "end": 10, "type": "avg", "windowMs": 10},
         )
+
+    def test_query_at(self) -> None:
+        payload = {
+            "points": [
+                {"t": 10, "v": 1.5, "vt": 1, "state": "exact"},
+                {"t": 20, "v": 2.5, "vt": 1, "state": "interpolated"},
+                {"t": 30, "v": None, "vt": 1, "state": "no-data"},
+            ]
+        }
+        client, transport = build_client(lambda call, index: json_response(200, payload))
+        points = client.query_at("db1", "cpu", [10, 20, 30], mode="linear")
+        self.assertEqual(len(points), 3)
+        self.assertIsInstance(points[0], AtPoint)
+        self.assertEqual(
+            [(point.timestamp, point.value, point.state) for point in points],
+            [(10, 1.5, "exact"), (20, 2.5, "interpolated"), (30, None, "no-data")],
+        )
+        self.assertEqual(
+            transport.parsed_body(0),
+            {"db": "db1", "metricName": "cpu", "timestamps": [10, 20, 30], "mode": "linear"},
+        )
+        self.assertEqual(transport.calls[0]["url"], BASE_URL + "/api/v1/query/at")
 
     def test_status_returns_raw_dict(self) -> None:
         payload = {"uptimeMs": 5, "write": {"pointsPerSec": 1}}

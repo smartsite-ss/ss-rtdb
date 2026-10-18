@@ -66,6 +66,24 @@ export const RTDB_AGGREGATE_TYPE = {
 } as const;
 export type RtdbAggregateType = (typeof RTDB_AGGREGATE_TYPE)[keyof typeof RTDB_AGGREGATE_TYPE];
 
+/** Modes accepted by `POST /api/v1/query/at` (mirrors `InterpolationMode` in the engine; `nearest` planned) */
+export const RTDB_INTERPOLATION_MODE = {
+  step: 'step',
+  linear: 'linear',
+} as const;
+export type RtdbInterpolationMode = (typeof RTDB_INTERPOLATION_MODE)[keyof typeof RTDB_INTERPOLATION_MODE];
+
+/** `POST /api/v1/query/at` result point: value at a requested timestamp plus its provenance */
+export interface RtdbAtPoint {
+  /** requested timestamp (millisecond epoch, echoed) */
+  t: number;
+  /** f64 → number, i64 → decimal string, bool → boolean, string → string; null = no data */
+  v: number | string | boolean | null;
+  vt: number;
+  /** `exact` = a real stored point; `interpolated`/`extrapolated` = computed (linear only); `no-data` */
+  state: 'exact' | 'interpolated' | 'extrapolated' | 'no-data';
+}
+
 export interface RtdbStatusReport {
   uptimeMs: number;
   databases: number;
@@ -285,6 +303,26 @@ export class RtdbAdminApiClient {
       windowMs,
     });
     return body.windows;
+  }
+
+  /**
+   * `POST /api/v1/query/at` — batch point-in-time interpolated lookup (at most 10 000 timestamps
+   * per call). `step` = previous-value hold; `linear` = piecewise-linear between real neighbours
+   * (f64/i64 metrics only). Each point's `state` tells a real stored value from a computed one.
+   */
+  async queryAt(
+    database: string,
+    metricName: string,
+    timestamps: number[],
+    mode: RtdbInterpolationMode,
+  ): Promise<RtdbAtPoint[]> {
+    const body = await this.request<{ points: RtdbAtPoint[] }>('POST', '/api/v1/query/at', {
+      db: database,
+      metricName,
+      timestamps,
+      mode,
+    });
+    return body.points;
   }
 
   async setRetentionDays(database: string, days: number): Promise<void> {

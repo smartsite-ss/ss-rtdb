@@ -244,8 +244,12 @@ export class SegmentReader {
    * limit/order/aggregation on top of this)
    *
    * `order` defaults to `asc`; `limit` defaults to 100_000 (the same scope as `RangeOptions`).
-   * When `receivedOut` is given, the aggregated server receive-time window of the hit blocks
+   * When `receivedOut` is given, the aggregated server receive-time window of the visited blocks
    * (min of `receivedMin` / max of `receivedMax`; null when no block carries one) is written into it.
+   *
+   * Implemented on top of [iterateMetricPoints](#iteratemetricpoints): the visitor stops as soon as
+   * `limit` unique points have been collected, so memory is bounded by the limit instead of the hit
+   * point count (2026-10-18 bounded-memory refactor).
    */
   readMetricPoints(
     database: string,
@@ -260,47 +264,159 @@ export class SegmentReader {
       );
     }
     const limit = options.limit ?? DEFAULT_RANGE_LIMIT;
-    const locations = this.locateBlocks(database, metricName, options.start, options.end);
-
-    const collected: Array<{ timestamp: number; value: Point['value']; order: number }> = [];
-    let valueType: ValueType | null = null;
-    let sequenceIndex = 0;
-    for (const location of locations) {
-      const block = this.readBlock(location.segmentFilePath, location.entry);
-      if (valueType === null) valueType = block.valueType;
-      else if (valueType !== block.valueType) {
-        throw new RtdbError(
-          ERROR_CODE.TypeMismatch,
-          `metric ${metricName} has an inconsistent value type: already decoded ${VALUE_TYPE_NAME[valueType]}, but block ${location.segmentFilePath}@${location.entry.offset} is ${VALUE_TYPE_NAME[block.valueType]}`,
-        );
-      }
-      if (receivedOut !== undefined && block.receivedMin !== null && block.receivedMax !== null) {
-        receivedOut.min = receivedOut.min === 0 ? block.receivedMin : Math.min(receivedOut.min, block.receivedMin);
-        receivedOut.max = Math.max(receivedOut.max, block.receivedMax);
-      }
-      for (let index = 0; index < block.timestamps.length; index += 1) {
-        const timestamp = block.timestamps[index];
-        if (timestamp < options.start || timestamp > options.end) continue;
-        collected.push({ timestamp, value: block.values[index], order: sequenceIndex });
-        sequenceIndex += 1;
-      }
-    }
-
-    collected.sort((left, right) =>
-      left.timestamp === right.timestamp ? left.order - right.order : left.timestamp - right.timestamp,
-    );
-
     const points: Point[] = [];
-    let previousTimestamp: number | null = null;
-    for (const item of collected) {
-      if (previousTimestamp !== null && item.timestamp === previousTimestamp) continue;
-      points.push({ timestamp: item.timestamp, value: item.value });
-      previousTimestamp = item.timestamp;
+    const out = { valueType: null as ValueType | null, receivedMin: 0, receivedMax: 0 };
+    for (const point of this.iterateMetricPoints(
+      database,
+      metricName,
+      { start: options.start, end: options.end, order: options.order },
+      out,
+    )) {
+      points.push(point);
       if (points.length >= limit) break;
     }
-
-    if (options.order === 'desc') points.reverse();
+    if (receivedOut !== undefined) {
+      receivedOut.min = out.receivedMin;
+      receivedOut.max = out.receivedMax;
+    }
     return points;
+  }
+
+  /**
+   * Sweep a metric's points in `[start, end]` in **timestamp order** (unique `(metric, ts)`, one point per
+   * step). Consume with `for...of`; `break` stops the underlying block decoding early.
+   *
+   * Memory is bounded by the largest overlapping block cluster instead of the hit point count — the fix
+   * for the 2026-10-18 incident "one long-range query materialized every point (~2 GB heap)". Blocks are
+   * chained into clusters by `[timestampMin, timestampMax]` overlap at the index level; a single-block
+   * cluster streams its points directly, a multi-block cluster (backfill overlap) materializes and merges
+   * within the cluster only. Output order and unique-ts semantics are identical to the previous
+   * sort-everything implementation (equal ts keeps the first in collection order; stored values for the
+   * same `(metric, ts)` are identical under write idempotency anyway).
+   *
+   * `out` (optional) receives the visited blocks' value type and the aggregated server receive-time
+   * window (same scope as the old `receivedOut`).
+   */
+  *iterateMetricPoints(
+    database: string,
+    metricName: string,
+    options: { start: number; end: number; order?: 'asc' | 'desc' },
+    out?: { valueType: ValueType | null; receivedMin: number; receivedMax: number },
+  ): Generator<Point, void, undefined> {
+    if (!Number.isFinite(options.start) || !Number.isFinite(options.end) || options.start > options.end) {
+      throw new RtdbError(
+        ERROR_CODE.InvalidRange,
+        `Illegal query range: start=${options.start}, end=${options.end}`,
+      );
+    }
+    const order = options.order ?? 'asc';
+    const locations = this.locateBlocks(database, metricName, options.start, options.end);
+    // Global block ordering (index-level sort; a few hundred entries even for a whole-day scan).
+    // `sequence` is assigned in **ascending** block order regardless of the output direction, so the
+    // "equal ts keeps the first in collection order" dedupe matches the old sort-everything behavior.
+    const orderedLocations = locations.map((location, sequence) => ({ location, sequence }));
+    if (order === 'desc') {
+      orderedLocations.sort(
+        (left, right) =>
+          right.location.entry.timestampMax - left.location.entry.timestampMax ||
+          right.location.entry.timestampMin - left.location.entry.timestampMin,
+      );
+    } else {
+      orderedLocations.sort(
+        (left, right) =>
+          left.location.entry.timestampMin - right.location.entry.timestampMin ||
+          left.location.entry.timestampMax - right.location.entry.timestampMax,
+      );
+    }
+
+    // Chain blocks whose ranges overlap into clusters (still index-level only)
+    const clusters: Array<Array<{ location: BlockLocation; sequence: number }>> = [];
+    let clusterMax = Number.NEGATIVE_INFINITY;
+    let clusterMin = Number.POSITIVE_INFINITY;
+    for (const item of orderedLocations) {
+      const last = clusters[clusters.length - 1];
+      const joins =
+        last !== undefined &&
+        (order === 'asc'
+          ? item.location.entry.timestampMin <= clusterMax
+          : item.location.entry.timestampMax >= clusterMin);
+      if (last === undefined || !joins) {
+        clusters.push([item]);
+        clusterMax = item.location.entry.timestampMax;
+        clusterMin = item.location.entry.timestampMin;
+        continue;
+      }
+      last.push(item);
+      if (item.location.entry.timestampMax > clusterMax) clusterMax = item.location.entry.timestampMax;
+      if (item.location.entry.timestampMin < clusterMin) clusterMin = item.location.entry.timestampMin;
+    }
+
+    let lastEmitted: number | null = null;
+
+    const checkBlockMeta = (block: DecodedBlock): void => {
+      if (out === undefined) return;
+      if (out.valueType === null) out.valueType = block.valueType;
+      else if (out.valueType !== block.valueType) {
+        throw new RtdbError(
+          ERROR_CODE.TypeMismatch,
+          `metric ${metricName} has an inconsistent value type: already decoded ${VALUE_TYPE_NAME[out.valueType]}, but a hit block is ${VALUE_TYPE_NAME[block.valueType]}`,
+        );
+      }
+      if (block.receivedMin !== null && block.receivedMax !== null) {
+        out.receivedMin = out.receivedMin === 0 ? block.receivedMin : Math.min(out.receivedMin, block.receivedMin);
+        out.receivedMax = Math.max(out.receivedMax, block.receivedMax);
+      }
+    };
+
+    const visitBlock = function* (block: DecodedBlock, indexOrder: 'asc' | 'desc'): Generator<Point> {
+      checkBlockMeta(block);
+      const step = indexOrder === 'asc' ? 1 : -1;
+      // Descending starts at the block's last index (block timestamps are stored ascending) and walks
+      // backwards; the bounds guard keeps the loop from stepping past either end of the typed array.
+      const firstIndex = indexOrder === 'asc' ? 0 : block.timestamps.length - 1;
+      for (let index = firstIndex; index >= 0 && index < block.timestamps.length; index += step) {
+        const timestamp = block.timestamps[index];
+        if (timestamp < options.start || timestamp > options.end) continue;
+        if (lastEmitted !== null && (order === 'asc' ? timestamp <= lastEmitted : timestamp >= lastEmitted)) continue;
+        lastEmitted = timestamp;
+        yield { timestamp, value: block.values[index] };
+      }
+    };
+
+    for (const cluster of clusters) {
+      if (cluster.length === 1) {
+        yield* visitBlock(this.readBlock(cluster[0].location.segmentFilePath, cluster[0].location.entry), order);
+        continue;
+      }
+      // Multi-block overlapping cluster (backfill overlap): materialize inside the cluster only, then
+      // merge + dedupe — same result as the old global sort, bounded by the cluster size
+      const collected: Array<{ timestamp: number; value: Point['value']; order: number }> = [];
+      for (const item of cluster) {
+        const block = this.readBlock(item.location.segmentFilePath, item.location.entry);
+        checkBlockMeta(block);
+        for (let index = 0; index < block.timestamps.length; index += 1) {
+          const timestamp = block.timestamps[index];
+          if (timestamp < options.start || timestamp > options.end) continue;
+          collected.push({ timestamp, value: block.values[index], order: item.sequence });
+        }
+      }
+      collected.sort(
+        order === 'asc'
+          ? (left, right) => left.timestamp - right.timestamp || left.order - right.order
+          : (left, right) => right.timestamp - left.timestamp || left.order - right.order,
+      );
+      let clusterPrevious: number | null = null;
+      for (const item of collected) {
+        if (clusterPrevious !== null && item.timestamp === clusterPrevious) continue;
+        if (lastEmitted !== null && (order === 'asc' ? item.timestamp <= lastEmitted : item.timestamp >= lastEmitted)) {
+          clusterPrevious = item.timestamp;
+          continue;
+        }
+        clusterPrevious = item.timestamp;
+        lastEmitted = item.timestamp;
+        yield { timestamp: item.timestamp, value: item.value };
+      }
+    }
   }
 
   /**

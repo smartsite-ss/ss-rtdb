@@ -103,6 +103,7 @@ npm run bench
 | B4 day rollover | Cost of crossing a day boundary |
 | B5 endpoint diff | Per-endpoint latency breakdown |
 | B6 full load | Extrapolated behaviour at full load |
+| B7 span scaling | Cross-span query performance: 1/5/10/20/30/50/100-day cold/warm latency and heap growth for range / count-exact / avg / queryAt |
 | POWER-LOSS | Random power-loss injection (child process) — must end with zero corruption |
 
 Scale is controlled with `RTDB_BENCH_SCALE` (e.g. `RTDB_BENCH_SCALE=small npm run bench`) to keep CI
@@ -192,3 +193,4 @@ Apache License 2.0. Contributions are accepted under the same license; keep the 
 | Date | Change | Model |
 | ---- | ------ | ----- |
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §4 benchmark table adds B7 (cross-span query performance matrix, 1/5/10/20/30/50/100 days) | GLM-5.3-Flash |

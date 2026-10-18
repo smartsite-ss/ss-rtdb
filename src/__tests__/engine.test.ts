@@ -595,6 +595,147 @@ describe('查询: queryAggregate', () => {
       await engine.close();
     }
   });
+
+  it('avg：单个点对跨多窗（大间隙）线性贡献每个重叠窗口；查询起点早于首点时前缘平坦外延', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      // Pair (0→0, 10000→100) spans 9 empty windows: each window avg = the line value at its midpoint
+      await engine.writeBatch('db', [
+        { metricName: 'm.span', timestamp: DAY_BASE, value: 0 },
+        { metricName: 'm.span', timestamp: DAY_BASE + 10_000, value: 100 },
+      ]);
+      const windows = await engine.queryAggregate('db', 'm.span', {
+        start: DAY_BASE,
+        end: DAY_BASE + 9_999,
+        type: 'avg',
+        windowMs: 1000,
+      });
+      assert.equal(windows.length, 10);
+      assert.deepStrictEqual(
+        windows.map((window) => window.value),
+        [5, 15, 25, 35, 45, 55, 65, 75, 85, 95],
+      );
+      // Only the point at the range start counts; the windows in between are empty but interpolated
+      assert.deepStrictEqual(
+        windows.map((window) => window.count),
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      );
+
+      // Leading-edge flat extrapolation: query start (DAY_BASE) is earlier than the first point
+      await engine.writeBatch('db', [
+        { metricName: 'm.lead', timestamp: DAY_BASE + 500, value: 10 },
+        { metricName: 'm.lead', timestamp: DAY_BASE + 1500, value: 20 },
+      ]);
+      const lead = await engine.queryAggregate('db', 'm.lead', {
+        start: DAY_BASE,
+        end: DAY_BASE + 999,
+        type: 'avg',
+        windowMs: 1000,
+      });
+      // 10 × 500 (flat preface) + (10→15 trapezoid) × 500 = 5000 + 6250, divided by 1000
+      assert.equal(lead[0].value, 11.25);
+      assert.equal(lead[0].count, 1);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('空窗：min/max/last 为 NaN，sum/count 为 0', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.empty', [5, 6], DAY_BASE));
+      const range = { start: DAY_BASE + 10_000, end: DAY_BASE + 11_999, windowMs: 1000 };
+      for (const type of ['min', 'max', 'last'] as const) {
+        const windows = await engine.queryAggregate('db', 'm.empty', { ...range, type });
+        assert.equal(windows.length, 2);
+        for (const window of windows) {
+          assert.ok(Number.isNaN(window.value as number), `${type} of an empty window should be NaN`);
+          assert.equal(window.count, 0);
+        }
+      }
+      const sum = await engine.queryAggregate('db', 'm.empty', { ...range, type: 'sum' });
+      assert.deepStrictEqual(
+        sum.map((window) => window.value),
+        [0, 0],
+      );
+      const count = await engine.queryAggregate('db', 'm.empty', { ...range, type: 'count' });
+      assert.deepStrictEqual(
+        count.map((window) => window.value),
+        [0, 0],
+      );
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('单点序列 avg：与点相交的窗口返回该值，之前的窗口为 NaN；无点返回空数组', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', [{ metricName: 'm.single', timestamp: DAY_BASE, value: 42 }]);
+      const windows = await engine.queryAggregate('db', 'm.single', {
+        start: DAY_BASE - 1000,
+        end: DAY_BASE + 999,
+        type: 'avg',
+        windowMs: 1000,
+      });
+      assert.equal(windows.length, 2);
+      assert.ok(Number.isNaN(windows[0].value as number), '窗口完全早于唯一一点 → NaN');
+      assert.equal(windows[1].value, 42);
+      assert.equal(windows[1].count, 1);
+
+      const none = await engine.queryAggregate('db', 'm.absent', {
+        start: DAY_BASE,
+        end: DAY_BASE + 999,
+        type: 'avg',
+        windowMs: 1000,
+      });
+      assert.deepStrictEqual(none, []);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('i64 avg 为 number（时间加权无整数意义）；乱序（补传）点按数据时间戳落窗', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', [
+        { metricName: 'm.i64avg', timestamp: DAY_BASE, value: 10n },
+        { metricName: 'm.i64avg', timestamp: DAY_BASE + 1000, value: 20n },
+      ]);
+      const avg = await engine.queryAggregate('db', 'm.i64avg', {
+        start: DAY_BASE,
+        end: DAY_BASE + 1999,
+        type: 'avg',
+        windowMs: 2000,
+      });
+      // [0,1000) linear 10→20 + [1000,2000) flat-held at 20 → (15000 + 20000) / 2000 = 17.5
+      assert.equal(avg[0].value, 17.5);
+      assert.equal(typeof avg[0].value, 'number');
+
+      // Out-of-order (backfill-style) writes: window membership follows the data timestamp
+      await engine.writeBatch('db', [{ metricName: 'm.late', timestamp: DAY_BASE + 2000, value: 3 }]);
+      await engine.writeBatch('db', [{ metricName: 'm.late', timestamp: DAY_BASE, value: 1 }]);
+      await engine.writeBatch('db', [{ metricName: 'm.late', timestamp: DAY_BASE + 1000, value: 2 }]);
+      const range = { start: DAY_BASE, end: DAY_BASE + 1999, windowMs: 1000 };
+      const sum = await engine.queryAggregate('db', 'm.late', { ...range, type: 'sum' });
+      assert.deepStrictEqual(
+        sum.map((window) => window.value),
+        [1, 2],
+      );
+      const last = await engine.queryAggregate('db', 'm.late', { ...range, type: 'last' });
+      assert.deepStrictEqual(
+        last.map((window) => window.value),
+        [1, 2],
+      );
+      const count = await engine.queryAggregate('db', 'm.late', { ...range, type: 'count' });
+      assert.deepStrictEqual(
+        count.map((window) => window.value),
+        [1, 1],
+      );
+    } finally {
+      await engine.close();
+    }
+  });
 });
 
 /* ---------- 管理 API ---------- */
@@ -776,6 +917,80 @@ describe('引擎: queryAt 插值取值', () => {
         () => engine.queryAt('db', 'm.x', { timestamps: tooMany }),
         (error) => expectRtdbCode(error, ERROR_CODE.InvalidPoint),
       );
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('beforeFirst / afterLast：请求区间外的真实邻居参与前值保持与线性插值', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.edge', [0, 100], DAY_BASE, 10_000));
+      // A single request strictly between the two points: both neighbors live outside the requested range
+      const between = DAY_BASE + 5000;
+      const step = await engine.queryAt('db', 'm.edge', { timestamps: [between] });
+      assert.deepStrictEqual(step, [{ timestamp: between, value: 0, state: 'exact' }]);
+      const linear = await engine.queryAt('db', 'm.edge', { timestamps: [between], mode: 'linear' });
+      assert.deepStrictEqual(linear, [{ timestamp: between, value: 50, state: 'interpolated' }]);
+
+      // Request after the last point: beforeFirst supplies the held value
+      const after = DAY_BASE + 20_000;
+      const tail = await engine.queryAt('db', 'm.edge', { timestamps: [after] });
+      assert.deepStrictEqual(tail, [{ timestamp: after, value: 100, state: 'exact' }]);
+      const tailLinear = await engine.queryAt('db', 'm.edge', { timestamps: [after], mode: 'linear' });
+      assert.deepStrictEqual(tailLinear, [{ timestamp: after, value: 100, state: 'extrapolated' }]);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('重复 / 无序时间戳：逐条独立求值并按请求顺序回显', async () => {
+    const engine = await openEngine(createDataDir());
+    try {
+      await engine.writeBatch('db', pointsFrom('m.dup', [1, 5], DAY_BASE));
+      const results = await engine.queryAt('db', 'm.dup', {
+        timestamps: [DAY_BASE + 1000, DAY_BASE, DAY_BASE + 1000],
+      });
+      assert.deepStrictEqual(results, [
+        { timestamp: DAY_BASE + 1000, value: 5, state: 'exact' },
+        { timestamp: DAY_BASE, value: 1, state: 'exact' },
+        { timestamp: DAY_BASE + 1000, value: 5, state: 'exact' },
+      ]);
+      const linear = await engine.queryAt('db', 'm.dup', {
+        timestamps: [DAY_BASE + 500, DAY_BASE + 500],
+        mode: 'linear',
+      });
+      assert.deepStrictEqual(linear, [
+        { timestamp: DAY_BASE + 500, value: 3, state: 'interpolated' },
+        { timestamp: DAY_BASE + 500, value: 3, state: 'interpolated' },
+      ]);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it('跨块 / 跨日邻居：线性插值在块边界与日目录边界连续', async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const engine = await openEngine(createDataDir(), { blockTargetPoints: 4096 });
+    try {
+      // Day 1: 8192 points (two blocks); day 2: 4096 constant points
+      const dayOneValues = Array.from({ length: 8192 }, (_, index) => index);
+      await engine.writeBatch('db', pointsFrom('m.cross', dayOneValues, DAY_BASE));
+      await engine.writeBatch('db', pointsFrom('m.cross', new Array(4096).fill(200), DAY_BASE + DAY_MS));
+
+      // Cross-block: between the last point of block 1 (4095) and the first of block 2 (4096)
+      const crossBlock = DAY_BASE + 4095 * 1000 + 500;
+      const blockResult = await engine.queryAt('db', 'm.cross', { timestamps: [crossBlock], mode: 'linear' });
+      assert.equal(blockResult[0].state, 'interpolated');
+      assert.equal(blockResult[0].value, 4095.5);
+
+      // Cross-day: between the last day-1 point (8191) and the first day-2 point (200)
+      const lastDayOne = DAY_BASE + 8191 * 1000;
+      const firstDayTwo = DAY_BASE + DAY_MS;
+      const crossDay = lastDayOne + (firstDayTwo - lastDayOne) / 2;
+      const dayResult = await engine.queryAt('db', 'm.cross', { timestamps: [crossDay], mode: 'linear' });
+      assert.equal(dayResult[0].state, 'interpolated');
+      assert.equal(dayResult[0].value, (8191 + 200) / 2);
     } finally {
       await engine.close();
     }

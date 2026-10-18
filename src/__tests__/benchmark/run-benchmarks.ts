@@ -13,7 +13,7 @@
  *
  * 编排内容（《详细设计》§7 / 《开发计划》§7）：
  *   B1 压缩率 / B2 吞吐 / B3 range 冷热延迟 / B4 跨天切换 / B5 last(before) 端点差 ×1000 /
- *   B6 满负载外推 / POWER-LOSS 断电注入（SIGKILL × N + 重启可查性校验）。
+ *   B6 满负载外推 / B7 跨时间跨度查询性能矩阵 / POWER-LOSS 断电注入（SIGKILL × N + 重启可查性校验）。
  *
  * 判定：逐项打印明细与 PASS/FAIL，最后打印汇总表；**任一项 FAIL 进程以非零码退出**（供 CI 门禁使用）。
  *
@@ -34,6 +34,7 @@ import { runB3RangeLatency } from './b3-range-latency.ts';
 import { runB4DayRollover } from './b4-day-rollover.ts';
 import { runB5EndpointDiff } from './b5-endpoint-diff.ts';
 import { runB6FullLoad } from './b6-full-load.ts';
+import { runB7SpanScaling } from './b7-span-scaling.ts';
 import { runPowerLossInjection } from './power-loss.ts';
 
 /* ---------- 编排项 ---------- */
@@ -54,6 +55,7 @@ const BENCHMARKS: readonly BenchmarkEntry[] = [
   { name: 'B4', title: '跨天目录切换', run: runB4DayRollover },
   { name: 'B5', title: 'last(before) 端点差 ×1000', run: runB5EndpointDiff },
   { name: 'B6', title: '满负载容量外推', run: runB6FullLoad },
+  { name: 'B7', title: '跨时间跨度查询性能', run: runB7SpanScaling },
   { name: 'POWER-LOSS', title: '断电注入', run: runPowerLossInjection },
 ];
 

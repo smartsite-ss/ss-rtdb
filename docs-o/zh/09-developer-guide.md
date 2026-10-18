@@ -105,6 +105,7 @@ npm run bench
 | B4 day rollover | 跨日边界的开销 |
 | B5 endpoint diff | 各端点延迟分解 |
 | B6 full load | 满负载下的外推行为 |
+| B7 span scaling | 跨时间跨度查询性能：1/5/10/20/30/50/100 天的 range / count-exact / avg / queryAt 冷热延迟与堆增量 |
 | POWER-LOSS | 随机掉电注入（子进程）—— 必须零损坏结束 |
 
 规模由 `RTDB_BENCH_SCALE` 控制（例如 `RTDB_BENCH_SCALE=small npm run bench`），以便 CI 跑得更短。
@@ -192,3 +193,4 @@ Apache License 2.0。贡献按同一许可证接受；请保持文件头完整�
 | 日期 | 变更 | 处理模型 |
 | ---- | ---- | -------- |
 | 2026-10-17 | 创建中文译本（新增页面，对应英文 09-developer-guide.md） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §4 基准表新增 B7（跨时间跨度查询性能矩阵，1/5/10/20/30/50/100 天） | GLM-5.3-Flash |

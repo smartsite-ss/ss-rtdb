@@ -142,6 +142,8 @@ export const zh: Record<MessageKey, string> = {
   'metrics.reset': '重置区间',
   'metrics.summary': '返回 {points} 点 · 绘制 {plotted} 点 · 跳过 {skipped} 个非数值点',
   'metrics.summaryAggregated': '返回 {windows} 个窗口 · 绘制 {plotted} 个 · 跳过 {skipped} 个空窗口',
+  'metrics.summaryAt':
+    '返回 {samples} 个采样点 · 绘制 {plotted} 个 · 实测 {exact} · 插值 {interpolated} · 平推 {extrapolated} · 无数据 {noData}',
   'metrics.elapsed': '查询耗时 {duration}',
   'metrics.emptyPreview': '执行一次查询以预览曲线。',
   'metrics.notSelected': '未选择',
@@ -162,7 +164,7 @@ export const zh: Record<MessageKey, string> = {
   'metrics.unit.s': '秒',
   'metrics.unit.m': '分',
   'metrics.unit.h': '时',
-  'metrics.limitNote': '条数上限只对原始点查询生效；一次聚合最多返回 100 000 个窗口。',
+  'metrics.limitNote': '条数上限对原始点查询与插值网格生效（单次最多 10 000 个采样点）；一次聚合最多返回 100 000 个窗口。',
   'metrics.exportXls': '导出 XLS',
   'metrics.hint.raw':
     '原始点按存储时刻直接连线，不做插值：相邻采样点之间是直线，采样间隔很大时看起来会像一段斜坡，长区间建议改用聚合。布尔值按 0/1 绘制。',
@@ -170,11 +172,16 @@ export const zh: Record<MessageKey, string> = {
   'metrics.hint.aggregate':
     'avg 为时间加权平均：窗口内样本按时间积分，窗口外相邻点做线性插值；需要等权平均请用 sum / count。无数据的窗口不产生点。',
   'metrics.hint.intervals': '采样间隔中位 {median}、最大 {max}；超过中位 {factor} 倍的缺口 {gaps} 处。',
+  'metrics.interpolation': '插值查询',
+  'metrics.interpolation.none': '无（使用上方原始/聚合）',
+  'metrics.hint.at':
+    '插值查询经 POST /api/v1/query/at 在均匀网格上重采样：step 保持前值，linear 在相邻实测点之间线性插值（仅 f64/i64）。state 标记每个采样点：exact＝实测点，interpolated / extrapolated＝推算值，no-data＝无数据。',
   'metrics.xls.timestamp': '时间戳(ms)',
   'metrics.xls.time': '时间',
   'metrics.xls.value': '值',
   'metrics.xls.type': '类型(vt)',
   'metrics.xls.quality': '质量',
+  'metrics.xls.state': '来源',
   'metrics.xls.windowStartMs': '窗口起点(ms)',
   'metrics.xls.windowStart': '窗口起点',
   'metrics.xls.windowEndMs': '窗口终点(ms)',

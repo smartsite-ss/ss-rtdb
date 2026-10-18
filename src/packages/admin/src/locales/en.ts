@@ -141,6 +141,8 @@ export const en = {
   'metrics.reset': 'Reset range',
   'metrics.summary': '{points} point(s) returned · {plotted} plotted · {skipped} non-numeric skipped',
   'metrics.summaryAggregated': '{windows} window(s) returned · {plotted} plotted · {skipped} empty skipped',
+  'metrics.summaryAt':
+    '{samples} sample(s) returned · {plotted} plotted · exact {exact} · interpolated {interpolated} · extrapolated {extrapolated} · no-data {noData}',
   'metrics.elapsed': 'query took {duration}',
   'metrics.emptyPreview': 'Run a query to preview the series.',
   'metrics.notSelected': 'not selected',
@@ -161,7 +163,8 @@ export const en = {
   'metrics.unit.s': 's',
   'metrics.unit.m': 'm',
   'metrics.unit.h': 'h',
-  'metrics.limitNote': 'Limit applies to raw queries only; one aggregation call returns at most 100 000 windows.',
+  'metrics.limitNote':
+    'Limit applies to raw queries and to the interpolation grid (at most 10 000 samples per call); one aggregation call returns at most 100 000 windows.',
   'metrics.exportXls': 'Export XLS',
   'metrics.hint.raw':
     'Raw points are plotted exactly as stored: no interpolation, each sample is joined to the next, so a long sampling gap looks like a straight ramp. Use aggregation for long ranges. Booleans are plotted as 0/1.',
@@ -169,11 +172,16 @@ export const en = {
   'metrics.hint.aggregate':
     'avg is time-weighted: the samples inside the window are integrated over time with linearly interpolated neighbours outside it; for an equal-weight mean use sum / count. A window without data yields no point.',
   'metrics.hint.intervals': 'Sampling interval median {median}, largest {max}; {gaps} gap(s) above {factor}× the median.',
+  'metrics.interpolation': 'Interpolation',
+  'metrics.interpolation.none': 'none (raw / aggregated above)',
+  'metrics.hint.at':
+    'Interpolation resamples the series at a uniform grid via POST /api/v1/query/at: step holds the previous stored value, linear interpolates between neighbouring samples (f64/i64 only). state marks each sample: exact = a real stored point, interpolated / extrapolated = computed, no-data = nothing available.',
   'metrics.xls.timestamp': 'Timestamp (ms)',
   'metrics.xls.time': 'Time',
   'metrics.xls.value': 'Value',
   'metrics.xls.type': 'Type (vt)',
   'metrics.xls.quality': 'Quality',
+  'metrics.xls.state': 'State',
   'metrics.xls.windowStartMs': 'Window start (ms)',
   'metrics.xls.windowStart': 'Window start',
   'metrics.xls.windowEndMs': 'Window end (ms)',

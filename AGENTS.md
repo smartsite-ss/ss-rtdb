@@ -213,7 +213,7 @@ cli ────┼──> server ──> core
   `segment`、`segment-writer`、`segment-reader`、`wal-recovery`、`write-path`、
   `memory-index`、`pool`、`retention`、`engine`、`server`、`client`、`cli`。
 - 基准在 `src/__tests__/benchmark/`（B1 压缩、B2 吞吐、B3 区间延迟、B4 跨日、B5 端点分解、
-  B6 满负载、POWER-LOSS 掉电注入）。用 `RTDB_BENCH_SCALE=small npm run bench` 可缩短运行。
+  B6 满负载、B7 跨时间跨度查询性能、POWER-LOSS 掉电注入）。用 `RTDB_BENCH_SCALE=small npm run bench` 可缩短运行。
 - 验收阈值：写入 ≥50 000 点/s 且 P99 <500 ms；16 384 点整块压缩 ≥10×；
   单指标 7 天区间查询 ≤300 ms（冷）/ ≤50 ms（热）；1 000 次掉电注入零损坏。
 - 跨平台环境噪声会把回归失败降级为警告，不要因此“调松”阈值。
@@ -309,3 +309,4 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | §2 SEA 要点补充：重建 exe 前必须停止运行中的实例，`bin/sea/build-sea.mjs` 对 `EBUSY` 覆盖失败给出明确提示 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 演示客户端新增性能模式（`--points-per-tick` / `--rate` / `--total-points`）与 `bin\start-demo-server.bat bench`（**仅跑压测客户端，不启动服务端**，服务端由人工在外部启动）；§2 命令表与 §3 布局同步。同轮修正 §4 第 10 条：`.bat` 必须 **UTF-8 无 BOM**（cmd.exe 不识别 BOM，会导致 `@echo off` 失效） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增文档 11「存储格式与写入路径（细化设计）」（中英对照，含索引与根 README 同步）；§7 页码范围更新为 `01`…`11` | GLM-5.3-Flash |
+| 2026-10-18 | §6 基准清单新增 B7（跨时间跨度查询性能：1/5/10/20/30/50/100 天的 range/count-exact/avg/queryAt 冷热延迟与堆增量） | GLM-5.3-Flash |

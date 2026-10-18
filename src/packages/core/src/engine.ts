@@ -45,7 +45,7 @@ import { join, resolve } from 'node:path';
 import { PerformanceObserver } from 'node:perf_hooks';
 
 import { ERROR_CODE, RtdbError } from './errors.ts';
-import { dateNumberFromTimestamp } from './format.ts';
+import { dateNumberFromTimestamp, nextDayTimestampFromDateNumber, timestampFromDateNumber } from './format.ts';
 import type { SegmentBlockIndexEntry } from './format.ts';
 import { DataRootLock } from './lock.ts';
 import { BufferPool } from './pool.ts';
@@ -90,6 +90,9 @@ export const MAX_AGGREGATE_WINDOWS = 100_000;
 
 /** Maximum number of timestamps accepted by one `queryAt` call (exceeding throws `E_INVALID_POINT`) */
 export const MAX_QUERY_AT_TIMESTAMPS = 10_000;
+
+/** Milliseconds per day (day-expanding search step for the nearest-point helpers) */
+const DAY_MS = 86_400_000;
 
 /** Per-database retention policy file name (listed under the database directory, atomically written by `setRetention`; §6.2.1) */
 export const RETENTION_FILE_NAME = 'retention.json';
@@ -474,20 +477,13 @@ export class RtdbEngine {
       throw new RtdbError(ERROR_CODE.InvalidRange, `Illegal limit: ${String(opts.limit)}`);
     }
     const order = opts.order ?? 'asc';
-    // Ascending takes the first limit; descending means "the latest limit entries", so take all ascending first and then take the tail reversed
+    // Ascending takes the first limit; descending reads the "latest limit entries" directly (bounded memory
+    // on both paths — neither materializes more than `limit` unique points, 2026-10-18 bounded-memory refactor)
     const receivedOut = { min: 0, max: 0 };
-    const ascending = this.collectAscendingPoints(
-      database,
-      metricName,
-      opts.start,
-      opts.end,
-      order === 'asc' ? limit : Number.MAX_SAFE_INTEGER,
-      receivedOut,
-    );
     const points =
       order === 'desc'
-        ? ascending.slice(Math.max(0, ascending.length - limit)).reverse()
-        : ascending.slice(0, limit);
+        ? this.collectDescendingPoints(database, metricName, opts.start, opts.end, limit, receivedOut)
+        : this.collectAscendingPoints(database, metricName, opts.start, opts.end, limit, receivedOut).slice(0, limit);
     const series: Series = { metricName, points };
     if (receivedOut.min !== 0 && receivedOut.max !== 0) series.received = receivedOut;
     return this.finishQuery(startedAt, series);
@@ -514,10 +510,16 @@ export class RtdbEngine {
     const startedAt = performance.now();
     this.validateRange(opts.start, opts.end);
     if (opts.exact === true) {
-      return this.finishQuery(
-        startedAt,
-        this.collectAscendingPoints(database, metricName, opts.start, opts.end, Number.MAX_SAFE_INTEGER).length,
-      );
+      // Bounded-memory exact count: consume the merged cursor point by point without materializing
+      // the point array (2026-10-18 fix for the ~2 GB heap growth on full-day `count exact` queries)
+      let count = 0;
+      const cursor = this.mergedPointCursor(database, metricName, opts.start, opts.end, 'asc');
+      let next = cursor.next();
+      while (!next.done) {
+        count += 1;
+        next = cursor.next();
+      }
+      return this.finishQuery(startedAt, count);
     }
     let estimate = 0;
     for (const location of this.reader.locateBlocks(database, metricName, opts.start, opts.end)) {
@@ -561,43 +563,43 @@ export class RtdbEngine {
     }
     const lastWindowEnd = opts.start + windowCount * opts.windowMs;
 
-    const interior = this.collectAscendingPoints(
-      database,
+    // Streaming aggregation (2026-10-18 bounded-memory refactor): points are fed once in ascending
+    // order and each window is finalized as soon as the first point at/after its end arrives, so
+    // memory stays bounded by the per-window accumulators instead of the hit point count. Output is
+    // bit-identical to the former materialized implementation (same pair order, same edge handling).
+    // The before/after edge neighbors only participate in the time-weighted `avg` integral, so they
+    // are fetched lazily for `avg` alone.
+    const aggregator = new StreamingWindowAggregator(
+      opts.type,
       metricName,
       opts.start,
-      lastWindowEnd - 1,
-      Number.MAX_SAFE_INTEGER,
+      opts.windowMs,
+      windowCount,
     );
-    const before = this.latestPointAtOrBefore(database, metricName, opts.start - 1);
-    const after = this.earliestPointAtOrAfter(database, metricName, lastWindowEnd);
-
-    const seriesPoints: Point[] = [];
-    if (before !== null) seriesPoints.push(before);
-    for (const point of interior) seriesPoints.push(point);
-    if (after !== null) seriesPoints.push(after);
-    if (seriesPoints.length === 0) return this.finishQuery(startedAt, []);
-
-    const valueType = inferValueTypeFromValue(seriesPoints[0].value);
-    assertAggregateSupported(opts.type, valueType, metricName);
-
-    const windows: AggregateWindow[] = [];
-    let cursorStart = 0;
-    for (let index = 0; index < windowCount; index += 1) {
-      const windowStart = opts.start + index * opts.windowMs;
-      const windowEnd = windowStart + opts.windowMs;
-      while (cursorStart < interior.length && interior[cursorStart].timestamp < windowStart) cursorStart += 1;
-      let cursorEnd = cursorStart;
-      while (cursorEnd < interior.length && interior[cursorEnd].timestamp < windowEnd) cursorEnd += 1;
-      const windowPoints = interior.slice(cursorStart, cursorEnd);
-      cursorStart = cursorEnd;
-      windows.push({
-        start: windowStart,
-        end: windowEnd,
-        value: computeWindowAggregate(opts.type, windowPoints, seriesPoints, windowStart, windowEnd),
-        count: windowPoints.length,
-      });
+    if (opts.type === 'avg') {
+      const before = this.latestPointAtOrBefore(database, metricName, opts.start - 1);
+      if (before !== null) aggregator.feed(before, false);
     }
-    return this.finishQuery(startedAt, windows);
+    let interiorCount = 0;
+    for (const point of this.mergedPointCursor(database, metricName, opts.start, lastWindowEnd - 1, 'asc')) {
+      aggregator.feed(point, true);
+      interiorCount += 1;
+    }
+    if (opts.type === 'avg') {
+      const after = this.earliestPointAtOrAfter(database, metricName, lastWindowEnd);
+      if (after !== null) aggregator.feed(after, false);
+    } else if (interiorCount === 0) {
+      // Preserve the materialized-implementation semantics: as long as the metric holds any point (even
+      // outside the queried range) all windows are returned; only a completely empty metric yields [].
+      const before = this.latestPointAtOrBefore(database, metricName, opts.start - 1);
+      if (before !== null) aggregator.feed(before, false);
+      if (!aggregator.hasPoints) {
+        const after = this.earliestPointAtOrAfter(database, metricName, lastWindowEnd);
+        if (after !== null) aggregator.feed(after, false);
+      }
+    }
+    if (!aggregator.hasPoints) return this.finishQuery(startedAt, []);
+    return this.finishQuery(startedAt, aggregator.finish());
   }
 
   /**
@@ -642,48 +644,63 @@ export class RtdbEngine {
       }
     }
 
-    // Results echo the request order; evaluate in ascending order with a monotonic two-pointer scan
+    // Results echo the request order; evaluate in ascending order with a monotonic two-pointer scan over
+    // the merged point cursor (bounded memory: only the two neighbors around the current request are held,
+    // edge neighbors are fetched lazily at most once — 2026-10-18 bounded-memory refactor)
     const order = timestamps
       .map((timestamp, index) => ({ timestamp, index }))
       .sort((left, right) => left.timestamp - right.timestamp);
     const min = order[0].timestamp;
     const max = order[order.length - 1].timestamp;
 
-    const coverage = this.collectAscendingPoints(database, metricName, min, max, Number.MAX_SAFE_INTEGER);
-
-    // Left edge neighbor: the latest point strictly before the covered range (needed only when some
-    // requested t precedes the first covered point)
-    let beforeFirst: Point | null = null;
-    if (coverage.length === 0 || coverage[0].timestamp > min) {
-      beforeFirst = this.latestPointAtOrBefore(database, metricName, min);
-    }
-    // Right edge neighbor (linear only): the true right neighbor may live beyond `max`
-    let afterLast: Point | null = null;
-    if (mode === 'linear' && (coverage.length === 0 || coverage[coverage.length - 1].timestamp < max)) {
-      afterLast = this.earliestPointAtOrAfter(database, metricName, max);
-    }
-
-    // Type gate for linear (same operator x value-type matrix as the aggregate primitives)
-    if (mode === 'linear') {
-      const source = coverage[0] ?? beforeFirst ?? afterLast;
-      if (source !== null) {
-        const valueType = inferValueTypeFromValue(source.value);
-        if (valueType !== ValueType.Float64 && valueType !== ValueType.Int64) {
-          throw new RtdbError(
-            ERROR_CODE.TypeMismatch,
-            `Interpolation mode 'linear' only supports f64/i64; metric ${metricName} is ${valueTypeName(valueType)}`,
-          );
-        }
-      }
-    }
-
     const results: AtPoint[] = new Array(timestamps.length);
-    let cursor = 0; // first coverage index with timestamp > current t (coverage is ascending)
-    for (const request of order) {
-      while (cursor < coverage.length && coverage[cursor].timestamp <= request.timestamp) cursor += 1;
-      const left = cursor > 0 ? coverage[cursor - 1] : null;
-      const right = cursor < coverage.length ? coverage[cursor] : null;
-      results[request.index] = evaluateQueryAtPoint(mode, request.timestamp, left, right, beforeFirst, afterLast);
+    const cursor = this.mergedPointCursor(database, metricName, min, max, 'asc');
+    let cursorNext = cursor.next();
+    let left: Point | null = null; // latest point <= current t
+    let beforeFirst: Point | null = null;
+    let beforeFirstFetched = false;
+    let afterLast: Point | null = null;
+    let afterLastFetched = false;
+    let valueTypeGateDone = mode !== 'linear';
+    // Type gate for linear (same operator x value-type matrix as the aggregate primitives); runs once on
+    // the first point seen from any source (covered points or edge neighbors, homogeneous per metric)
+    const gateLinearValueType = (point: Point): void => {
+      if (valueTypeGateDone) return;
+      valueTypeGateDone = true;
+      const valueType = inferValueTypeFromValue(point.value);
+      if (valueType !== ValueType.Float64 && valueType !== ValueType.Int64) {
+        throw new RtdbError(
+          ERROR_CODE.TypeMismatch,
+          `Interpolation mode 'linear' only supports f64/i64; metric ${metricName} is ${valueTypeName(valueType)}`,
+        );
+      }
+    };
+    try {
+      for (const request of order) {
+        while (!cursorNext.done && cursorNext.value.timestamp <= request.timestamp) {
+          gateLinearValueType(cursorNext.value);
+          left = cursorNext.value;
+          cursorNext = cursor.next();
+        }
+        const right = cursorNext.done ? null : cursorNext.value;
+        if (right !== null) gateLinearValueType(right);
+        // Left edge neighbor: needed only when no covered point <= t exists yet
+        if (left === null && !beforeFirstFetched) {
+          beforeFirstFetched = true;
+          beforeFirst = this.latestPointAtOrBefore(database, metricName, min);
+          if (beforeFirst !== null) gateLinearValueType(beforeFirst);
+        }
+        // Right edge neighbor (linear only): the true right neighbor may live beyond `max`
+        if (mode === 'linear' && right === null && !afterLastFetched) {
+          afterLastFetched = true;
+          afterLast = this.earliestPointAtOrAfter(database, metricName, max);
+          if (afterLast !== null) gateLinearValueType(afterLast);
+        }
+        results[request.index] = evaluateQueryAtPoint(mode, request.timestamp, left, right, beforeFirst, afterLast);
+      }
+    } finally {
+      // Release the underlying block iteration early when the cursor is not exhausted
+      cursor.return();
     }
     return this.finishQuery(startedAt, results);
   }
@@ -1243,7 +1260,112 @@ export class RtdbEngine {
     return mergeAscending(segmentPoints, buffered);
   }
 
-  /** The latest point at or before `before` (take the newer of in-segment and buffered points) */
+  /**
+   * Same scope as `collectAscendingPoints`, but **descending**: the in-segment part is already truncated to
+   * `limit` unique points by `readMetricPoints` (bounded memory), then merged with the in-range buffered
+   * points; the first `limit` entries of the descending merge are exactly the newest `limit` unique points.
+   */
+  private collectDescendingPoints(
+    database: string,
+    metricName: string,
+    start: number,
+    end: number,
+    limit: number,
+    receivedOut?: { min: number; max: number },
+  ): Point[] {
+    const segmentPoints = this.reader.readMetricPoints(
+      database,
+      metricName,
+      { start, end, limit, order: 'desc' },
+      receivedOut,
+    );
+    const context = this.contexts.get(database);
+    if (context === undefined) return segmentPoints.slice(0, limit);
+    const buffered = context.writer
+      .bufferedPointsOf(metricName)
+      .filter((point) => point.timestamp >= start && point.timestamp <= end)
+      .sort((left, right) => right.timestamp - left.timestamp);
+    // The buffered points' arrival window merges into the same out param (block/batch granularity)
+    if (receivedOut !== undefined) {
+      const bufferedWindow = context.writer.bufferedReceivedWindowOf(metricName);
+      if (bufferedWindow !== null) {
+        receivedOut.min = receivedOut.min === 0 ? bufferedWindow.min : Math.min(receivedOut.min, bufferedWindow.min);
+        receivedOut.max = Math.max(receivedOut.max, bufferedWindow.max);
+      }
+    }
+    const merged: Point[] = [];
+    let segmentIndex = 0;
+    let bufferedIndex = 0;
+    let lastTimestamp: number | null = null;
+    while ((segmentIndex < segmentPoints.length || bufferedIndex < buffered.length) && merged.length < limit) {
+      let point: Point;
+      if (segmentIndex >= segmentPoints.length) point = buffered[bufferedIndex++];
+      else if (bufferedIndex >= buffered.length) point = segmentPoints[segmentIndex++];
+      else if (segmentPoints[segmentIndex].timestamp >= buffered[bufferedIndex].timestamp) {
+        point = segmentPoints[segmentIndex++];
+      } else point = buffered[bufferedIndex++];
+      if (lastTimestamp !== null && point.timestamp === lastTimestamp) continue;
+      lastTimestamp = point.timestamp;
+      merged.push(point);
+    }
+    return merged;
+  }
+
+  /**
+   * Segment stream + buffered point merge cursor (the same source scope as `collectAscendingPoints` /
+   * `collectDescendingPoints`, but **pull-based**): the consumer stops via `break`, so memory stays bounded
+   * by the visited blocks instead of the hit point count. Segment points win on equal timestamps (same
+   * dedupe precedence as `mergeAscending`).
+   */
+  private *mergedPointCursor(
+    database: string,
+    metricName: string,
+    start: number,
+    end: number,
+    order: 'asc' | 'desc',
+  ): Generator<Point, void, undefined> {
+    const context = this.contexts.get(database);
+    const buffered = (context === undefined ? [] : context.writer.bufferedPointsOf(metricName))
+      .filter((point) => point.timestamp >= start && point.timestamp <= end);
+    if (order === 'desc') buffered.reverse();
+    const segments = this.reader.iterateMetricPoints(database, metricName, { start, end, order });
+    let segmentNext = segments.next();
+    let bufferedIndex = 0;
+    let lastEmitted: number | null = null;
+    while (!segmentNext.done || bufferedIndex < buffered.length) {
+      let point: Point;
+      let fromSegment = false;
+      if (!segmentNext.done && bufferedIndex < buffered.length) {
+        const segmentWins =
+          order === 'asc'
+            ? segmentNext.value.timestamp <= buffered[bufferedIndex].timestamp
+            : segmentNext.value.timestamp >= buffered[bufferedIndex].timestamp;
+        if (segmentWins) {
+          point = segmentNext.value;
+          fromSegment = true;
+        } else point = buffered[bufferedIndex++];
+      } else if (!segmentNext.done) {
+        point = segmentNext.value;
+        fromSegment = true;
+      } else point = buffered[bufferedIndex++];
+      if (fromSegment) segmentNext = segments.next();
+      if (lastEmitted !== null && (order === 'asc' ? point.timestamp <= lastEmitted : point.timestamp >= lastEmitted)) {
+        continue;
+      }
+      lastEmitted = point.timestamp;
+      yield point;
+    }
+  }
+
+  /**
+   * The latest point at or before `before` (take the newer of in-segment and buffered points)
+   *
+   * The segment search expands **backwards over day directories** (1 day, then 8×, …) instead of
+   * scanning the whole history: each extra day costs one segment-descriptor load in `locateBlocks`, so a
+   * full-database lookup would cost ~1 ms per day of history (measured: ~126 ms over 100 days, paid by
+   * every `avg` aggregation / `linear` interpolation edge-neighbor fetch). Dense metrics resolve inside
+   * the first day; the geometric growth keeps the sparse worst case close to a single full scan.
+   */
   private latestPointAtOrBefore(database: string, metricName: string, before: number): Point | null {
     let best: Point | null = null;
     const consider = (point: Point): void => {
@@ -1254,26 +1376,40 @@ export class RtdbEngine {
     if (context !== undefined) {
       for (const point of context.writer.bufferedPointsOf(metricName)) consider(point);
     }
-    const locations = this.reader.locateBlocks(database, metricName, Number.NEGATIVE_INFINITY, before);
-    if (locations.length > 0) {
-      let minTimestamp = Number.POSITIVE_INFINITY;
-      for (const location of locations) {
-        if (location.entry.timestampMin < minTimestamp) minTimestamp = location.entry.timestampMin;
+    const dayNumbers = this.store.listDayDirectories(database);
+    if (dayNumbers.length === 0) return best;
+    const earliestDayStart = timestampFromDateNumber(dayNumbers[0]);
+    const latestDayEnd = nextDayTimestampFromDateNumber(dayNumbers[dayNumbers.length - 1]) - 1;
+    // `before` may be MAX_SAFE_INTEGER (`queryLast` without a boundary): start from the last day
+    const upper = Math.min(before, latestDayEnd);
+    if (upper < earliestDayStart) return best;
+
+    let spanDays = 1;
+    for (;;) {
+      const windowStart = Math.max(earliestDayStart, upper - spanDays * DAY_MS);
+      const locations = this.reader.locateBlocks(database, metricName, windowStart, upper);
+      if (locations.length > 0) {
+        let minTimestamp = Number.POSITIVE_INFINITY;
+        for (const location of locations) {
+          if (location.entry.timestampMin < minTimestamp) minTimestamp = location.entry.timestampMin;
+        }
+        if (Number.isFinite(minTimestamp)) {
+          const segmentPoints = this.reader.readMetricPoints(database, metricName, {
+            start: minTimestamp,
+            end: upper,
+            limit: 1,
+            order: 'desc',
+          });
+          if (segmentPoints.length > 0) consider(segmentPoints[0]);
+        }
+        return best;
       }
-      if (Number.isFinite(minTimestamp)) {
-        const segmentPoints = this.reader.readMetricPoints(database, metricName, {
-          start: minTimestamp,
-          end: before,
-          limit: Number.MAX_SAFE_INTEGER,
-          order: 'desc',
-        });
-        if (segmentPoints.length > 0) consider(segmentPoints[0]);
-      }
+      if (windowStart === earliestDayStart) return best;
+      spanDays *= 8;
     }
-    return best;
   }
 
-  /** The earliest point at or after `after` (take the earlier of in-segment and buffered points) */
+  /** The earliest point at or after `after` (take the earlier of in-segment and buffered points; day-expanding search, see `latestPointAtOrBefore`) */
   private earliestPointAtOrAfter(database: string, metricName: string, after: number): Point | null {
     let best: Point | null = null;
     const consider = (point: Point): void => {
@@ -1284,23 +1420,36 @@ export class RtdbEngine {
     if (context !== undefined) {
       for (const point of context.writer.bufferedPointsOf(metricName)) consider(point);
     }
-    const locations = this.reader.locateBlocks(database, metricName, after, Number.POSITIVE_INFINITY);
-    if (locations.length > 0) {
-      let maxTimestamp = Number.NEGATIVE_INFINITY;
-      for (const location of locations) {
-        if (location.entry.timestampMax > maxTimestamp) maxTimestamp = location.entry.timestampMax;
+    const dayNumbers = this.store.listDayDirectories(database);
+    if (dayNumbers.length === 0) return best;
+    const earliestDayStart = timestampFromDateNumber(dayNumbers[0]);
+    const latestDayEnd = nextDayTimestampFromDateNumber(dayNumbers[dayNumbers.length - 1]) - 1;
+    const lower = Math.max(after, earliestDayStart);
+    if (lower > latestDayEnd) return best;
+
+    let spanDays = 1;
+    for (;;) {
+      const windowEnd = Math.min(latestDayEnd, lower + spanDays * DAY_MS);
+      const locations = this.reader.locateBlocks(database, metricName, lower, windowEnd);
+      if (locations.length > 0) {
+        let maxTimestamp = Number.NEGATIVE_INFINITY;
+        for (const location of locations) {
+          if (location.entry.timestampMax > maxTimestamp) maxTimestamp = location.entry.timestampMax;
+        }
+        if (Number.isFinite(maxTimestamp) && maxTimestamp >= lower) {
+          const segmentPoints = this.reader.readMetricPoints(database, metricName, {
+            start: lower,
+            end: maxTimestamp,
+            limit: 1,
+            order: 'asc',
+          });
+          if (segmentPoints.length > 0) consider(segmentPoints[0]);
+        }
+        return best;
       }
-      if (Number.isFinite(maxTimestamp) && maxTimestamp >= after) {
-        const segmentPoints = this.reader.readMetricPoints(database, metricName, {
-          start: after,
-          end: maxTimestamp,
-          limit: 1,
-          order: 'asc',
-        });
-        if (segmentPoints.length > 0) consider(segmentPoints[0]);
-      }
+      if (windowEnd === latestDayEnd) return best;
+      spanDays *= 8;
     }
-    return best;
   }
 
   /* ---------- Internal: database and metric lists ---------- */
@@ -1652,95 +1801,204 @@ function interpolateQueryAtValue(leftPoint: Point, rightPoint: Point, t: number)
   return value;
 }
 
-/** Single-window aggregate value: count -> number; avg -> time-weighted; sum -> number; min/max -> the base value type; last -> the last value in the window (empty window -> NaN) */
-function computeWindowAggregate(
-  type: AggregateType,
-  windowPoints: readonly Point[],
-  seriesPoints: readonly Point[],
-  windowStart: number,
-  windowEnd: number,
-): Point['value'] {
-  switch (type) {
-    case 'count':
-      return windowPoints.length;
-    case 'avg':
-      return integrateValueArea(seriesPoints, windowStart, windowEnd);
-    case 'sum': {
-      let total = 0;
-      for (const point of windowPoints) total += valueToNumber(point.value);
-      return total;
+/* ---------- Internal: streaming window aggregation ---------- */
+
+/**
+ * Per-window running aggregate for [StreamingWindowAggregator](#streamingwindowaggregator): interior
+ * points update the point statistics; completed point pairs update the time-integral area (`avg` only).
+ * Field semantics mirror the former materialized `computeWindowAggregate` / `integrateValueArea` exactly.
+ */
+class WindowAccumulator {
+  count = 0;
+  sum = 0;
+  min: Point['value'] | null = null;
+  max: Point['value'] | null = null;
+  last: Point['value'] | null = null;
+  area = 0;
+
+  /** Feed one interior point of this window (ascending timestamp order) */
+  addPoint(point: Point): void {
+    this.count += 1;
+    this.sum += valueToNumber(point.value);
+    if (this.min === null || compareAggregateValues(point.value, this.min) < 0) this.min = point.value;
+    if (this.max === null || compareAggregateValues(point.value, this.max) > 0) this.max = point.value;
+    this.last = point.value;
+  }
+
+  /** Add the pair's trapezoid contribution clipped to `[windowStart, windowEnd)` (same formula as `integrateValueArea`) */
+  addPairArea(leftPoint: Point, rightPoint: Point, windowStart: number, windowEnd: number): void {
+    const segmentStart = Math.max(windowStart, leftPoint.timestamp);
+    const segmentEnd = Math.min(windowEnd, rightPoint.timestamp);
+    if (segmentEnd <= segmentStart) return;
+    const leftValue = valueToNumber(leftPoint.value);
+    const rightValue = valueToNumber(rightPoint.value);
+    const span = rightPoint.timestamp - leftPoint.timestamp;
+    if (span <= 0) {
+      this.area += leftValue * (segmentEnd - segmentStart);
+      return;
     }
-    case 'min': {
-      if (windowPoints.length === 0) return Number.NaN;
-      let best = windowPoints[0].value;
-      for (const point of windowPoints) {
-        if (compareAggregateValues(point.value, best) < 0) best = point.value;
-      }
-      return best;
-    }
-    case 'max': {
-      if (windowPoints.length === 0) return Number.NaN;
-      let best = windowPoints[0].value;
-      for (const point of windowPoints) {
-        if (compareAggregateValues(point.value, best) > 0) best = point.value;
-      }
-      return best;
-    }
-    case 'last':
-      return windowPoints.length === 0 ? Number.NaN : windowPoints[windowPoints.length - 1].value;
-    default:
-      throw new RtdbError(ERROR_CODE.Internal, `Unknown aggregate operator: ${String(type)}`);
+    const startValue = leftValue + ((rightValue - leftValue) * (segmentStart - leftPoint.timestamp)) / span;
+    const endValue = leftValue + ((rightValue - leftValue) * (segmentEnd - leftPoint.timestamp)) / span;
+    this.area += ((startValue + endValue) / 2) * (segmentEnd - segmentStart);
   }
 }
 
 /**
- * Time-weighted average: integrate `[windowStart, windowEnd)` **piecewise-linearly** and then divide by the
- * window width (§2.2)
+ * Streaming `queryAggregate` driver: points are fed once in ascending order (the `before` neighbor first,
+ * interior points with `countsAsInterior=true`, the `after` neighbor last) and each window is finalized as
+ * soon as the first point at/after its end arrives, so memory stays bounded by one accumulator per window
+ * instead of the hit point count (2026-10-18 bounded-memory refactor).
  *
- * The part with no data outside the window is **flat-extrapolated** by the nearest point; returns `NaN` when
- * the window has no intersection with the data range at all
- * (the window is left-closed right-open `[windowStart, windowEnd)`: `windowEnd <= first point` excludes the
- * first point, i.e. no intersection; but when `windowStart == last point` the last point is still in the
- * window, so the right end counts as no intersection only when `windowStart > last point`).
- * `seriesPoints` must be ascending and already include the interpolated neighbors before/after the window.
+ * Output is bit-identical to the former materialized implementation: point pairs are distributed to every
+ * overlapping window in feed order (`integrateValueArea` accumulates each window's pairs in index order),
+ * the leading-edge flat extrapolation is appended at finalize time, and the trailing-edge flat
+ * extrapolation only applies to windows still open at `finish` — a trigger point at/after the window end
+ * always suppresses it, which matches the global `last.timestamp` check of `integrateValueArea`.
  */
-function integrateValueArea(points: readonly Point[], windowStart: number, windowEnd: number): number {
-  const first = points[0];
-  const last = points[points.length - 1];
-  if (windowEnd <= first.timestamp || windowStart > last.timestamp) return Number.NaN;
-  if (points.length === 1) return valueToNumber(first.value);
+class StreamingWindowAggregator {
+  private readonly type: AggregateType;
+  private readonly metricName: string;
+  private readonly start: number;
+  private readonly windowMs: number;
+  private readonly windowCount: number;
+  private readonly accumulators: WindowAccumulator[];
+  private currentWindowIndex = 0;
+  private prevPoint: Point | null = null;
+  private firstPoint: Point | null = null;
+  private lastPoint: Point | null = null;
+  private readonly windows: AggregateWindow[] = [];
 
-  let area = 0;
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const left = points[index];
-    const right = points[index + 1];
-    const segmentStart = Math.max(windowStart, left.timestamp);
-    const segmentEnd = Math.min(windowEnd, right.timestamp);
-    if (segmentEnd <= segmentStart) continue;
+  constructor(
+    type: AggregateType,
+    metricName: string,
+    start: number,
+    windowMs: number,
+    windowCount: number,
+  ) {
+    this.type = type;
+    this.metricName = metricName;
+    this.start = start;
+    this.windowMs = windowMs;
+    this.windowCount = windowCount;
+    this.accumulators = Array.from({ length: windowCount }, () => new WindowAccumulator());
+  }
 
-    const leftValue = valueToNumber(left.value);
-    const rightValue = valueToNumber(right.value);
-    const span = right.timestamp - left.timestamp;
-    if (span <= 0) {
-      area += leftValue * (segmentEnd - segmentStart);
-      continue;
+  /** True once any point has been fed (mirrors the former empty-series early return) */
+  get hasPoints(): boolean {
+    return this.firstPoint !== null;
+  }
+
+  /** Feed one series point; `countsAsInterior` is false for the before/after edge neighbors */
+  feed(point: Point, countsAsInterior: boolean): void {
+    if (this.firstPoint === null) {
+      this.firstPoint = point;
+      assertAggregateSupported(this.type, inferValueTypeFromValue(point.value), this.metricName);
     }
-    const startValue = leftValue + ((rightValue - leftValue) * (segmentStart - left.timestamp)) / span;
-    const endValue = leftValue + ((rightValue - leftValue) * (segmentEnd - left.timestamp)) / span;
-    area += ((startValue + endValue) / 2) * (segmentEnd - segmentStart);
+    if (countsAsInterior) {
+      const index = Math.min(Math.floor((point.timestamp - this.start) / this.windowMs), this.windowCount - 1);
+      this.accumulators[index].addPoint(point);
+    }
+    if (this.prevPoint !== null) this.distributePair(this.prevPoint, point);
+    this.lastPoint = point;
+    this.prevPoint = point;
+    this.finalizeWindowsUpTo(point.timestamp);
   }
 
-  // Leading edge flat extrapolation (windowStart is earlier than the first point)
-  if (windowStart < first.timestamp) {
-    const edgeEnd = Math.min(windowEnd, first.timestamp);
-    if (edgeEnd > windowStart) area += valueToNumber(first.value) * (edgeEnd - windowStart);
+  /** Finalize every remaining window (call after the last point has been fed) */
+  finish(): AggregateWindow[] {
+    while (this.currentWindowIndex < this.windowCount) {
+      this.finalizeWindow(this.currentWindowIndex, false);
+      this.currentWindowIndex += 1;
+    }
+    return this.windows;
   }
-  // Trailing edge flat extrapolation (windowEnd is later than the last point)
-  if (windowEnd > last.timestamp) {
-    const edgeStart = Math.max(windowStart, last.timestamp);
-    if (windowEnd > edgeStart) area += valueToNumber(last.value) * (windowEnd - edgeStart);
+
+  /** Distribute the pair's trapezoid contribution to every overlapping open window (ascending window order) */
+  private distributePair(leftPoint: Point, rightPoint: Point): void {
+    const firstIndex = Math.max(
+      this.currentWindowIndex,
+      Math.floor((leftPoint.timestamp - this.start) / this.windowMs),
+    );
+    const lastIndex = Math.min(
+      this.windowCount - 1,
+      Math.floor((rightPoint.timestamp - this.start) / this.windowMs),
+    );
+    for (let index = firstIndex; index <= lastIndex; index += 1) {
+      this.accumulators[index].addPairArea(
+        leftPoint,
+        rightPoint,
+        this.start + index * this.windowMs,
+        this.start + (index + 1) * this.windowMs,
+      );
+    }
   }
-  return area / (windowEnd - windowStart);
+
+  /** Finalize windows whose end the freshly fed point has reached (the point acts as their trigger) */
+  private finalizeWindowsUpTo(timestamp: number): void {
+    while (this.currentWindowIndex < this.windowCount) {
+      const windowEnd = this.start + (this.currentWindowIndex + 1) * this.windowMs;
+      if (windowEnd > timestamp) break;
+      this.finalizeWindow(this.currentWindowIndex, true);
+      this.currentWindowIndex += 1;
+    }
+  }
+
+  private finalizeWindow(index: number, triggeredByPoint: boolean): void {
+    const accumulator = this.accumulators[index];
+    const windowStart = this.start + index * this.windowMs;
+    const windowEnd = windowStart + this.windowMs;
+    let value: Point['value'];
+    switch (this.type) {
+      case 'count':
+        value = accumulator.count;
+        break;
+      case 'avg':
+        value = this.finalizeAvg(accumulator, windowStart, windowEnd, triggeredByPoint);
+        break;
+      case 'sum':
+        value = accumulator.sum;
+        break;
+      case 'min':
+        value = accumulator.min ?? Number.NaN;
+        break;
+      case 'max':
+        value = accumulator.max ?? Number.NaN;
+        break;
+      case 'last':
+        value = accumulator.last ?? Number.NaN;
+        break;
+      default:
+        throw new RtdbError(ERROR_CODE.Internal, `Unknown aggregate operator: ${String(this.type)}`);
+    }
+    this.windows.push({ start: windowStart, end: windowEnd, value, count: accumulator.count });
+  }
+
+  /** Time-weighted average of one window (same NaN conditions, edge handling and add order as `integrateValueArea`) */
+  private finalizeAvg(
+    accumulator: WindowAccumulator,
+    windowStart: number,
+    windowEnd: number,
+    triggeredByPoint: boolean,
+  ): number {
+    const first = this.firstPoint;
+    const last = this.lastPoint;
+    if (first === null || last === null) return Number.NaN;
+    if (windowEnd <= first.timestamp || windowStart > last.timestamp) return Number.NaN;
+    if (this.firstPoint === this.lastPoint) return valueToNumber(first.value);
+    let area = accumulator.area;
+    // Leading edge flat extrapolation (windowStart is earlier than the first point)
+    if (windowStart < first.timestamp) {
+      const edgeEnd = Math.min(windowEnd, first.timestamp);
+      if (edgeEnd > windowStart) area += valueToNumber(first.value) * (edgeEnd - windowStart);
+    }
+    // Trailing edge flat extrapolation (windowEnd is later than the last point; a trigger point at or
+    // after windowEnd always suppresses it, matching the global last-point check)
+    if (!triggeredByPoint && windowEnd > last.timestamp) {
+      const edgeStart = Math.max(windowStart, last.timestamp);
+      if (windowEnd > edgeStart) area += valueToNumber(last.value) * (windowEnd - edgeStart);
+    }
+    return area / (windowEnd - windowStart);
+  }
 }
 
 /* ---------- Internal: config clamp warning ---------- */
