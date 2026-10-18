@@ -293,6 +293,21 @@ export class RtdbAdminApiClient {
     return body.metrics;
   }
 
+  /**
+   * `POST /api/v1/query/last` — newest point at or before `before` (`null` = this metric has no point yet)
+   *
+   * Used by the metric inventory to show a live value per row; one call per metric, so callers should cap the
+   * number of metrics and the concurrency.
+   */
+  async queryLast(database: string, metricName: string, before?: number): Promise<RtdbJsonPoint | null> {
+    const body = await this.request<{ point: RtdbJsonPoint | null }>('POST', '/api/v1/query/last', {
+      db: database,
+      metricName,
+      ...(before === undefined ? {} : { before }),
+    });
+    return body.point ?? null;
+  }
+
   async queryRange(database: string, metricName: string, start: number, end: number, limit: number): Promise<RtdbJsonSeries> {
     const body = await this.request<{ series: RtdbJsonSeries }>('POST', '/api/v1/query/range', {
       db: database,

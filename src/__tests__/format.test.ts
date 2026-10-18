@@ -45,6 +45,7 @@ import {
   parseSegmentHeader,
   timestampFromDateNumber,
   tryParseBlockHeader,
+  tryParseBlockValueType,
 } from '../packages/core/src/format.ts';
 
 import { isRtdbError } from '../packages/core/src/errors.ts';
@@ -213,6 +214,23 @@ describe('format: 块头（BlockHeader）', () => {
       9,
     );
     assert.equal(tryParseBlockHeader(badValueType, 0), null);
+  });
+
+  it('仅凭块头（无负载）即可取到值类型；缺字段区或类型码非法返回 null', () => {
+    // `encoded` 只含块头（负载 4_096 + 8_192 字节未附上）：这正是统计路径的探测切片
+    assert.equal(tryParseBlockValueType(encoded, 0), ValueType.Float64);
+
+    const headerRegion = 2 + metricBytes.length + BLOCK_HEADER_FIXED_SIZE - 2;
+    assert.equal(tryParseBlockValueType(encoded.subarray(0, headerRegion), 0), ValueType.Float64);
+    assert.equal(tryParseBlockValueType(encoded.subarray(0, headerRegion - 1), 0), null);
+
+    const badType = encoded.slice();
+    new DataView(badType.buffer, badType.byteOffset).setUint8(2 + metricBytes.length + 4, 9);
+    assert.equal(tryParseBlockValueType(badType, 0), null);
+
+    const badCodec = encoded.slice();
+    new DataView(badCodec.buffer, badCodec.byteOffset).setUint8(2 + metricBytes.length + 6, 99);
+    assert.equal(tryParseBlockValueType(badCodec, 0), null);
   });
 });
 

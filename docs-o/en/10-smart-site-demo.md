@@ -211,7 +211,20 @@ bin\demo-smart-site.bat dry
 bin\demo-smart-site.bat once --token-file ..\release\sea\rtdb.token
 bin\demo-smart-site.bat stream 60 --glitch-rate 0.002 --token-file ..\release\sea\rtdb.token
 bin\demo-smart-site.bat run --devices hvac-chiller --interval 500 --duration 10 --verify
+:: large-volume test: 20,000 points/s for 60 s, then verify the written range
+bin\demo-smart-site.bat run --rate 20000 --duration 60 --verify
+:: fixed batches: 5,000 points every second until 1,000,000 points are written
+bin\demo-smart-site.bat run --points-per-tick 5000 --interval 1000 --total-points 1000000
+:: print one large batch in wire format without writing it
+bin\demo-smart-site.bat dry --points-per-tick 5000
 ```
+
+- **Large-volume tests** use `run` with `--rate` (target pts/s), `--points-per-tick` (points per
+  batch) or `--total-points` (stop after N points); the batch size is decoupled from the 44-tag
+  catalog. One client is still bounded by `metrics × interval` (44 × 1000 = 44,000 points per batch) —
+  raise `--interval` or run several clients for more. Measured on this machine (Ryzen 7 4800H, local
+  disk): `--rate 20000 --duration 10` wrote 220,000 points at **21,823 points/s** with 0 duplicates and
+  0 failed batches; every `--verify` check (`count` / `last` / `aggregate`) passed.
 
 - `bin\start-demo-server.bat` starts the demo server from `demo\conf\rtdb-server.json`; when port
   6180 is taken, override it with `set RTDB_PORT=6190`;
@@ -333,3 +346,4 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-17 | Added §3.3 performance mode: `--points-per-tick` (points per batch), `--rate` (target points/s) and `--total-points` (budget); new `tickBatch()` generator (evenly spread timestamps inside the window, capacity check); progress and summary now report points/s, p99/max and the gap to the target | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §3.5 documents `bin\start-demo-server.bat bench <pts/s> <seconds> [client options]`: **load client only, never starts a server** (start rtdb-server yourself; waits for the token file, retries 3 times while unreachable) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §6 troubleshooting covers `--token rtdb.token` → `401 E_AUTH` (`--token` takes the value and overrides the config `tokenFile`; the demo instance and the SEA release use different token files); the client now warns when `--token` looks like a path and the 401 hint explains the precedence | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5 and `bin\demo-smart-site.bat` add **large-volume** examples (`--rate 20000 --duration 60 --verify`, `--points-per-tick 5000 --total-points 1000000`, `dry --points-per-tick 5000`), plus the capacity bound and a measured 21,823 points/s run | DeepSeek-V4.1-Flash |

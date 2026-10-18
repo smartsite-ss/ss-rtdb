@@ -778,6 +778,24 @@ export class RtdbEngine {
     return this.listMetricsSync(database);
   }
 
+  /**
+   * Whether a metric exists in a database (segment indexes + the unflushed buffer).
+   *
+   * Same sources as {@link listMetrics} but without building the full summary: the transport layer validates the
+   * metric on **every** query request, and a full summary walks every block index entry of the database (a day
+   * directory can hold hundreds of thousands of blocks). Per-segment metric-name sets are cached by the reader,
+   * so repeated validations settle at a map lookup per segment.
+   */
+  async hasMetric(database: string, metricName: string): Promise<boolean> {
+    this.requireOpen();
+    const context = this.contexts.get(database);
+    if (context !== undefined && context.writer.bufferedMetricNames().includes(metricName)) return true;
+    for (const descriptor of this.reader.listSegments(database)) {
+      if (this.reader.hasMetric(descriptor, metricName)) return true;
+    }
+    return false;
+  }
+
   /** Set a database's retention days (clamped 0~3650; written to `{database}/retention.json`, still effective after restart) */
   async setRetention(database: string, days: number): Promise<void> {
     this.requireOpen();
@@ -1706,6 +1724,8 @@ export class RtdbEngine {
    */
   private databaseMetricStatsSync(database: string): DatabaseMetricStats[] {
     const byMetric = new Map<string, DatabaseMetricStats>();
+    /** Metric names already probed for their locked type (see `listMetricsSync`: `null` must not retry) */
+    const valueTypeProbed = new Set<string>();
     for (const descriptor of this.reader.listSegments(database)) {
       const entries = this.reader.loadIndexEntries(database, descriptor.dateNumber, descriptor.sequence);
       for (const entry of entries) {
@@ -1727,7 +1747,10 @@ export class RtdbEngine {
         stats.bytes += entry.length;
         if (entry.timestampMin < stats.firstTs) stats.firstTs = entry.timestampMin;
         if (entry.timestampMax > stats.lastTs) stats.lastTs = entry.timestampMax;
-        if (stats.valueType === null) stats.valueType = this.reader.readBlockValueType(descriptor, entry);
+        if (!valueTypeProbed.has(entry.metricName)) {
+          valueTypeProbed.add(entry.metricName);
+          stats.valueType = this.reader.readBlockValueType(descriptor, entry);
+        }
       }
     }
 
@@ -1757,6 +1780,8 @@ export class RtdbEngine {
   private listMetricsSync(database: string): MetricSummary[] {
     const ranges = new Map<string, { firstTs: number; lastTs: number }>();
     const valueTypes = new Map<string, ValueType>();
+    /** Metric names already probed for their locked type (a probe may legitimately return `null`; never retry it per block) */
+    const valueTypeProbed = new Set<string>();
     const merge = (metricName: string, timestampMin: number, timestampMax: number): void => {
       const existing = ranges.get(metricName);
       if (existing === undefined) {
@@ -1766,12 +1791,19 @@ export class RtdbEngine {
       if (timestampMin < existing.firstTs) existing.firstTs = timestampMin;
       if (timestampMax > existing.lastTs) existing.lastTs = timestampMax;
     };
-    /** Capture a metric's locked type from its first block header (one small read per metric, no payload decode) */
+    /**
+     * Capture a metric's locked type from its first block header (one small read per metric, no payload decode).
+     *
+     * The "probed" marker is set even when the probe yields `null`: without it an unparsable block header makes
+     * every later block of the same metric re-read (a day directory with 200k+ blocks turned one `listMetrics`
+     * call into 200k+ file reads, and the server validates the metric on **every** query).
+     */
     const mergeValueType = (
       descriptor: ReturnType<SegmentReader['listSegments']>[number],
       entry: SegmentBlockIndexEntry,
     ): void => {
-      if (valueTypes.has(entry.metricName)) return;
+      if (valueTypeProbed.has(entry.metricName)) return;
+      valueTypeProbed.add(entry.metricName);
       const valueType = this.reader.readBlockValueType(descriptor, entry);
       if (valueType !== null) valueTypes.set(entry.metricName, valueType);
     };

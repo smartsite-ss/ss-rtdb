@@ -17,6 +17,7 @@ import { after, describe, it } from 'node:test';
 import { RtdbEngine } from '../packages/core/src/engine.ts';
 import { ERROR_CODE, isRtdbError } from '../packages/core/src/errors.ts';
 import { SegmentStore } from '../packages/core/src/segment-store.ts';
+import type { SegmentReader } from '../packages/core/src/segment-reader.ts';
 import { WriteAheadLog } from '../packages/core/src/wal.ts';
 import { ValueType } from '../packages/core/src/types.ts';
 import type { EngineOptions, WritePoint } from '../packages/core/src/types.ts';
@@ -340,6 +341,73 @@ describe('引擎: WAL 批次与安全点', () => {
       const metrics = await reopened.listMetrics(database);
       assert.equal(metrics.length, 1);
       assert.equal(metrics[0].metricName, 'crash.metric');
+    } finally {
+      await reopened.close();
+    }
+  });
+});
+
+/* ---------- 管理 API：块头值类型探测与指标存在性 ---------- */
+
+describe('引擎: 值类型探测与指标存在性', () => {
+  it('listMetrics 从封口段块头取到锁定值类型，且每个 metric 只探测一次', async () => {
+    const dataDir = createDataDir();
+    const database = 'typedb';
+    // 1024 点目标块 → 每个 metric 落 4 个块：探测若按块重试，次数会随块数放大而不是等于 metric 数
+    const engine = await openEngine(dataDir, { blockTargetPoints: 1024 });
+    try {
+      const bulk = Array.from({ length: 4096 }, (_, index) => index / 2);
+      await engine.writeBatch(database, pointsFrom('t.float', bulk, DAY_BASE));
+      await engine.writeBatch(database, pointsFrom('t.int', bulk, DAY_BASE));
+    } finally {
+      await engine.close();
+    }
+
+    // 重开后数据来自容量段：值类型只能从块头读出（内存缓冲已不存在）
+    const reopened = await openEngine(dataDir);
+    try {
+      // 统计块头探测次数：探测失败时不得对同一 metric 的每个块重试（大日目录会退化为数十万次小读）
+      const reader = (reopened as unknown as { reader: SegmentReader }).reader;
+      const original = reader.readBlockValueType.bind(reader);
+      let probes = 0;
+      (reader as unknown as Record<string, unknown>).readBlockValueType = (
+        descriptor: Parameters<SegmentReader['readBlockValueType']>[0],
+        entry: Parameters<SegmentReader['readBlockValueType']>[1],
+      ): ValueType | null => {
+        probes += 1;
+        return original(descriptor, entry);
+      };
+
+      const metrics = await reopened.listMetrics(database);
+      assert.deepStrictEqual(
+        metrics.map((summary) => [summary.metricName, summary.valueType]),
+        [
+          ['t.float', ValueType.Float64],
+          ['t.int', ValueType.Float64],
+        ],
+      );
+      assert.equal(probes, metrics.length, '每个 metric 只探测一次块头');
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it('hasMetric 覆盖未落盘缓冲与已落段数据，未知 metric 返回 false', async () => {
+    const dataDir = createDataDir();
+    const database = 'existsdb';
+    const engine = await openEngine(dataDir);
+    try {
+      await engine.writeBatch(database, pointsFrom('e.metric', [1], DAY_BASE));
+      assert.equal(await engine.hasMetric(database, 'e.metric'), true, '未刷段缓冲里的 metric 也应存在');
+      assert.equal(await engine.hasMetric(database, 'e.other'), false);
+    } finally {
+      await engine.close();
+    }
+
+    const reopened = await openEngine(dataDir);
+    try {
+      assert.equal(await reopened.hasMetric(database, 'e.metric'), true, '已落段的 metric 应存在');
+      assert.equal(await reopened.hasMetric(database, 'e.missing'), false);
     } finally {
       await reopened.close();
     }

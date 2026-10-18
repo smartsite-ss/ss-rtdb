@@ -35,9 +35,11 @@ import { useAsyncAction } from '../async';
 import {
   formatDateTime,
   formatDateTimeWithOffset,
+  formatNumber,
   fromDateTimeLocalValue,
   toDateTimeLocalValue,
 } from '../format';
+import { mapWithLimit } from '../concurrency';
 import { t } from '../i18n';
 import { downloadCsv } from '../csv-download';
 import { downloadXlsWorkbook } from '../xls-download';
@@ -52,6 +54,13 @@ const DEFAULT_WINDOW_SECONDS = 60;
 const GAP_FACTOR = 3;
 /** Server-side cap of one `query/at` call; a window that would exceed it is rejected instead of clamped */
 const MAX_QUERY_AT_TIMESTAMPS = 10_000;
+/**
+ * The live-value refresh issues one `query/last` per metric, and on a busy database one such query can take
+ * ~1.5 s (block lookup on a 200 MB segment). The limits below deliberately leave most of the browser's 6
+ * connections free for real queries: never occupy the pool with a background nicety.
+ */
+const LIVE_METRIC_LIMIT = 50;
+const LIVE_CONCURRENCY = 3;
 
 const AGGREGATE_TYPES: RtdbAggregateType[] = Object.values(RTDB_AGGREGATE_TYPE);
 const INTERPOLATION_MODES: RtdbInterpolationMode[] = Object.values(RTDB_INTERPOLATION_MODE);
@@ -73,6 +82,11 @@ const WINDOW_UNITS = { s: 1, m: 60, h: 3_600 } as const;
 type WindowUnit = keyof typeof WINDOW_UNITS;
 
 const { busy, errorMessage, run } = useAsyncAction();
+/** One card, two tabs: the inventory (catalogue + live values) and the range preview (query + chart) */
+type MetricsTab = 'inventory' | 'preview';
+const PREVIEW_ENDPOINTS =
+  'POST /api/v1/query/range · POST /api/v1/query/aggregate · POST /api/v1/query/at';
+const activeTab = ref<MetricsTab>('inventory');
 const databases = ref<string[]>([]);
 const selectedDatabase = ref('');
 const metrics = ref<RtdbMetricSummary[]>([]);
@@ -91,6 +105,17 @@ const aggregateWindows = ref<RtdbAggregateWindow[] | null>(null);
 const atPoints = ref<RtdbAtPoint[] | null>(null);
 /** Elapsed wall time of the last successful query (ms), shown next to the summary line */
 const queryElapsedMs = ref<number | null>(null);
+/** Newest point per metric (`query/last`), filled by the live-value refresh; `null` = no point / not queried */
+const latestByMetric = ref<Record<string, RtdbJsonPoint | null>>({});
+const latestLoading = ref(false);
+/** Wall time of the last live-value refresh (`null` before the first one) */
+const latestLoadedAt = ref<number | null>(null);
+/** Progress of the running refresh (`done / total`), drives the button label */
+const latestProgress = ref({ done: 0, total: 0 });
+/** `true` when the database has more metrics than {@link LIVE_METRIC_LIMIT}, so only the first page is live */
+const latestCapped = computed(() => metrics.value.length > LIVE_METRIC_LIMIT);
+/** Monotonic refresh id: a newer refresh (or a database switch) invalidates the in-flight one */
+let latestRequestId = 0;
 
 const hasPreview = computed(
   () => rawSeries.value !== null || aggregateWindows.value !== null || atPoints.value !== null,
@@ -205,6 +230,64 @@ function clearPreview(): void {
   atPoints.value = null;
 }
 
+/** Newest point of one metric (`undefined` = not loaded yet, `null` = metric has no point) */
+function livePoint(metricName: string): RtdbJsonPoint | null | undefined {
+  return latestByMetric.value[metricName];
+}
+
+/** Display form of a live point's value (`—` when the metric has no point) */
+function formatLiveValue(point: RtdbJsonPoint | null | undefined): string {
+  if (point === null || point === undefined || point.v === null) return '—';
+  if (typeof point.v === 'number') return formatNumber(point.v);
+  if (typeof point.v === 'boolean') return point.v ? 'true' : 'false';
+  return point.v;
+}
+
+/** Timestamp of a live point's newest sample (`—` when the metric has no point) */
+function liveUpdatedAt(metricName: string): string {
+  const point = latestByMetric.value[metricName];
+  return point === undefined || point === null ? '—' : formatDateTime(point.t);
+}
+
+/**
+ * Load the newest point of every listed metric (`POST /api/v1/query/last`, one request per metric).
+ *
+ * Bounded on purpose: at most {@link LIVE_METRIC_LIMIT} metrics and {@link LIVE_CONCURRENCY} requests in flight, so a
+ * database with thousands of metrics cannot flood the console. A failed single metric simply shows `—`; the rows
+ * stay usable and the next refresh retries it.
+ */
+async function refreshLiveValues(): Promise<void> {
+  const database = selectedDatabase.value;
+  if (database.length === 0 || metrics.value.length === 0) {
+    latestByMetric.value = {};
+    latestLoadedAt.value = null;
+    return;
+  }
+  const requestId = (latestRequestId += 1);
+  const targets = metrics.value.slice(0, LIVE_METRIC_LIMIT);
+  const snapshot: Record<string, RtdbJsonPoint | null> = {};
+  latestProgress.value = { done: 0, total: targets.length };
+  latestLoading.value = true;
+  try {
+    await mapWithLimit(targets, LIVE_CONCURRENCY, async (metric) => {
+      try {
+        snapshot[metric.metricName] = await props.client.queryLast(database, metric.metricName);
+      } catch {
+        snapshot[metric.metricName] = null;
+      }
+      if (requestId === latestRequestId) {
+        latestProgress.value = { done: latestProgress.value.done + 1, total: targets.length };
+      }
+    });
+    // Switching database / reloading while a refresh is in flight: drop the stale snapshot.
+    if (requestId !== latestRequestId) return;
+    latestByMetric.value = snapshot;
+    latestLoadedAt.value = Date.now();
+  } finally {
+    if (requestId === latestRequestId) latestLoading.value = false;
+  }
+}
+
 async function loadDatabases(): Promise<void> {
   const list = await run(() => props.client.listDatabases());
   if (list === undefined) return;
@@ -213,6 +296,8 @@ async function loadDatabases(): Promise<void> {
     selectedDatabase.value = '';
     metrics.value = [];
     selectedMetric.value = '';
+    latestByMetric.value = {};
+    latestLoadedAt.value = null;
     return;
   }
   if (!list.includes(selectedDatabase.value)) {
@@ -223,12 +308,16 @@ async function loadDatabases(): Promise<void> {
 
 async function selectDatabase(): Promise<void> {
   clearPreview();
+  latestByMetric.value = {};
+  latestLoadedAt.value = null;
   await loadMetrics();
 }
 
 async function loadMetrics(): Promise<void> {
   const database = selectedDatabase.value;
   clearPreview();
+  latestByMetric.value = {};
+  latestLoadedAt.value = null;
   if (database.length === 0) {
     metrics.value = [];
     selectedMetric.value = '';
@@ -238,10 +327,22 @@ async function loadMetrics(): Promise<void> {
   if (list === undefined) return;
   metrics.value = list;
   selectedMetric.value = list.length > 0 ? list[0].metricName : '';
+  // Live values are NOT loaded automatically: one `query/last` per metric can take ~1.5 s on a busy database,
+  // and occupying the browser's connections in the background is exactly what makes real queries feel slow.
 }
 
 function selectMetric(metricName: string): void {
   selectedMetric.value = metricName;
+  // Picking a row means "show me this variable": switch to the preview tab and redraw it.
+  activeTab.value = 'preview';
+  clearPreview();
+  void runQuery();
+}
+
+/** Combobox change in the preview: switch the variable and immediately redraw it */
+function onMetricSelect(): void {
+  clearPreview();
+  void runQuery();
 }
 
 /** Window width in milliseconds from the value + unit inputs; `0` when the input is not a positive integer */
@@ -442,10 +543,27 @@ watch(
   <section class="panel">
     <div class="card">
       <div class="card-title">
-        <span>{{ t('metrics.inventoryTitle') }}</span>
-        <span class="card-title-note">{{ t('metrics.note') }}</span>
+        <span>{{ activeTab === 'inventory' ? t('metrics.inventoryTitle') : t('metrics.previewTitle') }}</span>
+        <span class="card-title-note">
+          {{ activeTab === 'inventory' ? 'GET /api/v1/metrics/{database}' : PREVIEW_ENDPOINTS }}
+        </span>
       </div>
 
+      <div class="panel-tabs">
+        <button
+          class="panel-tab"
+          :class="{ active: activeTab === 'inventory' }"
+          @click="activeTab = 'inventory'"
+        >
+          {{ t('metrics.tab.inventory') }}
+        </button>
+        <button class="panel-tab" :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">
+          {{ t('metrics.tab.preview') }}
+        </button>
+      </div>
+
+      <!-- Tab 1: metric inventory (catalogue + live values) -->
+      <div v-if="activeTab === 'inventory'">
       <div class="toolbar">
         <div class="field">
           <label class="field-label">{{ t('metrics.database') }}</label>
@@ -459,8 +577,29 @@ watch(
         <button :disabled="busy || metrics.length === 0" @click="exportMetricsCsv">
           {{ t('metrics.exportCsv') }}
         </button>
+        <button :disabled="busy || latestLoading || metrics.length === 0" @click="refreshLiveValues">
+          {{
+            latestLoading
+              ? t('metrics.refreshingProgress', {
+                  done: latestProgress.done,
+                  total: latestProgress.total,
+                })
+              : t('metrics.refreshLive')
+          }}
+        </button>
         <span class="toolbar-note">{{ t('metrics.count', { count: metrics.length }) }}</span>
+        <span v-if="latestLoadedAt !== null" class="toolbar-note">
+          {{ t('metrics.liveLoadedAt', { time: formatDateTime(latestLoadedAt) }) }}
+        </span>
       </div>
+
+      <p v-if="!latestLoading && latestLoadedAt === null && metrics.length > 0" class="toolbar-note hint">
+        {{ t('metrics.liveHint') }}
+      </p>
+
+      <p v-if="latestCapped" class="toolbar-note hint">
+        {{ t('metrics.liveCapped', { count: LIVE_METRIC_LIMIT }) }}
+      </p>
 
       <p v-if="errorMessage.length > 0" class="alert error">{{ errorMessage }}</p>
 
@@ -472,6 +611,8 @@ watch(
               <th>{{ t('metrics.column.type') }}</th>
               <th>{{ t('metrics.column.first') }}</th>
               <th>{{ t('metrics.column.last') }}</th>
+              <th>{{ t('metrics.column.latest') }}</th>
+              <th>{{ t('metrics.column.updated') }}</th>
               <th />
             </tr>
           </thead>
@@ -485,6 +626,8 @@ watch(
               <td class="mono">{{ valueTypeName(metric.valueType) }}</td>
               <td class="mono">{{ formatDateTime(metric.firstTs) }}</td>
               <td class="mono">{{ formatDateTime(metric.lastTs) }}</td>
+              <td class="mono">{{ formatLiveValue(livePoint(metric.metricName)) }}</td>
+              <td class="mono">{{ liveUpdatedAt(metric.metricName) }}</td>
               <td>
                 <button class="small" :disabled="busy" @click="selectMetric(metric.metricName)">
                   {{ t('metrics.select') }}
@@ -495,24 +638,24 @@ watch(
         </table>
       </div>
       <p v-else class="empty-hint">{{ t('metrics.empty') }}</p>
-    </div>
-
-    <div class="card">
-      <div class="card-title">
-        <span>{{ t('metrics.previewTitle') }}</span>
-        <span class="card-title-note">POST /api/v1/query/range · POST /api/v1/query/aggregate · POST /api/v1/query/at</span>
       </div>
 
+      <!-- Tab 2: range preview (query + chart) -->
+      <div v-else>
       <div class="toolbar">
         <div class="field">
           <label class="field-label">{{ t('metrics.column.metric') }}</label>
-          <input
-            :value="selectedMetric"
-            type="text"
-            readonly
-            style="width: 220px"
-            :placeholder="t('metrics.notSelected')"
-          />
+          <select
+            v-model="selectedMetric"
+            style="width: 260px"
+            :disabled="busy || metrics.length === 0"
+            @change="onMetricSelect"
+          >
+            <option value="">{{ t('metrics.notSelected') }}</option>
+            <option v-for="metric in metrics" :key="metric.metricName" :value="metric.metricName">
+              {{ metric.metricName }}
+            </option>
+          </select>
         </div>
         <TimeRangePicker
           v-model:start="startInput"
@@ -627,11 +770,39 @@ watch(
         <LineChart :points="chartPoints" />
       </template>
       <p v-else class="empty-hint">{{ t('metrics.emptyPreview') }}</p>
+      </div>
     </div>
   </section>
 </template>
 
 <style scoped>
+.panel-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-tab {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.panel-tab:hover {
+  color: var(--primary-strong);
+}
+
+.panel-tab.active {
+  border-bottom-color: var(--primary);
+  color: var(--primary-strong);
+  font-weight: 600;
+}
+
 tr.selected {
   background: rgba(47, 124, 246, 0.08);
 }

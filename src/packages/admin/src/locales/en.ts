@@ -124,9 +124,21 @@ export const en = {
   'databases.success.retention': 'Retention of "{database}" is now {days} day(s).',
 
   'metrics.inventoryTitle': 'Metric inventory',
+  'metrics.tab.inventory': 'Metric inventory',
+  'metrics.tab.preview': 'Range preview',
   'metrics.note': 'GET /api/v1/metrics/{database}',
   'metrics.database': 'Database',
   'metrics.reload': 'Reload metrics',
+  'metrics.refreshLive': 'Refresh live values',
+  'metrics.refreshing': 'Reading live values…',
+  'metrics.refreshingProgress': 'Reading live values {done}/{total}…',
+  'metrics.liveHint':
+    'Live values are loaded on demand: press "Refresh live values" to read the newest point of each row (one query per metric, slow on large databases). Queries stay usable meanwhile.',
+  'metrics.liveLoadedAt': 'Live values: {time}',
+  'metrics.liveCapped':
+    'Live values cover the first {count} metrics only; open the metric individually to see the newest point of the rest.',
+  'metrics.column.latest': 'Latest value',
+  'metrics.column.updated': 'Updated',
   'metrics.exportCsv': 'Export CSV',
   'metrics.csv.database': 'Database',
   'metrics.csv.metric': 'Metric',

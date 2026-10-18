@@ -129,6 +129,7 @@ const windows = await rtdb.queryAggregate('plant_a', 'station01.powerMeter.kwh',
 ```ts
 await rtdb.listDatabases();                  // string[]
 await rtdb.listMetrics('plant_a');           // MetricSummary[] — { metricName, firstTs, lastTs, valueType }
+await rtdb.hasMetric('plant_a', 'm.kwh');    // boolean — 仅判存在（段级 metric 名集合缓存），比 listMetrics 便宜得多
 await rtdb.setRetention('plant_a', 90);      // 持久化到 {dataDir}/plant_a/retention.json
 await rtdb.runRetention();                   // 立即执行清理（也会按定时器运行）
 await rtdb.backup('plant_a', '/mnt/backups/2026-10-17');

@@ -200,7 +200,19 @@ bin\demo-smart-site.bat dry
 bin\demo-smart-site.bat once --token-file ..\release\sea\rtdb.token
 bin\demo-smart-site.bat stream 60 --glitch-rate 0.002 --token-file ..\release\sea\rtdb.token
 bin\demo-smart-site.bat run --devices hvac-chiller --interval 500 --duration 10 --verify
+:: 大数据测试：20 000 点/秒跑 60 秒，跑完自动校验写入范围
+bin\demo-smart-site.bat run --rate 20000 --duration 60 --verify
+:: 固定每批 5 000 点、每 1 s 一批，写满 100 万点后退出
+bin\demo-smart-site.bat run --points-per-tick 5000 --interval 1000 --total-points 1000000
+:: 只打印一个大批次报文（不写入），用于核对报文体积
+bin\demo-smart-site.bat dry --points-per-tick 5000
 ```
+
+- **大数据测试**用 `run` 加 `--rate`（目标 pts/s）/ `--points-per-tick`（每批点数）/ `--total-points`
+  （总量上限），批次大小与 44 个标签的目录规模解耦；单客户端容量仍是 `指标数 × interval`
+  （默认 44 × 1000 = 44 000 点/批），需要更高时提高 `--interval` 或开多个客户端。
+  本机实测（Ryzen 7 4800H / 本机磁盘）：`--rate 20000 --duration 10` 写入 22 万点、
+  **21 823 点/s**、0 重复、0 失败批，`--verify` 的 `count` / `last` / `aggregate` 全部 PASS。
 
 - `bin\start-demo-server.bat` 按 `demo\conf\rtdb-server.json` 启动演示服务器；6180 被占用时可用
   `set RTDB_PORT=6190` 覆盖端口；
@@ -321,3 +333,4 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-17 | 新增 §3.3 性能测试模式：`--points-per-tick`（每批点数）、`--rate`（目标 pts/s）、`--total-points`（总量上限）；生成器新增 `tickBatch()`（窗口内均分时间戳、容量校验），进度与汇总补充 pts/s、p99/max 与目标速率对比 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §3.5 新增 `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]`：**只跑压测客户端，不启动服务端**（服务端人工外部启动；等待令牌文件、连不上时重试 3 次后提示先启服务） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §6 补充 `--token rtdb.token` 导致 `401 E_AUTH` 的排障行（`--token` 收令牌值且优先于配置 `tokenFile`；demo 实例与 SEA 发布包令牌文件不同）；客户端对「`--token` 传入路径」新增 `[WARN]` 提示，401 提示语补充优先级说明 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.5 与 `bin\demo-smart-site.bat` 新增**大数据测试**示例（`--rate 20000 --duration 60 --verify`、`--points-per-tick 5000 --total-points 1000000`、`dry --points-per-tick 5000`），并补充容量上限与实测吞吐（21 823 点/s） | DeepSeek-V4.1-Flash |

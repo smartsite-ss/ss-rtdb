@@ -430,6 +430,27 @@ export function tryParseBlockHeader(
   };
 }
 
+/**
+ * Read only the value type out of a block's **fixed header region**, without the payload.
+ *
+ * `limit` must cover `2 + metricLength + BLOCK_HEADER_FIXED_SIZE - 2` bytes (the metric name plus the fixed
+ * field region); a caller that knows the metric-name length can therefore probe the type from a small read
+ * instead of buffering the whole block. Returns null when the region is incomplete or the codes are unknown.
+ */
+export function tryParseBlockValueType(buffer: Uint8Array, offset = 0, limit = buffer.length): ValueType | null {
+  if (offset < 0 || offset + BLOCK_HEADER_FIXED_SIZE > limit || limit > buffer.length) return null;
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const metricLength = view.getUint16(offset, true);
+  if (metricLength < 1 || offset + 2 + metricLength + BLOCK_HEADER_FIXED_SIZE - 2 > limit) return null;
+  const fieldsOffset = offset + 2 + metricLength;
+  if (view.getUint32(fieldsOffset, true) < 1) return null;
+  const rawValueType = view.getUint8(fieldsOffset + 4);
+  if (!KNOWN_VALUE_TYPES.has(rawValueType)) return null;
+  if (view.getUint8(fieldsOffset + 5) !== TIMESTAMP_CODEC_ID) return null;
+  if (!KNOWN_VALUE_CODEC_IDS.has(view.getUint8(fieldsOffset + 6))) return null;
+  return rawValueType as ValueType;
+}
+
 /* ---------- Footer ---------- */
 
 export interface SegmentFooter {

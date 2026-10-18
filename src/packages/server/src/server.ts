@@ -1068,10 +1068,16 @@ export class RtdbServer {
     }
   }
 
+  /**
+   * Metric existence check in front of every query primitive.
+   *
+   * Uses the targeted `engine.hasMetric` (segment metric-name sets) instead of `listMetrics`: the latter builds a
+   * full first/last/type summary by walking **every** block index entry in the database, which put the whole day's
+   * block count (hundreds of thousands of entries) on the critical path of each single query.
+   */
   private async requireMetric(database: string, metricName: string): Promise<void> {
     await this.requireDatabaseExists(database);
-    const metrics = await this.engine.listMetrics(database);
-    if (!metrics.some((summary) => summary.metricName === metricName)) {
+    if (!(await this.engine.hasMetric(database, metricName))) {
       throw new RtdbError(ERROR_CODE.MetricNotFound, `Metric does not exist: ${database}/${metricName}`);
     }
   }

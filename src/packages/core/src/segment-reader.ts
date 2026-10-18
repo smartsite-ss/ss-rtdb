@@ -47,11 +47,15 @@ import {
   parseSegmentHeader,
   timestampFromDateNumber,
   tryParseBlockHeader,
+  tryParseBlockValueType,
 } from './format.ts';
 import type { BlockHeader, SegmentBlockIndexEntry, SegmentHeader } from './format.ts';
 import { DEFAULT_RANGE_LIMIT, ENGINE_DEFAULTS, VALUE_TYPE_NAME, ValueType, clampEngineOption } from './types.ts';
 import type { Point, RangeOptions } from './types.ts';
 import type { SegmentStore } from './segment-store.ts';
+
+/** Cap of the per-segment metric-name cache (an entry is a name set, not a block index; ~KB per segment) */
+const SEGMENT_METRIC_NAME_CACHE_LIMIT = 512;
 
 /* ---------- Public types ---------- */
 
@@ -131,6 +135,15 @@ export class SegmentReader {
   /** Cumulative block cache hits / misses this session (status only; no behavioral effect) */
   private blockCacheHitTotal = 0;
   private blockCacheMissTotal = 0;
+  /**
+   * Metric names per segment for existence lookups (keyed by index path + segment length).
+   *
+   * A name set costs a few kilobytes per segment while the block index it is derived from costs tens of
+   * megabytes of objects, so this cache is the cheap way to answer "does metric X exist in this segment".
+   * The key carries the segment length, which makes an appended (still unsealed) segment miss instead of
+   * returning a stale set; insertion order eviction bounds the total.
+   */
+  private readonly metricNamesBySegment = new Map<string, ReadonlySet<string>>();
 
   constructor(options: SegmentReaderOptions) {
     this.store = options.store;
@@ -185,17 +198,47 @@ export class SegmentReader {
   }
 
   /**
+   * Whether a segment holds at least one block of the metric (management lookups such as "does this metric
+   * exist"): the block index is loaded once per segment and reduced to its metric-name set, so validating many
+   * metrics against the same day directory does not re-parse the `.idx` mirror every time.
+   */
+  hasMetric(descriptor: SegmentFileDescriptor, metricName: string): boolean {
+    return this.segmentMetricNames(descriptor).has(metricName);
+  }
+
+  /**
    * Read only a block header and return its value type (management statistics: avoids decoding the payload).
    *
-   * Reads at most the fixed header plus a metric-name window, so the cost is one small read per metric rather
-   * than one block decode. Returns `null` when the header cannot be parsed (the caller then reports `unknown`).
+   * The probe length must cover the metric name **plus** the fixed field region: the name length lives in the
+   * first two bytes and the fields follow the name, so a constant window is not enough for long names nor for
+   * payloads larger than the window. Reading exactly `2 + metricNameBytes + BLOCK_HEADER_FIXED_SIZE - 2` bytes
+   * keeps the cost at one small read per metric (the caller probes each metric once). Returns `null` when the
+   * header cannot be parsed (the caller then reports `unknown`).
    */
   readBlockValueType(descriptor: SegmentFileDescriptor, entry: SegmentBlockIndexEntry): ValueType | null {
-    const probeLength = Math.min(entry.length, BLOCK_HEADER_FIXED_SIZE + 1024);
-    if (probeLength <= 0) return null;
+    const metricNameBytes = Buffer.byteLength(entry.metricName, 'utf8');
+    const probeLength = 2 + metricNameBytes + BLOCK_HEADER_FIXED_SIZE - 2;
+    if (metricNameBytes < 1 || probeLength > entry.length) return null;
     const bytes = this.store.readSegmentSlice(descriptor.segmentFilePath, entry.offset, probeLength);
-    const header = tryParseBlockHeader(bytes, 0, bytes.length);
-    return header === null ? null : header.valueType;
+    if (bytes.length < probeLength) return null;
+    return tryParseBlockValueType(bytes, 0, bytes.length);
+  }
+
+  /** Metric-name set of one segment (cached; see {@link metricNamesBySegment}) */
+  private segmentMetricNames(descriptor: SegmentFileDescriptor): ReadonlySet<string> {
+    const cacheKey = `${descriptor.indexFilePath}|${descriptor.bytes}`;
+    const cached = this.metricNamesBySegment.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const names = new Set<string>();
+    const entries = this.loadIndexEntries(descriptor.database, descriptor.dateNumber, descriptor.sequence);
+    for (const entry of entries) names.add(entry.metricName);
+    if (this.metricNamesBySegment.size >= SEGMENT_METRIC_NAME_CACHE_LIMIT) {
+      const oldest = this.metricNamesBySegment.keys().next();
+      if (!oldest.done) this.metricNamesBySegment.delete(oldest.value);
+    }
+    this.metricNamesBySegment.set(cacheKey, names);
+    return names;
   }
 
   /**

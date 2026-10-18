@@ -79,6 +79,7 @@ export {
   parseSegmentHeader,
   timestampFromDateNumber,
   tryParseBlockHeader,
+  tryParseBlockValueType,
 } from './format.ts';
 export type {
   BlockHeader,
