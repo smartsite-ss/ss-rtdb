@@ -10,6 +10,10 @@
  * Metric browser: pick a database, pick a metric, then preview a time range raw, window-aggregated or
  * point-in-time interpolated.
  *
+ * The inventory's `Select` button opens a modal query dialog instead: it queries one metric over a range that
+ * defaults to **today** and exports the returned points as CSV, while the preview tab keeps the chart-based
+ * workflow (presets, aggregation, interpolation, XLS export).
+ *
  * Uses `GET /api/v1/databases`, `GET /api/v1/metrics/{db}` plus `POST /api/v1/query/range` /
  * `POST /api/v1/query/aggregate` / `POST /api/v1/query/at` only, so the preview is exactly the data a
  * client of the public REST API would receive. The panel also states the interpolation / aggregation
@@ -20,6 +24,7 @@
 
 import { computed, onMounted, ref, watch } from 'vue';
 import LineChart from './LineChart.vue';
+import MetricRangeDialog from './MetricRangeDialog.vue';
 import TimeRangePicker from './TimeRangePicker.vue';
 import { RTDB_AGGREGATE_TYPE, RTDB_INTERPOLATION_MODE, RTDB_VALUE_TYPE, RtdbAdminApiClient } from '../api';
 import type {
@@ -35,7 +40,8 @@ import { useAsyncAction } from '../async';
 import {
   formatDateTime,
   formatDateTimeWithOffset,
-  formatNumber,
+  formatElapsed,
+  formatPointValue,
   fromDateTimeLocalValue,
   toDateTimeLocalValue,
 } from '../format';
@@ -91,6 +97,8 @@ const databases = ref<string[]>([]);
 const selectedDatabase = ref('');
 const metrics = ref<RtdbMetricSummary[]>([]);
 const selectedMetric = ref('');
+/** Metric of the open query dialog (`null` = dialog closed); opened by the inventory's `Select` button */
+const dialogMetric = ref<RtdbMetricSummary | null>(null);
 const startInput = ref('');
 const endInput = ref('');
 const limitInput = ref(String(DEFAULT_LIMIT));
@@ -212,12 +220,6 @@ function formatInterval(milliseconds: number): string {
   return `${(milliseconds / 60_000).toFixed(2)} min`;
 }
 
-/** Compact query-elapsed label (`12 ms` / `0.85 s`) */
-function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1_000) return `${Math.max(1, Math.round(milliseconds))} ms`;
-  return `${(milliseconds / 1_000).toFixed(2)} s`;
-}
-
 function resetRange(): void {
   const now = Date.now();
   endInput.value = toDateTimeLocalValue(now, true);
@@ -237,10 +239,8 @@ function livePoint(metricName: string): RtdbJsonPoint | null | undefined {
 
 /** Display form of a live point's value (`—` when the metric has no point) */
 function formatLiveValue(point: RtdbJsonPoint | null | undefined): string {
-  if (point === null || point === undefined || point.v === null) return '—';
-  if (typeof point.v === 'number') return formatNumber(point.v);
-  if (typeof point.v === 'boolean') return point.v ? 'true' : 'false';
-  return point.v;
+  if (point === undefined || point === null) return '—';
+  return formatPointValue(point.v);
 }
 
 /** Timestamp of a live point's newest sample (`—` when the metric has no point) */
@@ -331,12 +331,17 @@ async function loadMetrics(): Promise<void> {
   // and occupying the browser's connections in the background is exactly what makes real queries feel slow.
 }
 
+/**
+ * Inventory row action: open the query dialog for that metric (today by default, with a CSV export).
+ *
+ * The preview tab keeps its own state, so the dialog is additive: an operator can check one tag's day without
+ * losing the chart of another one.
+ */
 function selectMetric(metricName: string): void {
+  const metric = metrics.value.find((entry) => entry.metricName === metricName);
+  if (metric === undefined) return;
   selectedMetric.value = metricName;
-  // Picking a row means "show me this variable": switch to the preview tab and redraw it.
-  activeTab.value = 'preview';
-  clearPreview();
-  void runQuery();
+  dialogMetric.value = metric;
 }
 
 /** Combobox change in the preview: switch the variable and immediately redraw it */
@@ -761,7 +766,7 @@ watch(
                   })
           }}
           <template v-if="queryElapsedMs !== null">
-            {{ t('metrics.elapsed', { duration: formatDuration(queryElapsedMs) }) }}
+            {{ t('metrics.elapsed', { duration: formatElapsed(queryElapsedMs) }) }}
           </template>
         </p>
         <p v-if="stringLevels.length > 0" class="toolbar-note hint">
@@ -772,6 +777,14 @@ watch(
       <p v-else class="empty-hint">{{ t('metrics.emptyPreview') }}</p>
       </div>
     </div>
+
+    <MetricRangeDialog
+      v-if="dialogMetric !== null"
+      :client="client"
+      :database="selectedDatabase"
+      :metric="dialogMetric"
+      @close="dialogMetric = null"
+    />
   </section>
 </template>
 

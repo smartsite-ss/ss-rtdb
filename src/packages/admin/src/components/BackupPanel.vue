@@ -11,17 +11,19 @@
  *
  * The optional time range is **day-granular** (`startDay`/`endDay`, inclusive, server local time) because the
  * storage unit itself is one directory per day: a range backup copies only those day directories and carries a
- * manifest, so restoring it merges those days into the database instead of replacing it.
+ * manifest, so restoring it merges those days into the database instead of replacing it. The range is edited with
+ * the shared time-range control in day mode (`TimeRangePicker`), the same trigger the metrics panel uses.
  *
  * The console only triggers the copy; restoring an archive stays a CLI operation (`rtdb-cli restore`)
  * because it requires exclusive access to the data directory.
  */
 
-import { onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import type { RtdbAdminApiClient, RtdbBackupResult } from '../api';
 import { useAsyncAction } from '../async';
-import { formatBytes, formatNumber } from '../format';
+import { dateTimeLocalDay, dayToDayEnd, dayToDayStart, formatBytes, formatNumber } from '../format';
 import { t } from '../i18n';
+import TimeRangePicker from './TimeRangePicker.vue';
 
 const props = defineProps<{ client: RtdbAdminApiClient }>();
 
@@ -33,6 +35,24 @@ const targetDirectory = ref('');
 const rangeStart = ref('');
 const rangeEnd = ref('');
 const backupResult = ref<RtdbBackupResult | null>(null);
+
+/**
+ * Bridge between the day-granular API and the shared time-range control, which owns `datetime-local` strings:
+ * an empty day maps to an empty value (unbounded side), a set day maps to that day's first / last second.
+ */
+const rangeStartInput = computed({
+  get: () => (rangeStart.value.length > 0 ? dayToDayStart(rangeStart.value) : ''),
+  set: (value: string) => {
+    rangeStart.value = dateTimeLocalDay(value);
+  },
+});
+
+const rangeEndInput = computed({
+  get: () => (rangeEnd.value.length > 0 ? dayToDayEnd(rangeEnd.value) : ''),
+  set: (value: string) => {
+    rangeEnd.value = dateTimeLocalDay(value);
+  },
+});
 
 /** `yyyyMMdd` (server day number) → `yyyy-MM-dd` for display */
 function formatDay(day: number): string {
@@ -113,14 +133,7 @@ watch(
             :disabled="busy"
           />
         </div>
-        <div class="field">
-          <label class="field-label">{{ t('backup.rangeStart') }}</label>
-          <input v-model="rangeStart" type="date" :disabled="busy" />
-        </div>
-        <div class="field">
-          <label class="field-label">{{ t('backup.rangeEnd') }}</label>
-          <input v-model="rangeEnd" type="date" :disabled="busy" />
-        </div>
+        <TimeRangePicker v-model:start="rangeStartInput" v-model:end="rangeEndInput" granularity="day" :disabled="busy" />
         <button class="primary" :disabled="busy" @click="startBackup">{{ t('backup.start') }}</button>
         <button :disabled="busy" @click="loadDatabases">{{ t('backup.reload') }}</button>
       </div>

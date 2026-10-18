@@ -132,6 +132,15 @@ export const QUERY_LATENCY_SAMPLE_WINDOW = 1024;
 /** Bytes per MiB (base of `status.cache.heapUsedMb` / `externalMb`) */
 const MEBIBYTE = 1024 * 1024;
 
+/**
+ * Metric buffers flushed per event-loop turn by the periodic fallback flush.
+ *
+ * Encoding a block is synchronous CPU work (a 2 300-point block is a few milliseconds; 44 metrics in one turn
+ * measured as a ~270ms stall every 5 s at 20k points/s, visible as p99 spikes on every query). Slicing keeps the
+ * longest single block to a handful of block encodes while still finishing a sweep in well under one interval.
+ */
+const FLUSH_SLICE_METRICS = 2;
+
 /* ---------- Public types ---------- */
 
 /** Engine runtime metrics (status output, per Detailed Design §3.4; only `write.backfilled` remains deferred to M2) */
@@ -341,6 +350,8 @@ export class RtdbEngine {
   private readonly retentionByDatabase = new Map<string, number>();
 
   private flushTimer: NodeJS.Timeout | null = null;
+  /** A sliced flush sweep is in progress (a tick that lands mid-sweep is skipped, not queued) */
+  private flushSweepActive = false;
   private retentionTimer: NodeJS.Timeout | null = null;
   private opened = false;
   private openedAt = 0;
@@ -1297,13 +1308,41 @@ export class RtdbEngine {
 
   /** 5s fallback: flush metrics that have reached the lower bound per database, and advance the batch safe point */
   private runFlushTimer(): void {
-    if (!this.opened) return;
-    for (const context of [...this.contexts.values()]) {
-      try {
-        context.writer.flush();
-        this.tryCompleteBatches(context);
-      } catch (error) {
+    if (!this.opened || this.flushSweepActive) return;
+    this.flushSweepActive = true;
+    void this.flushSweep()
+      .catch((error: unknown) => {
         console.error('[ss-rtdb] Scheduled block flush failed:', error);
+      })
+      .finally(() => {
+        this.flushSweepActive = false;
+      });
+  }
+
+  /**
+   * One periodic flush sweep, **sliced across event-loop turns**.
+   *
+   * The candidate metric list is snapshotted per database, then flushed `FLUSH_SLICE_METRICS` at a time with a
+   * `setImmediate` yield in between, so a pending HTTP query is served between slices instead of waiting for the
+   * whole sweep (measured ~210–275 ms at 20k points/s before slicing). Durability is unchanged: points already sit
+   * in the WAL, and each slice fsyncs the blocks it appended.
+   */
+  private async flushSweep(): Promise<void> {
+    for (const context of [...this.contexts.values()]) {
+      const metricNames = context.writer.readyMetricNames();
+      for (let index = 0; index < metricNames.length; index += FLUSH_SLICE_METRICS) {
+        if (!this.opened) return;
+        const isLastSlice = index + FLUSH_SLICE_METRICS >= metricNames.length;
+        try {
+          // Only the last slice syncs: one `fsync` per sweep instead of one per slice (a per-slice fsync measured
+          // ~4–5ms each and re-blocked the loop right after every yield)
+          context.writer.flushMetrics(metricNames.slice(index, index + FLUSH_SLICE_METRICS), isLastSlice);
+          this.tryCompleteBatches(context);
+        } catch (error) {
+          console.error('[ss-rtdb] Scheduled block flush failed:', error);
+          break;
+        }
+        if (!isLastSlice) await yieldToEventLoop();
       }
     }
   }
@@ -2282,6 +2321,15 @@ function clampAndWarn(name: EngineOptionName, raw: number): number {
     console.warn(`[ss-rtdb] Config item ${name}=${String(raw)} is out of range; clamped to ${clamped}`);
   }
   return clamped;
+}
+
+/* ---------- Internal: scheduling ---------- */
+
+/** Yield to the event loop (check phase) so pending timers/requests run between flush slices */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 /* ---------- Internal: statistics ---------- */

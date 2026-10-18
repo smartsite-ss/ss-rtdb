@@ -133,6 +133,7 @@ node packages/demo/client-smart-site/src/main.ts --once --verify
 | `--points-per-tick <n>` | `0` | **每批点数**，`0` = 每个指标 1 点（最大受窗口容量限制，见 §3.3） |
 | `--rate <points/s>` | `0` | 目标写入速率，由 `--interval` 反推每批点数；与 `--points-per-tick` 互斥 |
 | `--total-points <n>` | `0` | 写满 n 个点后退出，`0` = 不限 |
+| `--metrics <n>` | `0` | **模拟变量数**，`0` = 原生 44 标签目录；更大的值会把每个标签复制出带 `#k` 后缀的指标名（`hvac-chiller.supply-temp#2`），更小的值则截断目录（见 §3.3.1） |
 | `--duration <seconds>` | `0` | 运行时长，`0` = 直到 Ctrl+C |
 | `--once` | 关 | 只写一个批次后退出 |
 | `--seed <int>` | `20261017` | 随机种子，决定信号序列 |
@@ -165,7 +166,7 @@ node packages/demo/client-smart-site/src/main.ts --once --verify
 
 容量上限：一个 `interval` 窗口最多容纳 `指标数 × interval` 个点（默认 44 × 1000 = 44 000）。
 超过上限时客户端在启动阶段直接报错，而不是静默丢点；需要更高吞吐时提高 `--interval`
-（容量与窗口长度成正比），或改用多个客户端进程写不同 `--db`。
+（容量与窗口长度成正比）、提高 `--metrics`，或改用多个客户端进程写不同 `--db`。
 
 启动头会打印实际批大小与目标速率，结束汇总给出真实吞吐、延迟分位（p50/p95/p99/max）与目标对比：
 
@@ -178,6 +179,37 @@ node packages/demo/client-smart-site/src/main.ts --once --verify
 `--dry-run` 同样遵循这些参数，可用较小的点数（如 `--dry-run --points-per-tick 100`）预览多点批次的报文。
 三个参数也可以写进 `client-smart-site.json`（`pointsPerTick` / `rate` / `totalPoints`，`0` 表示关闭）；
 命令行参数仍然优先。
+
+### 3.3.1 变量数模式（`--metrics`）
+
+`--metrics <n>` 缩放的是**目录本身**（「这个站到底有多少变量」），而不只是批次大小：
+
+| `--metrics` | 结果 | 副本倍数 |
+| ----------- | ------ | -------- |
+| `0`（默认） | 原生目录，9 台设备 / 44 个指标 | 1 |
+| `< 44` | 取目录前 n 个标签（截断） | 1 |
+| `1000` | 44 标签 × 23 份 = 1000 个指标 | 23 |
+| `3000` | 44 标签 × 69 份 | 69 |
+| `6000` | 44 标签 × 137 份 | 137 |
+| `10000` | 44 标签 × 228 份 | 228 |
+
+副本指标名为 `<设备>.<变量>#k`（`hvac-chiller.supply-temp#2`），原标签保持不带后缀的名字。每个副本都是
+**独立的信号流**：各自的 RNG 流、波形相位与状态，取值与原标签不同；`counter.rateFrom` 也在所属副本组内
+解析（`ws-a-meter-01.yong-dian-liang#2` 累计的是 `ws-a-meter-01.gong-l#2`，不是原标签的功率）。设备数仍是
+9——增长的只有指标数，这正是引擎索引与写入路径看到的规模。
+
+实际效果：单批容量变为 `指标数 × interval`，一个客户端即可推高得多的批量
+（10000 指标 × 1000 ms = 1000 万个不重复组合），服务端也按上千个指标而非 44 个接受考验。
+`--devices` 先生效，再对剩余标签做复制。`--list` 会打印缩放后的目录与 `Scaled catalog:` 说明；
+启动头显示 `9 devices / 1000 metrics (44 catalog tags x 23)`。
+
+```bash
+# 10 000 个变量、20 万点/s、跑 1 分钟
+npm run demo:smart-site -- --metrics 10000 --rate 200000 --duration 60
+```
+
+`--metrics` 也可以写进 `client-smart-site.json` 的 `metrics` 键（`0` = 原生目录）。单进程上限
+100 000 个指标；传入负数或非整数会在启动阶段直接报错。
 
 ### 3.4 令牌解析顺序
 
@@ -210,7 +242,7 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
 
 - **大数据测试**用 `run` 加 `--rate`（目标 pts/s）/ `--points-per-tick`（每批点数）/ `--total-points`
   （总量上限），批次大小与 44 个标签的目录规模解耦；单客户端容量仍是 `指标数 × interval`
-  （默认 44 × 1000 = 44 000 点/批），需要更高时提高 `--interval` 或开多个客户端。
+  （默认 44 × 1000 = 44 000 点/批），需要更高时提高 `--interval`、提高 `--metrics`（§3.3.1）或开多个客户端。
   本机实测（Ryzen 7 4800H / 本机磁盘）：`--rate 20000 --duration 10` 写入 22 万点、
   **21 823 点/s**、0 重复、0 失败批，`--verify` 的 `count` / `last` / `aggregate` 全部 PASS。
 
@@ -228,6 +260,8 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
   bin\start-demo-server.bat bench 20000 30
   bin\start-demo-server.bat bench 20000 30 --db perf_demo --interval 500
   bin\start-demo-server.bat bench 5000 60 --points-per-tick 5000
+  :: 变量数压测：传 --metrics（目录按 "#k" 后缀复制）
+  bin\start-demo-server.bat bench 200000 60 --metrics 10000
   ```
 
   当前窗口运行客户端（`--rate <pts/s> --duration <seconds> --log-every 1`），额外参数原样转发；
@@ -235,6 +269,18 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
   客户端返回 `3`（连不上服务）时最多重试 3 次、每次间隔 3 s，仍失败则提示先启动服务端；
   设置 `RTDB_PORT` 时客户端会自动改用该端口；`duration` 很大（如 `3000000000`）等价于一直跑，
   Ctrl+C 只停客户端、不影响服务端；
+- `bin\start-demo-server.bat vars <pts/s> <seconds> [客户端参数]` 跑**变量数阶梯**：对
+  **1000 / 3000 / 6000 / 10000 个指标**各跑一次同样的 bench，每档写入独立数据库
+  （`perf_vars_1000` … `perf_vars_10000`），便于横向比较：
+
+  ```bat
+  :: window 2 - 四档短跑，每档 3000 点/s、2 秒
+  bin\start-demo-server.bat vars 3000 2
+  ```
+
+  每档会打印客户端头（`catalog : 9 devices / 1000 metrics (44 catalog tags x 23)`）与一行
+  `[demo] vars <n> finished with exit code …`，阶梯结束时列出写入过的数据库；
+  如需多档共用一个库，在额外参数里传 `--db`（后出现的 `--db` 生效）；
 - `run` 原样转发后续参数，`run --help` 可查看客户端完整帮助；
 - 未知动作返回退出码 `1`，其余退出码与客户端一致（`0/2/3`）；
 - 脚本在 `src\` 中运行，因此相对路径按该目录解析：SEA 发布目录的令牌写作
@@ -312,8 +358,9 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | `400 E_INVALID_POINT ... quality=…` | 写入了非 0 质量位（v0.1.0 不支持） | 省略 `q`；本 demo 已默认不发送质量位 |
 | `--db` 被拒绝 | 数据库名不能包含 `-` 等字符 | 使用字母、数字、下划线，如 `smartfactory_demo` |
 | `--list` 报未知设备 | `--devices` 拼写错误 | 先用 `--list` 查看设备编码 |
-| 启动即报 `exceed the catalog capacity` | 每批点数超过 `指标数 × interval` 的容量 | 提高 `--interval`、降低 `--points-per-tick`，或减少 `--devices` |
+| 启动即报 `exceed the catalog capacity` | 每批点数超过 `指标数 × interval` 的容量 | 提高 `--interval`、提高 `--metrics`、降低 `--points-per-tick`，或减少 `--devices` |
 | `--rate` 与 `--points-per-tick` 同时报错 | 两者控制同一个旋钮 | 只传其中一个 |
+| `metricTarget must be a positive integer …` / `… exceeds the 100000-metric limit` | `--metrics` 传了负数、非整数或超过 100 000 | 改用 `1 … 100000` 之间的整数（`0` = 原生目录） |
 
 ## 7. 下一步
 
@@ -334,3 +381,4 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-17 | §3.5 新增 `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]`：**只跑压测客户端，不启动服务端**（服务端人工外部启动；等待令牌文件、连不上时重试 3 次后提示先启服务） | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §6 补充 `--token rtdb.token` 导致 `401 E_AUTH` 的排障行（`--token` 收令牌值且优先于配置 `tokenFile`；demo 实例与 SEA 发布包令牌文件不同）；客户端对「`--token` 传入路径」新增 `[WARN]` 提示，401 提示语补充优先级说明 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §3.5 与 `bin\demo-smart-site.bat` 新增**大数据测试**示例（`--rate 20000 --duration 60 --verify`、`--points-per-tick 5000 --total-points 1000000`、`dry --points-per-tick 5000`），并补充容量上限与实测吞吐（21 823 点/s） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 新增 §3.3.1 **变量数模式** `--metrics <n>`（配置键 `metrics`）：目录按 `#k` 指标名后缀复制（1000 / 3000 / 6000 / 10000 变量 = 44 标签 × 23/69/137/228），每个副本为独立信号流且 `counter.rateFrom` 在副本组内解析；`bin\start-demo-server.bat` 新增 `vars <pts/s> <seconds>` 阶梯（每档独立 `perf_vars_<count>` 数据库）并支持 `bench … --metrics` 转发 | Step-5-Preview |

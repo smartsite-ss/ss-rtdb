@@ -22,17 +22,29 @@ REM   bin\start-demo-server.bat bench <pts/s> <seconds> [client options]
 REM                                                    Load client only: rtdb-server must
 REM                                                    already be running (started manually,
 REM                                                    in another window or by a service)
+REM   bin\start-demo-server.bat vars <pts/s> <seconds> [client options]
+REM                                                    Variable-count ladder: runs the bench for
+REM                                                    1000 / 3000 / 6000 / 10000 metrics, one
+REM                                                    database per point (perf_vars_<count>)
 REM
 REM Examples:
 REM   window 1: bin\start-demo-server.bat
-REM   window 2: bin\start-demo-server.bat bench 20000 300000 --token-file rtdb.token
+REM   window 2: bin\start-demo-server.bat bench 20000 300000  --metrics 10000 --token-file rtdb.token
 
 REM   window 2: bin\start-demo-server.bat bench 20000 30 --db perf_demo --interval 500
 REM   window 2: bin\start-demo-server.bat bench 5000 60 --points-per-tick 5000
+REM   window 2: bin\start-demo-server.bat bench 200000 60 --metrics 10000
+REM   window 2: bin\start-demo-server.bat vars 50000 60
 REM
 REM The load client sends "rate * interval / 1000" points per batch: with the
 REM default 1000 ms sampling interval, "--rate 20000" means 20000 points per batch
 REM (one batch per second). Extra options are forwarded to the client unchanged.
+REM
+REM "--metrics <n>" scales the simulated variable count: the 44-tag catalog is
+REM replicated with a "#k" metric-name suffix (10000 metrics = 44 tags x 228
+REM copies), which widens the per-batch capacity to "metrics x interval" points.
+REM "vars" runs the ladder 1000 / 3000 / 6000 / 10000 and keeps every point in
+REM its own database so the results stay comparable.
 
 set "SCRIPT_DIR=%~dp0"
 set "SRC_DIR=%SCRIPT_DIR%..\src"
@@ -55,6 +67,7 @@ if /I "%ACTION%"=="help" goto usage
 if /I "%ACTION%"=="-h" goto usage
 if /I "%ACTION%"=="--help" goto usage
 if /I "%ACTION%"=="bench" goto prepare_bench
+if /I "%ACTION%"=="vars" goto prepare_bench
 
 echo [ERROR] Unknown action: %ACTION%
 call :print_short_usage
@@ -77,6 +90,7 @@ goto collect_extra
 
 :check_files
 if /I "%ACTION%"=="bench" goto check_bench_files
+if /I "%ACTION%"=="vars" goto check_bench_files
 if not exist "%CONFIG_FILE%" (
   echo [ERROR] Demo server config not found: "%CONFIG_FILE%"
   exit /b 1
@@ -102,7 +116,11 @@ if errorlevel 1 (
 
 set "RTDB_CONFIG=%CONFIG_FILE%"
 
+set "URL_ARG="
+if defined RTDB_PORT set "URL_ARG=--url http://127.0.0.1:%RTDB_PORT%"
+
 if /I "%ACTION%"=="bench" goto bench_start
+if /I "%ACTION%"=="vars" goto vars_start
 goto server_foreground
 
 :server_foreground
@@ -118,12 +136,35 @@ set "CODE=%ERRORLEVEL%"
 goto finish
 
 :bench_start
-set "URL_ARG="
-if defined RTDB_PORT set "URL_ARG=--url http://127.0.0.1:%RTDB_PORT%"
+set "VARS="
+set "DB_NAME="
+call :client_run
+goto bench_done
 
+:vars_start
+echo [demo] mode   : vars (variable-count ladder 1000 / 3000 / 6000 / 10000)
+echo [demo] server : http://127.0.0.1:%PORT%  (must already be running)
+echo [demo] target : %RATE% points/s for %SECONDS% s per point
+if not "%EXTRA%"=="" echo [demo] options: %EXTRA%
+echo.
+for %%V in (1000 3000 6000 10000) do call :vars_one %%V
+goto vars_done
+
+:vars_one
+set "VARS=%~1"
+set "DB_NAME=perf_vars_%VARS%"
+call :client_run
+echo [demo] vars %VARS% finished with exit code %CODE% (db %DB_NAME%)
+echo.
+goto :EOF
+
+:client_run
+REM Shared load-client run used by "bench" and "vars". Input: RATE, SECONDS, EXTRA and,
+REM for the ladder, VARS (metric count) and DB_NAME (per-point database). Sets CODE.
 echo [demo] mode   : bench (load client only, no server is started)
 echo [demo] server : http://127.0.0.1:%PORT%  (must already be running)
 echo [demo] target : %RATE% points/s for %SECONDS% s
+if defined VARS echo [demo] metrics: %VARS% variables (db %DB_NAME%)
 if not "%EXTRA%"=="" echo [demo] options: %EXTRA%
 echo.
 
@@ -145,16 +186,23 @@ echo.
 
 :run_client
 set /a ATTEMPT=0
+set "METRICS_ARG="
+if defined VARS set "METRICS_ARG=--metrics %VARS%"
+set "DB_ARG="
+if defined DB_NAME set "DB_ARG=--db %DB_NAME%"
 :bench_attempt
 set /a ATTEMPT+=1
-node "%CLIENT_ENTRY%" --rate %RATE% --duration %SECONDS% --log-every 1 %URL_ARG%%EXTRA%
+node "%CLIENT_ENTRY%" --rate %RATE% --duration %SECONDS% --log-every 1 %METRICS_ARG% %DB_ARG% %URL_ARG%%EXTRA%
 set "CODE=%ERRORLEVEL%"
-if not "%CODE%"=="3" goto bench_done
-if %ATTEMPT% GEQ 3 goto bench_done
+if not "%CODE%"=="3" goto client_run_done
+if %ATTEMPT% GEQ 3 goto client_run_done
 echo.
 echo [demo] rtdb-server not reachable yet (attempt %ATTEMPT%/3); retrying in 3 s ...
 timeout /t 3 /nobreak >nul
 goto bench_attempt
+
+:client_run_done
+goto :EOF
 
 :bench_done
 echo.
@@ -166,6 +214,12 @@ if "%CODE%"=="3" (
 )
 goto finish
 
+:vars_done
+echo.
+echo [demo] variable-count ladder finished: 1000 / 3000 / 6000 / 10000 metrics.
+echo [demo] databases: perf_vars_1000, perf_vars_3000, perf_vars_6000, perf_vars_10000
+goto finish
+
 :usage
 echo Start rtdb-server with the shared demo configuration, or run the demo client
 echo in performance mode against an already running server.
@@ -175,6 +229,10 @@ echo   bin\start-demo-server.bat                        Start the server in this
 echo   bin\start-demo-server.bat bench ^<pts/s^> ^<seconds^> [client options]
 echo                                                    Load client only; rtdb-server must
 echo                                                    already be running
+echo   bin\start-demo-server.bat vars ^<pts/s^> ^<seconds^> [client options]
+echo                                                    Variable-count ladder: bench for 1000 /
+echo                                                    3000 / 6000 / 10000 metrics, one database
+echo                                                    per point (perf_vars_^<count^>)
 echo   bin\start-demo-server.bat help                   Show this help
 echo.
 echo Examples:
@@ -182,20 +240,27 @@ echo   window 1: bin\start-demo-server.bat
 echo   window 2: bin\start-demo-server.bat bench 20000 30
 echo   window 2: bin\start-demo-server.bat bench 20000 30 --db perf_demo --interval 500
 echo   window 2: bin\start-demo-server.bat bench 5000 60 --points-per-tick 5000
+echo   window 2: bin\start-demo-server.bat bench 200000 60 --metrics 10000
+echo   window 2: bin\start-demo-server.bat vars 50000 60
 echo.
 echo Notes:
 echo   - bench never starts a server: start it first in another window or as a service.
 echo   - bench sends "rate * interval / 1000" points per batch; the interval comes
 echo     from packages\demo\conf\client-smart-site.json (default 1000 ms).
 echo   - extra options are forwarded to the demo client unchanged: --db, --interval,
-echo     --points-per-tick, --total-points, --devices, --verify, ...
+echo     --points-per-tick, --total-points, --metrics, --devices, --verify, ...
+echo   - "--metrics <n>" scales the simulated variable count: the 44-tag catalog is
+echo     replicated with a "#k" metric-name suffix, so the per-batch capacity grows
+echo     to "metrics x interval" points (10000 metrics = 44 tags x 228 copies).
+echo   - "vars" runs the ladder 1000 / 3000 / 6000 / 10000 metrics and writes each
+echo     point into its own database (perf_vars_^<count^>) so the runs stay comparable.
 echo   - "duration" is in seconds; use a large value (or Ctrl+C) to run indefinitely.
 echo     Ctrl+C stops only the client, the server keeps running.
 echo   - set RTDB_PORT when the server listens on a port other than 6180.
 exit /b 0
 
 :bench_usage
-echo [ERROR] bench needs two arguments: ^<pts/s^> ^<seconds^>
+echo [ERROR] bench/vars needs two arguments: ^<pts/s^> ^<seconds^>
 call :print_short_usage
 exit /b 1
 
@@ -204,6 +269,7 @@ echo.
 echo Usage:
 echo   bin\start-demo-server.bat [help]
 echo   bin\start-demo-server.bat bench ^<pts/s^> ^<seconds^> [client options]
+echo   bin\start-demo-server.bat vars ^<pts/s^> ^<seconds^> [client options]
 echo.
 exit /b 0
 

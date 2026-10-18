@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, truncateSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -306,6 +306,9 @@ describe('segment-reader: 索引重建兜底', () => {
     assert.equal(fromMirror.length, 3);
 
     unlinkSync(descriptor.indexFilePath);
+    // Evict the cached index first: without the eviction this call would be served from memory and never reach
+    // the rebuild-from-.seg fallback this case is about
+    reader.clearBlockCache();
     const rebuilt = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
     assert.deepStrictEqual(rebuilt, fromMirror, '重建条目应与 `.idx` 镜像逐字段一致（Footer 探测须避免误判块头）');
 
@@ -371,5 +374,90 @@ describe('segment-reader: 值类型守门', () => {
         return true;
       },
     );
+  });
+});
+
+/* ---------- 段索引缓存（封口段复用 .idx 解析、活跃段增量扫描） ---------- */
+
+describe('segment-reader: 段索引缓存', () => {
+  it('活跃段索引增量扫描：追加后只补齐新块，结果与从零重建逐字段一致', () => {
+    const { store, writer } = createFixture({ blockTargetPoints: 4096 });
+    const base = new Date(2026, 4, 8, 10, 0, 0).getTime();
+    // 块粒度 = 一次 drain（每次 append 达到目标点数即落一个块）
+    writer.append(floatPoints('m.inc', base, 4096));
+    writer.append(floatPoints('m.inc', base + 4096 * 1000, 4096));
+
+    const reader = new SegmentReader({ store });
+    const descriptor = reader.listSegments(DATABASE)[0];
+    assert.equal(descriptor.sealed, false, '未调用 close 的段应保持活跃（无 Footer/.idx）');
+    const first = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.equal(first.length, 2);
+    const repeated = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.equal(repeated, first, '同一段重复调用应直接命中缓存（同一数组实例，不做任何扫描/解析）');
+
+    writer.append(floatPoints('m.inc', base + 2 * 4096 * 1000, 4096));
+    writer.append(floatPoints('m.inc', base + 3 * 4096 * 1000, 4096));
+    const grown = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.equal(grown, first, '增量扫描在原数组上按写入顺序追加');
+    assert.equal(grown.length, 4);
+
+    // 独立 reader 从零全量重建：条目与增量结果逐字段一致（含 offset/length/时间范围）
+    const fresh = new SegmentReader({ store });
+    const expected = fresh.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.deepStrictEqual(grown, expected);
+    assert.deepStrictEqual(
+      fresh.locateBlocks(DATABASE, 'm.inc', base, base + 4 * 4096 * 1000).map((location) => location.entry.offset),
+      reader.locateBlocks(DATABASE, 'm.inc', base, base + 4 * 4096 * 1000).map((location) => location.entry.offset),
+    );
+    writer.close();
+  });
+
+  it('封口段复用 .idx 解析结果；evictDatabase / clearBlockCache 后重新加载', () => {
+    const { store, writer } = createFixture({ blockTargetPoints: 4096 });
+    const base = new Date(2026, 5, 9, 10, 0, 0).getTime();
+    writer.append(floatPoints('m.seal', base, 4096));
+    writer.append(floatPoints('m.seal', base + 4096 * 1000, 4096));
+    writer.close();
+
+    const reader = new SegmentReader({ store });
+    const descriptor = reader.listSegments(DATABASE)[0];
+    assert.equal(descriptor.sealed, true);
+    const first = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    const second = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.equal(second, first, '封口段不可变：应复用首次解析结果');
+
+    reader.evictDatabase(DATABASE);
+    const afterEvict = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.notEqual(afterEvict, first, 'evictDatabase 后应重新加载而不是返回旧数组');
+    assert.deepStrictEqual(afterEvict, first);
+
+    reader.clearBlockCache();
+    const afterClear = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.notEqual(afterClear, afterEvict, 'clearBlockCache 后应重新加载');
+    assert.deepStrictEqual(afterClear, first);
+  });
+
+  it('段文件被截断后索引缓存失效并按当前内容重建', () => {
+    const { store, writer } = createFixture({ blockTargetPoints: 4096 });
+    const base = new Date(2026, 6, 10, 10, 0, 0).getTime();
+    for (let round = 0; round < 4; round += 1) {
+      writer.append(floatPoints('m.trunc', base + round * 4096 * 1000, 4096));
+    }
+    writer.close();
+
+    const reader = new SegmentReader({ store });
+    const descriptor = reader.listSegments(DATABASE)[0];
+    const before = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.equal(before.length, 4);
+
+    // 模拟掉电截断：抹掉最后一个块 + Footer + `.idx`
+    const truncated = before[2].offset + before[2].length;
+    truncateSync(descriptor.segmentFilePath, truncated);
+    unlinkSync(descriptor.indexFilePath);
+
+    const after = reader.loadIndexEntries(DATABASE, descriptor.dateNumber, descriptor.sequence);
+    assert.notEqual(after, before, '文件变短后不得返回缓存条目');
+    assert.equal(after.length, 3, '只保留仍完整的块');
+    assert.deepStrictEqual(after, before.slice(0, 3));
   });
 });

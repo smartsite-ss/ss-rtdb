@@ -28,6 +28,23 @@ export function formatNumber(value: number): string {
   return groupThousands(Number.isInteger(value) ? String(value) : value.toFixed(2));
 }
 
+/**
+ * Display form of a stored point value: numbers are grouped, booleans render as `true` / `false`, everything
+ * else (`string` values, `i64` decimal strings) is kept verbatim, and `null` becomes an em dash.
+ */
+export function formatPointValue(value: number | string | boolean | null): string {
+  if (value === null) return '—';
+  if (typeof value === 'number') return formatNumber(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return value;
+}
+
+/** Compact elapsed label for query timings (`12 ms` / `0.85 s`) */
+export function formatElapsed(milliseconds: number): string {
+  if (milliseconds < 1_000) return `${Math.max(1, Math.round(milliseconds))} ms`;
+  return `${(milliseconds / 1_000).toFixed(2)} s`;
+}
+
 const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'] as const;
 
 export function formatBytes(bytes: number): string {
@@ -63,6 +80,12 @@ export function formatDuration(milliseconds: number): string {
 }
 
 const padTwoDigits = (input: number): string => String(input).padStart(2, '0');
+
+/** Local `YYYY-MM-DD` of a timestamp — the day a day-granular range boundary falls on */
+export function localDayString(milliseconds: number): string {
+  const date = new Date(milliseconds);
+  return `${date.getFullYear()}-${padTwoDigits(date.getMonth() + 1)}-${padTwoDigits(date.getDate())}`;
+}
 
 /** Local `YYYY-MM-DD HH:mm:ss` (never locale-formatted) */
 export function formatDateTime(milliseconds: number): string {

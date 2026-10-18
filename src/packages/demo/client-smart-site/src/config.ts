@@ -28,6 +28,8 @@ export interface DemoClientConfig {
   rate?: number;
   /** Stop after this many points (0 = unlimited) */
   totalPoints?: number;
+  /** Simulated metric count (0 = the native catalog; larger replicates tags with a `#k` suffix) */
+  metrics?: number;
   seed?: number;
   devices?: string[];
   glitchProbability?: number;
@@ -44,6 +46,7 @@ export interface DemoClientConfigTarget {
   pointsPerTick: number;
   rate: number;
   totalPoints: number;
+  metrics: number;
   seed: number;
   devices: string[];
   glitchProbability: number;
@@ -64,6 +67,7 @@ const KNOWN_KEYS = new Set<string>([
   'pointsPerTick',
   'rate',
   'totalPoints',
+  'metrics',
   'seed',
   'devices',
   'glitchProbability',
@@ -125,6 +129,9 @@ export function readDemoClientConfig(filePath: string): DemoClientConfig {
   if (source.totalPoints !== undefined) {
     config.totalPoints = requireInteger(filePath, 'totalPoints', source.totalPoints, 0);
   }
+  if (source.metrics !== undefined) {
+    config.metrics = requireInteger(filePath, 'metrics', source.metrics, 0);
+  }
   if (source.seed !== undefined) {
     config.seed = requireInteger(filePath, 'seed', source.seed, 0);
   }
@@ -163,6 +170,7 @@ export function applyDemoClientConfig(target: DemoClientConfigTarget, config: De
   if (config.pointsPerTick !== undefined) target.pointsPerTick = config.pointsPerTick;
   if (config.rate !== undefined) target.rate = config.rate;
   if (config.totalPoints !== undefined) target.totalPoints = config.totalPoints;
+  if (config.metrics !== undefined) target.metrics = config.metrics;
   if (config.seed !== undefined) target.seed = config.seed;
   if (config.devices !== undefined) target.devices = [...config.devices];
   if (config.glitchProbability !== undefined) target.glitchProbability = config.glitchProbability;

@@ -140,6 +140,7 @@ All server and connection settings used by the demo live in `src/packages/demo/c
 | `--points-per-tick <n>` | `0` | **Points per batch**; `0` = one sample per metric (capped by the window capacity, see §3.3) |
 | `--rate <points/s>` | `0` | Target write rate; derives the batch size from `--interval`; mutually exclusive with `--points-per-tick` |
 | `--total-points <n>` | `0` | Stop after n written points; `0` = unlimited |
+| `--metrics <n>` | `0` | **Simulated variable count**; `0` = the 44-tag catalog. A larger value replicates every tag with a `#k` metric-name suffix (`hvac-chiller.supply-temp#2`), a smaller one truncates the catalog (see §3.3) |
 | `--duration <seconds>` | `0` | Run time; `0` = until Ctrl+C |
 | `--once` | off | Write exactly one batch and exit |
 | `--seed <int>` | `20261017` | RNG seed that determines the signal sequence |
@@ -174,7 +175,7 @@ Multi-point batches come from `SmartSiteSimulator.tickBatch()`:
 
 Capacity: one `interval` window holds at most `metricCount × interval` points (default 44 × 1000 = 44 000).
 Exceeding it fails at startup instead of silently dropping points; raise `--interval` (capacity grows
-with the window) or run several client processes against different `--db` values.
+with the window), raise `--metrics`, or run several client processes against different `--db` values.
 
 The startup header prints the effective batch size and target rate; the summary reports the real
 throughput, latency percentiles (p50/p95/p99/max) and the gap to the target:
@@ -188,6 +189,40 @@ throughput, latency percentiles (p50/p95/p99/max) and the gap to the target:
 `--dry-run` honours the same options, so `--dry-run --points-per-tick 100` previews a multi-point batch.
 All three options can also live in `client-smart-site.json` (`pointsPerTick` / `rate` / `totalPoints`,
 where `0` disables them); command-line arguments still win.
+
+### 3.3.1 Variable-count mode (`--metrics`)
+
+`--metrics <n>` scales the **catalog** itself, not just the batch size — the knob for "how many variables
+does this site have":
+
+| `--metrics` | Result | Replicas |
+| ----------- | ------ | -------- |
+| `0` (default) | the native catalog, 9 devices / 44 metrics | 1 |
+| `< 44` | the first n catalog tags (truncation) | 1 |
+| `1000` | 44 tags × 23 copies = 1000 metrics | 23 |
+| `3000` | 44 tags × 69 copies | 69 |
+| `6000` | 44 tags × 137 copies | 137 |
+| `10000` | 44 tags × 228 copies | 228 |
+
+Replica metric names are `<device>.<variable>#k` (`hvac-chiller.supply-temp#2`); the original tags keep
+their plain names. Every replica is an **independent signal stream**: its own RNG stream, wave phase and
+state, so the values differ from the original tag, and a `counter.rateFrom` resolves inside its own replica
+group (`ws-a-meter-01.yong-dian-liang#2` integrates `ws-a-meter-01.gong-l#2`, not the original's). The
+device count stays at 9 — only the metric count grows, which is what the engine's index and write path see.
+
+The practical effect: the per-batch capacity becomes `metrics × interval`, so a single client can push
+far more points per batch (10000 metrics × 1000 ms = 10 000 000 pairs), and the server is exercised with
+thousands of metrics instead of 44. `--devices` filters first, then the remaining tags are replicated.
+`--list` prints the scaled catalog and a `Scaled catalog:` note; the startup header shows
+`9 devices / 1000 metrics (44 catalog tags x 23)`.
+
+```bash
+# 10,000 variables at 200,000 points/s for a minute
+npm run demo:smart-site -- --metrics 10000 --rate 200000 --duration 60
+```
+
+`--metrics` also lives in `client-smart-site.json` as `metrics` (`0` = native catalog). The upper bound is
+100 000 metrics per process; a non-integer or negative value fails at startup.
 
 ### 3.4 Token resolution order
 
@@ -222,9 +257,10 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
 - **Large-volume tests** use `run` with `--rate` (target pts/s), `--points-per-tick` (points per
   batch) or `--total-points` (stop after N points); the batch size is decoupled from the 44-tag
   catalog. One client is still bounded by `metrics × interval` (44 × 1000 = 44,000 points per batch) —
-  raise `--interval` or run several clients for more. Measured on this machine (Ryzen 7 4800H, local
-  disk): `--rate 20000 --duration 10` wrote 220,000 points at **21,823 points/s** with 0 duplicates and
-  0 failed batches; every `--verify` check (`count` / `last` / `aggregate`) passed.
+  raise `--interval`, raise `--metrics` (§3.3.1) or run several clients for more. Measured on this
+  machine (Ryzen 7 4800H, local disk): `--rate 20000 --duration 10` wrote 220,000 points at
+  **21,823 points/s** with 0 duplicates and 0 failed batches; every `--verify` check
+  (`count` / `last` / `aggregate`) passed.
 
 - `bin\start-demo-server.bat` starts the demo server from `demo\conf\rtdb-server.json`; when port
   6180 is taken, override it with `set RTDB_PORT=6190`;
@@ -238,6 +274,8 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
   bin\start-demo-server.bat bench 20000 30
   bin\start-demo-server.bat bench 20000 30 --db perf_demo --interval 500
   bin\start-demo-server.bat bench 5000 60 --points-per-tick 5000
+  :: variable-count runs: pass --metrics (the catalog is replicated with a "#k" suffix)
+  bin\start-demo-server.bat bench 200000 60 --metrics 10000
   ```
 
   This window runs the client (`--rate <pts/s> --duration <seconds> --log-every 1`) and forwards any extra
@@ -245,6 +283,18 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
   token only once, wait capped at 10 s). Exit code `3` (server unreachable) is retried up to 3 times, 3 s
   apart, then the script tells you to start the server. With `RTDB_PORT` set the client switches to that port
   too. A huge `duration` (e.g. `3000000000`) means "run forever"; Ctrl+C stops only the client;
+- `bin\start-demo-server.bat vars <pts/s> <seconds> [client options]` runs the **variable-count ladder**:
+  the same bench for **1000 / 3000 / 6000 / 10000 metrics**, one database per point
+  (`perf_vars_1000` … `perf_vars_10000`), so the results stay comparable:
+
+  ```bat
+  :: window 2 - four short runs, 3000 points/s for 2 s each
+  bin\start-demo-server.bat vars 3000 2
+  ```
+
+  Each point prints the client header (`catalog : 9 devices / 1000 metrics (44 catalog tags x 23)`) and a
+  `[demo] vars <n> finished with exit code …` line; the ladder ends with the list of databases it wrote.
+  Pass `--db` in the extra options to share one database instead (later `--db` wins);
 - `list` / `dry` / `once` / `stream` are presets: `once` means `--once --verify`, and `stream`
   runs 60 seconds by default with `--verify` (the seconds argument is optional);
 - `run` forwards all remaining arguments unchanged; `run --help` shows the full client help;
@@ -325,8 +375,9 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | `400 E_INVALID_POINT ... quality=…` | A non-zero quality flag was written (unsupported in v0.1.0) | Omit `q`; this demo never sends a quality flag |
 | `--db` rejected | Database names cannot contain `-` and similar characters | Use letters, digits and underscores, e.g. `smartfactory_demo` |
 | `--list` reports an unknown device | Typo in `--devices` | Run `--list` to see the available device codes |
-| `exceed the catalog capacity` at startup | Points per batch exceed `metricCount × interval` | Raise `--interval`, lower `--points-per-tick`, or use fewer `--devices` |
+| `exceed the catalog capacity` at startup | Points per batch exceed `metricCount × interval` | Raise `--interval`, raise `--metrics`, lower `--points-per-tick`, or use fewer `--devices` |
 | `--rate` together with `--points-per-tick` fails | Both control the same knob | Pass only one of them |
+| `metricTarget must be a positive integer …` / `… exceeds the 100000-metric limit` | `--metrics` was negative, fractional or above 100 000 | Use an integer in `1 … 100000` (`0` = native catalog) |
 
 ## 7. Next steps
 
@@ -347,3 +398,4 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-17 | §3.5 documents `bin\start-demo-server.bat bench <pts/s> <seconds> [client options]`: **load client only, never starts a server** (start rtdb-server yourself; waits for the token file, retries 3 times while unreachable) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §6 troubleshooting covers `--token rtdb.token` → `401 E_AUTH` (`--token` takes the value and overrides the config `tokenFile`; the demo instance and the SEA release use different token files); the client now warns when `--token` looks like a path and the 401 hint explains the precedence | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §3.5 and `bin\demo-smart-site.bat` add **large-volume** examples (`--rate 20000 --duration 60 --verify`, `--points-per-tick 5000 --total-points 1000000`, `dry --points-per-tick 5000`), plus the capacity bound and a measured 21,823 points/s run | DeepSeek-V4.1-Flash |
+| 2026-10-18 | New §3.3.1 **variable-count mode** `--metrics <n>` (and config key `metrics`): the catalog is replicated with a `#k` metric-name suffix (1000 / 3000 / 6000 / 10000 variables = 44 tags × 23/69/137/228), each replica an independent signal stream with its own `counter.rateFrom` group; `bin\start-demo-server.bat` gains the `vars <pts/s> <seconds>` ladder (one `perf_vars_<count>` database per point) and `bench … --metrics` forwarding | Step-5-Preview |

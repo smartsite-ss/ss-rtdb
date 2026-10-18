@@ -281,6 +281,29 @@ describe('segment-writer: 兜底与全量落盘', () => {
 
     writer.close();
   });
+
+  it('切片落盘：readyMetricNames 只列已达下限的指标，flushMetrics 只落选中的那个', () => {
+    const { writer } = createFixture({ blockTargetPoints: 4096, blockMinPoints: 64 });
+    writer.append(floatPoints('m.a', 1_760_000_000_000, 64));
+    writer.append(floatPoints('m.b', 1_760_000_000_000, 64));
+    writer.append(floatPoints('m.low', 1_760_000_000_000, 10));
+
+    assert.deepStrictEqual(writer.readyMetricNames(), ['m.a', 'm.b'], '未达下限的指标不应进入切片候选');
+
+    const slice = writer.flushMetrics(['m.a'], false);
+    assert.equal(slice.blockCount, 1);
+    assert.equal(slice.pointCount, 64);
+    assert.equal(writer.pendingPointsOf('m.a'), 0);
+    assert.equal(writer.pendingPointsOf('m.b'), 64, '未选中的指标缓冲应保持原样');
+
+    // 陌生名称与已清空的指标都被安全跳过
+    const skipped = writer.flushMetrics(['m.a', 'm.ghost'], true);
+    assert.equal(skipped.blockCount, 0);
+    assert.equal(writer.flushMetrics(['m.b']).blockCount, 1);
+    assert.equal(writer.pendingPointCount, 10);
+
+    writer.close();
+  });
 });
 
 /* ---------- 类型锁定与整批校验 ---------- */

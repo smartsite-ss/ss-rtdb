@@ -259,12 +259,40 @@ export class SegmentWriter {
    * high-frequency measurement points from producing many fragmented blocks)
    */
   flush(): WriterFlushResult {
+    return this.flushMetrics(this.readyMetricNames());
+  }
+
+  /**
+   * Metric names whose buffer reached `blockMinPoints` (fallback-flush candidates, in map order).
+   *
+   * Exposed so the periodic flush can be **sliced**: encoding a block is CPU work on the caller's thread, and
+   * flushing every ready metric at once blocked the event loop for hundreds of milliseconds at high write rates
+   * (44 metrics x ~2 300 points measured as a ~270ms stall every 5s). The engine snapshots this list and flushes
+   * it a few metrics per event-loop turn instead.
+   */
+  readyMetricNames(): string[] {
+    const names: string[] = [];
+    for (const buffer of this.buffers.values()) {
+      if (buffer.timestamps.length >= this.blockMinPoints) names.push(buffer.metricName);
+    }
+    return names;
+  }
+
+  /**
+   * Flush the given metrics only (a slice of `readyMetricNames()`); unknown/emptied names are skipped, so a slice
+   * taken before a concurrent append stays valid.
+   *
+   * Blocks appended by the call are made durable at the end unless `syncSegments` is false — a sliced sweep passes
+   * false for every slice but the last, so one `fsync` covers the whole sweep instead of one per slice.
+   */
+  flushMetrics(metricNames: readonly string[], syncSegments = true): WriterFlushResult {
     const result: WriterFlushResult = { blockCount: 0, pointCount: 0, sealedSegments: [] };
-    for (const buffer of [...this.buffers.values()]) {
-      if (buffer.timestamps.length < this.blockMinPoints) continue;
+    for (const metricName of metricNames) {
+      const buffer = this.buffers.get(metricName);
+      if (buffer === undefined || buffer.timestamps.length < this.blockMinPoints) continue;
       this.drainBuffer(buffer, true, result);
     }
-    this.syncSegmentsIfNeeded();
+    if (syncSegments) this.syncSegmentsIfNeeded();
     return result;
   }
 

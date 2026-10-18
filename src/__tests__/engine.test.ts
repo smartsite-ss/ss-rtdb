@@ -414,6 +414,41 @@ describe('引擎: 值类型探测与指标存在性', () => {
   });
 });
 
+/* ---------- 定时刷盘：切片执行 ---------- */
+
+describe('引擎: 定时刷盘切片', () => {
+  it('一次 sweep 会把所有就绪指标都落块（逐片让出事件循环）', async () => {
+    const dataDir = createDataDir();
+    const database = 'slicedb';
+    const engine = await openEngine(dataDir);
+    try {
+      const bulk = Array.from({ length: 1100 }, (_, index) => index);
+      for (let m = 0; m < 5; m += 1) {
+        await engine.writeBatch(database, pointsFrom(`s.m${m}`, bulk, DAY_BASE));
+      }
+      const before = await engine.stats();
+      assert.equal(before.write.bufferedPoints, 5500, '5 个指标各 1100 点应全部在缓冲中（未达 blockTargetPoints）');
+
+      // 直接驱动一次 sweep：与 5s 定时器走同一条路径，但不依赖真实计时
+      await (engine as unknown as { flushSweep: () => Promise<void> }).flushSweep();
+      const after = await engine.stats();
+      assert.equal(after.write.bufferedPoints, 0, 'sweep 结束后所有就绪指标都应落块');
+
+      const metrics = await engine.listMetrics(database);
+      assert.deepStrictEqual(
+        metrics.map((summary) => summary.metricName),
+        ['s.m0', 's.m1', 's.m2', 's.m3', 's.m4'],
+      );
+      assert.ok(
+        metrics.every((summary) => summary.firstTs !== summary.lastTs),
+        '每个指标都应形成包含全部点的块',
+      );
+    } finally {
+      await engine.close();
+    }
+  });
+});
+
 /* ---------- 查询四原语：last ---------- */
 
 describe('查询: queryLast', () => {

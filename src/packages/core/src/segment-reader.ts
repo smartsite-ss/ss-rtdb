@@ -57,6 +57,12 @@ import type { SegmentStore } from './segment-store.ts';
 /** Cap of the per-segment metric-name cache (an entry is a name set, not a block index; ~KB per segment) */
 const SEGMENT_METRIC_NAME_CACHE_LIMIT = 512;
 
+/**
+ * Cap of cached block-index entries across all segments (about 120B per entry, so the cache tops out in the
+ * tens of megabytes). A day directory with 200k+ blocks fits; older segments are dropped first.
+ */
+const SEGMENT_INDEX_CACHE_MAX_ENTRIES = 400_000;
+
 /* ---------- Public types ---------- */
 
 export interface SegmentReaderOptions {
@@ -126,6 +132,24 @@ interface DecodedBlock {
 
 /* ---------- Segment reader ---------- */
 
+/**
+ * Cached block index of one segment.
+ *
+ * A sealed segment is immutable, so its `.idx` parse result is reused as-is. An **active** (unsealed) segment
+ * only grows: instead of rescanning the whole block region on every call (a 200MB segment costs ~1s of block
+ * header reads), the scan resumes at `scannedEnd` and only the blocks appended since then are read.
+ */
+interface CachedSegmentIndex {
+  /** Entries in write order (same order as a rebuild would produce) */
+  entries: SegmentBlockIndexEntry[];
+  /** Segment file length these entries were derived from */
+  bytes: number;
+  /** Block region end reached by the last scan (the next scan resumes here) */
+  scannedEnd: number;
+  /** Whether the entries came from the `.idx` mirror (sealed segment: never re-read or re-scanned) */
+  fromMirror: boolean;
+}
+
 export class SegmentReader {
   private readonly store: SegmentStore;
   /** Effective decoded block cache entries (already clamped) */
@@ -144,6 +168,10 @@ export class SegmentReader {
    * returning a stale set; insertion order eviction bounds the total.
    */
   private readonly metricNamesBySegment = new Map<string, ReadonlySet<string>>();
+  /** Parsed/scan-derived block index per segment (keyed by segment file path; see `CachedSegmentIndex`) */
+  private readonly indexCache = new Map<string, CachedSegmentIndex>();
+  /** Total entries currently held by `indexCache` (eviction budget) */
+  private cachedIndexEntryCount = 0;
 
   constructor(options: SegmentReaderOptions) {
     this.store = options.store;
@@ -182,19 +210,52 @@ export class SegmentReader {
    * Load the block index entries of a segment: prefer the `.idx` mirror (verify Footer CRC and layout),
    * rebuild by scanning blocks from `.seg` on failure
    *
-   * The returned value is ordered by **write order** (consistent with the block region order within the segment).
+   * The returned value is ordered by **write order** (consistent with the block region order within the segment)
+   * and **cached per segment**: a sealed segment is immutable, so its mirror parse is reused indefinitely; an
+   * active segment is rescanned **incrementally** from the last complete block. Query primitives call this once
+   * per segment per request, so without the cache a day directory with hundreds of thousands of blocks paid the
+   * full index load on every single query (the console's per-metric live-value polling made that the dominant
+   * cost of a write-heavy instance).
    */
   loadIndexEntries(database: string, dateNumber: number, sequence: number): SegmentBlockIndexEntry[] {
+    const segmentFilePath = this.store.segmentFilePath(database, dateNumber, sequence);
+    const bytes = this.store.segmentFileBytes(segmentFilePath);
+    if (bytes === null) {
+      throw new RtdbError(ERROR_CODE.DatabaseNotFound, `Segment file does not exist: ${segmentFilePath}`);
+    }
+
+    const cached = this.indexCache.get(segmentFilePath);
+    if (cached !== undefined) {
+      if (cached.bytes === bytes) return this.touchIndexCache(segmentFilePath, cached);
+      if (!cached.fromMirror && bytes > cached.bytes) {
+        return this.appendIndexEntries(cached, database, dateNumber, sequence, bytes);
+      }
+      // The file shrank or changed character (truncated / re-sealed / replaced): fall through to a full reload
+      this.dropIndexCache(segmentFilePath);
+    }
+
     const descriptor = this.describeSegment(database, dateNumber, sequence);
     if (descriptor === null) {
-      throw new RtdbError(
-        ERROR_CODE.DatabaseNotFound,
-        `Segment file does not exist: ${this.store.segmentFilePath(database, dateNumber, sequence)}`,
-      );
+      throw new RtdbError(ERROR_CODE.DatabaseNotFound, `Segment file does not exist: ${segmentFilePath}`);
     }
     const fromIndexFile = this.loadIndexEntriesFromMirror(descriptor);
-    if (fromIndexFile !== null) return fromIndexFile;
-    return this.rebuildIndexEntries(descriptor);
+    if (fromIndexFile !== null) {
+      this.storeIndexCache(segmentFilePath, {
+        entries: fromIndexFile,
+        bytes: descriptor.bytes,
+        scannedEnd: descriptor.blockRegionEnd,
+        fromMirror: true,
+      });
+      return fromIndexFile;
+    }
+    const scanned = this.scanIndexEntries(descriptor, SEGMENT_HEADER_SIZE);
+    this.storeIndexCache(segmentFilePath, {
+      entries: scanned.entries,
+      bytes: descriptor.bytes,
+      scannedEnd: scanned.regionEnd,
+      fromMirror: false,
+    });
+    return scanned.entries;
   }
 
   /**
@@ -575,6 +636,9 @@ export class SegmentReader {
 
   clearBlockCache(): void {
     this.blockCache.clear();
+    this.indexCache.clear();
+    this.cachedIndexEntryCount = 0;
+    this.metricNamesBySegment.clear();
   }
 
   /**
@@ -592,6 +656,14 @@ export class SegmentReader {
       if (!cacheKey.startsWith(prefix)) continue;
       this.blockCache.delete(cacheKey);
       evicted += 1;
+    }
+    // Index/name caches are keyed by segment and index paths under the same database directory; the entries of a
+    // deleted or restored day directory must not survive (a restored segment could reuse a path and a length).
+    for (const cacheKey of [...this.indexCache.keys()]) {
+      if (cacheKey.startsWith(prefix)) this.dropIndexCache(cacheKey);
+    }
+    for (const cacheKey of [...this.metricNamesBySegment.keys()]) {
+      if (cacheKey.startsWith(prefix)) this.metricNamesBySegment.delete(cacheKey);
     }
     return evicted;
   }
@@ -625,10 +697,12 @@ export class SegmentReader {
     }
     requireSegmentHeader(this.store, segmentFilePath);
 
-    // Sealed segment: the `.idx` length is the in-segment index region length -> Footer start = file end - index region - 16, allowing precise location and CRC verification
-    const indexBytes = readFileBytesIfExists(indexFilePath);
-    if (indexBytes !== null && bytes >= SEGMENT_HEADER_SIZE + SEGMENT_FOOTER_SIZE + indexBytes.length) {
-      const footerStart = bytes - indexBytes.length - SEGMENT_FOOTER_SIZE;
+    // Sealed segment: the `.idx` length is the in-segment index region length -> Footer start = file end - index region - 16, allowing precise location and CRC verification.
+    // Only the mirror *length* is needed here, so stat it: reading the whole `.idx` (megabytes per segment) just to
+    // describe the segment made every query's segment listing pay for the whole day's index bytes.
+    const indexBytes = this.store.segmentFileBytes(indexFilePath);
+    if (indexBytes !== null && bytes >= SEGMENT_HEADER_SIZE + SEGMENT_FOOTER_SIZE + indexBytes) {
+      const footerStart = bytes - indexBytes - SEGMENT_FOOTER_SIZE;
       if (this.footerMatches(segmentFilePath, footerStart)) {
         return {
           database,
@@ -687,17 +761,83 @@ export class SegmentReader {
     }
   }
 
-  /** Rebuild the index by sequentially scanning blocks from `.seg` (fallback when `.idx` is missing/corrupt) */
-  private rebuildIndexEntries(descriptor: SegmentFileDescriptor): SegmentBlockIndexEntry[] {
-    const blocks = this.scanBlockHeaders(descriptor).headers;
-    return blocks.map((block) => ({
-      metricName: block.metricName,
-      offset: block.offset,
-      length: block.totalLength,
-      pointCount: block.pointCount,
-      timestampMin: block.timestampMin,
-      timestampMax: block.timestampMax,
-    }));
+  /**
+   * Rebuild the index by sequentially scanning blocks from `.seg` (fallback when `.idx` is missing/corrupt), starting
+   * at `startOffset` so an active segment can be extended instead of rescanned
+   */
+  private scanIndexEntries(
+    descriptor: SegmentFileDescriptor,
+    startOffset: number,
+  ): { entries: SegmentBlockIndexEntry[]; regionEnd: number } {
+    const scanned = this.scanBlockHeaders(descriptor, startOffset);
+    return { entries: scanned.headers.map(indexEntryOfBlock), regionEnd: scanned.regionEnd };
+  }
+
+  /* ---------- Internals: index cache ---------- */
+
+  /** Move a cache entry to the most-recently-used end and return its entries */
+  private touchIndexCache(segmentFilePath: string, cached: CachedSegmentIndex): SegmentBlockIndexEntry[] {
+    this.indexCache.delete(segmentFilePath);
+    this.indexCache.set(segmentFilePath, cached);
+    return cached.entries;
+  }
+
+  /** Drop one segment's cached index (no-op when absent) */
+  private dropIndexCache(segmentFilePath: string): void {
+    const existing = this.indexCache.get(segmentFilePath);
+    if (existing === undefined) return;
+    this.indexCache.delete(segmentFilePath);
+    this.cachedIndexEntryCount -= existing.entries.length;
+  }
+
+  /** Insert/replace one segment's cached index and enforce the entry budget */
+  private storeIndexCache(segmentFilePath: string, cached: CachedSegmentIndex): void {
+    this.dropIndexCache(segmentFilePath);
+    this.indexCache.set(segmentFilePath, cached);
+    this.cachedIndexEntryCount += cached.entries.length;
+    this.trimIndexCache();
+  }
+
+  /** Evict least-recently-used segments until the entry budget is met (the newest entry is always kept) */
+  private trimIndexCache(): void {
+    while (this.cachedIndexEntryCount > SEGMENT_INDEX_CACHE_MAX_ENTRIES && this.indexCache.size > 1) {
+      const oldest = this.indexCache.keys().next();
+      if (oldest.done) return;
+      this.dropIndexCache(oldest.value);
+    }
+  }
+
+  /**
+   * Extend the cached index of an active segment by scanning only the bytes appended since the last scan.
+   *
+   * The cached array is extended in place (write order preserved), so a caller that already holds a reference sees
+   * the same index the next call returns. `scannedEnd`/`bytes` are updated even when the delta holds no complete
+   * block yet, which keeps a partially written tail from being rescanned on every call.
+   */
+  private appendIndexEntries(
+    cached: CachedSegmentIndex,
+    database: string,
+    dateNumber: number,
+    sequence: number,
+    bytes: number,
+  ): SegmentBlockIndexEntry[] {
+    const descriptor: SegmentFileDescriptor = {
+      database,
+      dateNumber,
+      sequence,
+      segmentFilePath: this.store.segmentFilePath(database, dateNumber, sequence),
+      indexFilePath: this.store.indexFilePathOfSegment(database, dateNumber, sequence),
+      bytes,
+      blockRegionEnd: bytes,
+      sealed: false,
+    };
+    const scanned = this.scanIndexEntries(descriptor, cached.scannedEnd);
+    for (const entry of scanned.entries) cached.entries.push(entry);
+    this.cachedIndexEntryCount += scanned.entries.length;
+    cached.scannedEnd = scanned.regionEnd;
+    cached.bytes = bytes;
+    this.trimIndexCache();
+    return cached.entries;
   }
 
   /** Single-block BlockData CRC re-check (reads only that block's bytes, no decode); any IO/out-of-bounds failure is treated as a mismatch */
@@ -771,9 +911,12 @@ export class SegmentReader {
    * parse failure", and Footer bytes may be misjudged as a block header, so **probe for the Footer at every
    * block boundary first** (when `.idx` exists this probe never hits, at the cost of one extra small read).
    */
-  private scanBlockHeaders(descriptor: SegmentFileDescriptor): { headers: BlockHeader[]; regionEnd: number } {
+  private scanBlockHeaders(
+    descriptor: SegmentFileDescriptor,
+    startOffset = SEGMENT_HEADER_SIZE,
+  ): { headers: BlockHeader[]; regionEnd: number } {
     const headers: BlockHeader[] = [];
-    let offset = SEGMENT_HEADER_SIZE;
+    let offset = startOffset;
     while (offset + 2 <= descriptor.blockRegionEnd) {
       if (this.footerMatches(descriptor.segmentFilePath, offset)) return { headers, regionEnd: offset };
 
@@ -885,6 +1028,18 @@ export class SegmentReader {
 /* ---------- Internal utilities ---------- */
 
 /** Read file bytes; returns null if the file does not exist, other failures throw E_IO */
+/** Index entry of a scanned block header (the fields the read path needs, no payload) */
+function indexEntryOfBlock(block: BlockHeader): SegmentBlockIndexEntry {
+  return {
+    metricName: block.metricName,
+    offset: block.offset,
+    length: block.totalLength,
+    pointCount: block.pointCount,
+    timestampMin: block.timestampMin,
+    timestampMax: block.timestampMax,
+  };
+}
+
 function readFileBytesIfExists(filePath: string): Uint8Array | null {
   try {
     const buffer = readFileSync(filePath);

@@ -220,15 +220,16 @@ describe('demo: 性能模式（每批多点）', () => {
     );
   });
 
-  it('配置文件接受性能参数（pointsPerTick / rate / totalPoints）并校验类型', () => {
+  it('配置文件接受性能参数（pointsPerTick / rate / totalPoints / metrics）并校验类型', () => {
     const directory = mkdtempSync(join(rootDirectory, 'perf-config-'));
 
     const valid = join(directory, 'valid.json');
-    writeFileSync(valid, JSON.stringify({ pointsPerTick: 5_000, rate: 0, totalPoints: 100_000 }), 'utf8');
+    writeFileSync(valid, JSON.stringify({ pointsPerTick: 5_000, rate: 0, totalPoints: 100_000, metrics: 10_000 }), 'utf8');
     const config = readDemoClientConfig(valid);
     assert.equal(config.pointsPerTick, 5_000);
     assert.equal(config.rate, 0);
     assert.equal(config.totalPoints, 100_000);
+    assert.equal(config.metrics, 10_000);
 
     const badRate = join(directory, 'bad-rate.json');
     writeFileSync(badRate, JSON.stringify({ rate: -1 }), 'utf8');
@@ -237,6 +238,133 @@ describe('demo: 性能模式（每批多点）', () => {
     const badPoints = join(directory, 'bad-points.json');
     writeFileSync(badPoints, JSON.stringify({ pointsPerTick: 1.5 }), 'utf8');
     assert.throws(() => readDemoClientConfig(badPoints), /"pointsPerTick"/);
+
+    const badMetrics = join(directory, 'bad-metrics.json');
+    writeFileSync(badMetrics, JSON.stringify({ metrics: -1 }), 'utf8');
+    assert.throws(() => readDemoClientConfig(badMetrics), /"metrics"/);
+  });
+});
+
+describe('demo: 变量规模缩放（--metrics）', () => {
+  it('metricTarget 精确控制指标数：不足截断、超出按 #k 后缀复制', () => {
+    const native = new SmartSiteSimulator({ seed: 5 });
+    assert.equal(native.metricCount, 44);
+    assert.equal(native.baseMetricCount, 44);
+    assert.equal(native.replicaCount, 1);
+
+    const truncated = new SmartSiteSimulator({ seed: 5, metricTarget: 10 });
+    assert.equal(truncated.metricCount, 10);
+    assert.equal(truncated.baseMetricCount, 44);
+    assert.equal(truncated.replicaCount, 1);
+    assert.deepEqual(truncated.metricNames, native.metricNames.slice(0, 10));
+
+    const scaled = new SmartSiteSimulator({ seed: 5, metricTarget: 100 });
+    assert.equal(scaled.metricCount, 100);
+    assert.equal(scaled.baseMetricCount, 44);
+    assert.equal(scaled.replicaCount, 3);
+    const names = new Set(scaled.metricNames);
+    assert.equal(names.size, 100, 'scaled metric names must stay unique');
+    // The original catalog keeps its plain names; only replicas carry the "#k" suffix.
+    for (const name of native.metricNames) assert.ok(names.has(name), `original tag lost: ${name}`);
+    assert.ok(names.has('hvac-chiller.supply-temp#2'));
+    assert.ok(names.has('hvac-chiller.supply-temp#3'));
+    assert.equal(names.has('hvac-chiller.supply-temp#4'), false);
+  });
+
+  it('副本是独立信号流：同 seed 可复现，取值与原标签不同', () => {
+    const stamps = [BASE, BASE + 1_000, BASE + 2_000];
+    const read = (metricTarget: number): unknown[][] => {
+      const simulator = new SmartSiteSimulator({ seed: 5, metricTarget });
+      return stamps.map((timestamp) => simulator.tick(timestamp));
+    };
+    assert.deepEqual(read(88), read(88), 'same seed + metricTarget must reproduce the stream');
+
+    const simulator = new SmartSiteSimulator({ seed: 5, metricTarget: 88 });
+    const original: unknown[] = [];
+    const replica: unknown[] = [];
+    for (const timestamp of stamps) {
+      for (const point of simulator.tick(timestamp)) {
+        if (point.metricName === 'hvac-chiller.supply-temp') original.push(point.value);
+        if (point.metricName === 'hvac-chiller.supply-temp#2') replica.push(point.value);
+      }
+    }
+    assert.equal(original.length, stamps.length);
+    assert.equal(replica.length, stamps.length);
+    assert.notDeepEqual(original, replica, 'a replica must not repeat the original signal');
+  });
+
+  it('缩放后每个指标仍保持锁定值类型与工程范围', () => {
+    const simulator = new SmartSiteSimulator({ seed: 7, metricTarget: 200 });
+    const descriptors = new Map(simulator.describe().map((descriptor) => [descriptor.metricName, descriptor]));
+    assert.equal(descriptors.size, 200);
+
+    for (let index = 0; index < 5; index += 1) {
+      for (const point of simulator.tick(BASE + index * 1_000)) {
+        const descriptor = descriptors.get(point.metricName);
+        assert.ok(descriptor !== undefined, `unexpected metric ${point.metricName}`);
+        switch (descriptor.type) {
+          case 'f64':
+            assert.equal(typeof point.value, 'number');
+            assert.ok(Number.isFinite(point.value as number));
+            if (descriptor.min !== undefined) assert.ok((point.value as number) >= descriptor.min);
+            if (descriptor.max !== undefined) assert.ok((point.value as number) <= descriptor.max);
+            break;
+          case 'i64':
+            assert.equal(typeof point.value, 'bigint');
+            break;
+          case 'bool':
+            assert.equal(typeof point.value, 'boolean');
+            break;
+          default:
+            assert.equal(typeof point.value, 'string');
+        }
+      }
+    }
+  });
+
+  it('副本的 counter.rateFrom 在本副本组内解析，累计量各自独立推进', () => {
+    const simulator = new SmartSiteSimulator({ seed: 5, metricTarget: 88 });
+    const stamps = [BASE, BASE + 1_000, BASE + 2_000];
+    const samples = new Map<string, Map<number, number | bigint | boolean | string>>();
+    for (const timestamp of stamps) {
+      for (const point of simulator.tick(timestamp)) {
+        const bucket = samples.get(point.metricName) ?? new Map<number, number | bigint | boolean | string>();
+        bucket.set(timestamp, point.value);
+        samples.set(point.metricName, bucket);
+      }
+    }
+
+    const at = (metricName: string, timestamp: number): number => {
+      const value = samples.get(metricName)?.get(timestamp);
+      assert.equal(typeof value, 'number', `${metricName} should stay f64`);
+      return value as number;
+    };
+
+    // 用电量 accumulates initial + Σ(own gong-l x dt x factor); dt = 1 s (the first sample adds nothing).
+    const expected = 38_210.5 + (at('ws-a-meter-01.gong-l#2', BASE + 1_000) + at('ws-a-meter-01.gong-l#2', BASE + 2_000)) / 3_600;
+    assert.ok(Math.abs(at('ws-a-meter-01.yong-dian-liang#2', BASE + 2_000) - expected) < 0.011);
+    // The replica integrates its own driving signal, so it does not equal the original's counter.
+    assert.notEqual(
+      at('ws-a-meter-01.yong-dian-liang', BASE + 2_000),
+      at('ws-a-meter-01.yong-dian-liang#2', BASE + 2_000),
+    );
+  });
+
+  it('--devices 与缩放叠加：只复制所选设备的标签', () => {
+    const simulator = new SmartSiteSimulator({ seed: 5, deviceCodes: ['hvac-chiller'], metricTarget: 20 });
+    assert.equal(simulator.metricCount, 20);
+    assert.equal(simulator.baseMetricCount, 11);
+    assert.equal(simulator.replicaCount, 2);
+    assert.equal(simulator.deviceCount, 1);
+    for (const metricName of simulator.metricNames) {
+      assert.ok(metricName.startsWith('hvac-chiller.'), `${metricName} must belong to the filtered device`);
+    }
+  });
+
+  it('metricTarget 非法值直接报错', () => {
+    assert.throws(() => new SmartSiteSimulator({ metricTarget: -1 }), /metricTarget/);
+    assert.throws(() => new SmartSiteSimulator({ metricTarget: 1.5 }), /metricTarget/);
+    assert.throws(() => new SmartSiteSimulator({ metricTarget: 100_001 }), /100000-metric limit/);
   });
 });
 
@@ -355,6 +483,7 @@ describe('demo: demo/conf 配置统一管理', () => {
       pointsPerTick: 0,
       rate: 0,
       totalPoints: 0,
+      metrics: 0,
       seed: 1,
       devices: [] as string[],
       glitchProbability: 0,
@@ -366,11 +495,13 @@ describe('demo: demo/conf 配置统一管理', () => {
       database: 'conf_db',
       intervalMs: 500,
       devices: ['hvac-chiller'],
+      metrics: 3_000,
     });
     assert.equal(target.url, 'http://conf:6180');
     assert.equal(target.database, 'conf_db');
     assert.equal(target.intervalMs, 500);
     assert.deepEqual(target.devices, ['hvac-chiller']);
+    assert.equal(target.metrics, 3_000);
   });
 });
 

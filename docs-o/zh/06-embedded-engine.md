@@ -53,7 +53,7 @@ await rtdb.close();   // 刷盘、封存活动段、截断 WAL、释放锁
 | `segmentMaxPerDay` | `1000` | 单个日目录内最大段文件数。 |
 | `blockTargetPoints` | `16384` | 块封块的主触发条件。 |
 | `blockMinPoints` | `1024` | 周期性兜底封块的下限。 |
-| `flushIntervalMs` | `5000` | 周期性兜底刷盘。 |
+| `flushIntervalMs` | `5000` | 周期性兜底刷盘（每次 sweep 按指标切片执行：每 2 个指标让出一次事件循环，避免高写入率下单次 sweep 阻塞主线程数百毫秒）。 |
 | `maxBufferBytes` | `268435456` | 缓冲点内存水位 → `E_RATE_LIMITED`。 |
 | `maxPendingPoints` | `2000000` | 未落盘点数水位 → `E_RATE_LIMITED`。 |
 | `cacheBlocks` | `256` | 已解码块的 LRU 条目数。 |
@@ -247,4 +247,5 @@ main()
 | 2026-10-17 | `queryRange` 返回的 `Series` 新增可选 `received`（服务器接收时间窗口，块/批次粒度） | GLM-5.3-Flash |
 | 2026-10-17 | `RtdbEngine` 新增第五查询原语 `queryAt`（任意时刻批量插值取值，`step`/`linear`，`state` 来源标记；详见《插值功能详细设计》） | GLM-5.3-Flash |
 | 2026-10-18 | 新增 `hasMetric(database, metricName)`（仅存在性判断，段级 metric 名集合缓存）；修复 `readBlockValueType` 探测长度不足导致 `listMetrics` 对同一 metric 逐块重探（HTTP 侧每个查询请求都会做存在性校验，实测把接口从 ~1.4 s 降到 ~0.15 s） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 周期性兜底刷盘改为切片执行：每 2 个指标让出一次事件循环、整个 sweep 只做一次段 fsync（实测 20k 点/s 下单次 sweep 阻塞由 ~210–275 ms 降至 ≤58 ms，残余抖动主要来自单批写入本身） | DeepSeek-V4.1-Flash |
 

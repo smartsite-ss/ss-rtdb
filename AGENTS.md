@@ -41,7 +41,7 @@
 | 使用 CLI / rtdbctl 包装脚本 | `node packages/cli/src/main.ts status`、`npx rtdbctl status`、`bin\rtdbctl.bat status` |
 | 运行 Smart Site 模拟客户端（写入实时数据） | `npm run demo:smart-site -- --once --verify`；Windows 包装：`bin\demo-smart-site.bat list` / `bin\demo-smart-site.bat stream 60`（见文档 10） |
 | 启动演示服务器（读取 `demo/conf` 统一配置） | `bin\start-demo-server.bat`（端口被占用时 `set RTDB_PORT=6190`） |
-| 压测演示服务（服务端需已启动，脚本不拉服务） | `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]` |
+| 压测演示服务（服务端需已启动，脚本不拉服务） | `bin\start-demo-server.bat bench <pts/s> <seconds> [客户端参数]`；变量数阶梯（1000/3000/6000/10000 指标各一库）：`bin\start-demo-server.bat vars <pts/s> <seconds>`；客户端 `--metrics <n>` 按 `#k` 后缀复制目录 |
 | 控制台开发服务器 | `npm run dev --workspace @ss/rtdb-admin` |
 | Python SDK 测试 | `cd packages/demo/client-python` 后 `python -m pytest tests/` |
 
@@ -83,7 +83,7 @@ ss-rtdb/
 │   ├── start-server.bat      #   前台启动服务（仓库与发布包通用）
 │   ├── rtdbctl.bat           #   rtdbctl 包装脚本
 │   ├── demo-smart-site.bat   #   Smart Site 模拟客户端包装（list/dry/once/stream/run）
-│   ├── start-demo-server.bat #   启动演示服务器；bench 子命令再起压测客户端
+│   ├── start-demo-server.bat #   启动演示服务器；bench/vars 子命令再起压测客户端
 │   └── sea\build-sea.mjs     #   SEA 实现：esbuild bundle + --experimental-sea-config + postject
 ├── release/                  # 发布产物（build-release.bat 生成，**不入库**）
 └── docs-o/                   # en/ 原始英文文档，zh/ 中文译本（逐页对应）
@@ -301,6 +301,7 @@ git push gitee main:master              # Gitee（否则 git 会推 origin）
 | 2026-10-17 | 新增发布/启动脚本 `bin\build-release.bat`、`bin\start-server.bat`、`bin\rtdbctl.bat`；§2 命令表与 §3 布局同步；§10 忽略清单补 `release/`；`.gitignore` 忽略 `release/` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 SEA 单文件打包 `bin\build-sea.bat` + `bin\sea\build-sea.mjs`（esbuild bundle、`import.meta.url` 重写、`postject` 注入、控制台外置）；§2 补命令与 SEA 要点、§3 布局、§10 忽略 `bin/.sea-tools/` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §10 补充根路径 `/` 302 跳转到 `/admin/`（修复 SEA 发布后访问站点根路径返回 `E_NOT_FOUND: Unregistered route: /`） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §2 命令表与 §3 布局补充 `bin\start-demo-server.bat` 的 `vars` 子命令（1000/3000/6000/10000 指标阶梯压测）与客户端 `--metrics` 变量数缩放；详见文档 10 §3.3.1 | Step-5-Preview |
 | 2026-10-17 | 新增 `packages/demo/client-smart-site` Smart Site 实时数据模拟客户端：§2 命令表、§3 布局补充；文档 10 同步 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 `bin\demo-smart-site.bat` 包装脚本（list / dry / once / stream / run）；§2 命令表与 §3 布局同步 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 `packages/demo/conf/` 统一配置（`rtdb-server.json`、`client-smart-site.json`）与 `bin\start-demo-server.bat`；客户端支持 `--config` / `--no-config` | DeepSeek-V4.1-Flash |

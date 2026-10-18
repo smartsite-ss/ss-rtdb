@@ -16,7 +16,7 @@
  */
 
 import { DEMO_VALUE_TYPE, buildMetricName, selectDevices, valueTypeOf } from './catalog.ts';
-import type { DemoValueType, SmartSiteDataType, TagDefinition } from './catalog.ts';
+import type { DemoValueType, DeviceDefinition, SmartSiteDataType, TagDefinition } from './catalog.ts';
 
 export interface SimulatorOptions {
   /** RNG seed; the same seed always yields the same stream for the same timestamps */
@@ -25,6 +25,15 @@ export interface SimulatorOptions {
   glitchProbability?: number;
   /** Device subset; empty / undefined = every device in the catalog */
   deviceCodes?: readonly string[];
+  /**
+   * Target metric count (0 / undefined = the native catalog).
+   *
+   * Above the catalog size the tag list is replicated with a `#k` suffix on the metric name
+   * (`hvac-chiller.supply-temp#2`), so a single process can simulate thousands of variables while every
+   * replica keeps its own RNG stream, wave phase and state (a `counter.rateFrom` resolves inside its own
+   * replica group). Below it the catalog is truncated to the first n tags.
+   */
+  metricTarget?: number;
 }
 
 /** One generated sample, shaped like a core `WritePoint` */
@@ -72,9 +81,21 @@ interface MetricEntry {
   tag: TagDefinition;
   metricName: string;
   type: DemoValueType;
+  /** 1 = original catalog tag; k > 1 = the k-th replica of that tag (metric name carries `#k`) */
+  replica: number;
+  /** Metric name a `counter.rateFrom` reads, resolved inside this entry's replica group (`null` = none) */
+  rateFromMetric: string | null;
   phase: number;
   random: () => number;
   state: MetricState;
+}
+
+/** One catalog tag before replication (the unit the metric count is scaled in) */
+interface CatalogTag {
+  device: DeviceDefinition;
+  tag: TagDefinition;
+  metricName: string;
+  type: DemoValueType;
 }
 
 const DEFAULT_SEED = 20261017;
@@ -83,6 +104,32 @@ const STRING_CHANGE_PROBABILITY = 0.02;
 const INT_STATE_CHANGE_PROBABILITY = 0.01;
 const DRIFT_DECAY = 0.9;
 const DRIFT_NOISE_RATIO = 0.0025;
+/** Upper bound of `metricTarget`: beyond this the per-metric state stops being cheap to build */
+const MAX_METRIC_TARGET = 100_000;
+/** Separator of a replica metric name (`hvac-chiller.supply-temp#2` = the 2nd copy of that tag) */
+const REPLICA_SEPARATOR = '#';
+
+/** `#k` suffix of a replica; the original catalog tags carry no suffix */
+function replicaSuffix(replica: number): string {
+  return replica <= 1 ? '' : `${REPLICA_SEPARATOR}${replica}`;
+}
+
+/**
+ * Effective metric count: `0` / undefined keeps the native catalog, a larger target replicates it, a
+ * smaller one truncates it.
+ *
+ * @throws when the target is not a positive integer or exceeds {@link MAX_METRIC_TARGET}
+ */
+function resolveMetricTotal(target: number | undefined, baseCount: number): number {
+  if (target === undefined || target === 0) return baseCount;
+  if (!Number.isInteger(target) || target < 1) {
+    throw new Error(`metricTarget must be a positive integer or 0 (native catalog): ${String(target)}`);
+  }
+  if (target > MAX_METRIC_TARGET) {
+    throw new Error(`metricTarget ${target} exceeds the ${MAX_METRIC_TARGET}-metric limit`);
+  }
+  return target;
+}
 
 /** FNV-1a 32-bit hash, used to derive independent per-metric RNG streams and wave phases */
 function hashString(value: string): number {
@@ -172,11 +219,19 @@ function validateTag(tag: TagDefinition, metricName: string): void {
 
 /**
  * Stateful Smart Site simulator. Call `tick(timestamp)` once per sampling instant to obtain one
- * sample per catalog tag.
+ * sample per simulated metric.
+ *
+ * `metricTarget` scales the simulated variable count (see {@link SimulatorOptions}): the native catalog is
+ * either truncated or replicated with a `#k` metric-name suffix, and every replica is an independent signal
+ * stream of the same tag shape.
  */
 export class SmartSiteSimulator {
   private readonly entries: readonly MetricEntry[];
   private readonly glitchProbability: number;
+  /** Catalog tags before replication (after the `--devices` filter) */
+  private readonly baseCount: number;
+  /** Highest replica index (1 = native catalog, no replication) */
+  private readonly replicas: number;
 
   constructor(options: SimulatorOptions = {}) {
     const seed = options.seed ?? DEFAULT_SEED;
@@ -189,32 +244,49 @@ export class SmartSiteSimulator {
       }
     }
 
-    const entries: MetricEntry[] = [];
+    const baseTags: CatalogTag[] = [];
     for (const device of devices) {
       for (const tag of device.tags) {
         const metricName = buildMetricName(device.deviceCode, tag.variable);
         validateTag(tag, metricName);
-        const type = valueTypeOf(tag);
-        entries.push({
-          deviceCode: device.deviceCode,
-          deviceName: device.deviceName,
-          tag,
-          metricName,
-          type,
-          phase: (hashString(metricName) % 6283) / 1000,
-          random: mulberry32(hashString(`${seed}:${metricName}`)),
-          state: {
-            drift: 0,
-            counterValue: tag.counter?.initial ?? 0,
-            boolValue: tag.initial ?? true,
-            intStateIndex: initialStateIndex(tag.states),
-            stringIndex: 0,
-            glitchTicksLeft: 0,
-            lastTimestamp: null,
-            lastValue: null,
-          },
-        });
+        baseTags.push({ device, tag, metricName, type: valueTypeOf(tag) });
       }
+    }
+    this.baseCount = baseTags.length;
+
+    const metricTotal = resolveMetricTotal(options.metricTarget, baseTags.length);
+    this.replicas = baseTags.length === 0 ? 0 : Math.ceil(metricTotal / baseTags.length);
+
+    const entries: MetricEntry[] = [];
+    for (let index = 0; index < metricTotal; index += 1) {
+      const base = baseTags[index % baseTags.length] as CatalogTag;
+      const replica = Math.floor(index / baseTags.length) + 1;
+      const suffix = replicaSuffix(replica);
+      const metricName = `${base.metricName}${suffix}`;
+      const rateFrom = base.tag.counter?.rateFrom;
+      entries.push({
+        deviceCode: base.device.deviceCode,
+        deviceName: base.device.deviceName,
+        tag: base.tag,
+        metricName,
+        type: base.type,
+        replica,
+        // The driving variable lives in the same device (and therefore the same replica group); when the
+        // catalog was truncated below it the lookup simply misses and the counter holds its initial value.
+        rateFromMetric: rateFrom === undefined ? null : `${buildMetricName(base.device.deviceCode, rateFrom)}${suffix}`,
+        phase: (hashString(metricName) % 6283) / 1000,
+        random: mulberry32(hashString(`${seed}:${metricName}`)),
+        state: {
+          drift: 0,
+          counterValue: base.tag.counter?.initial ?? 0,
+          boolValue: base.tag.initial ?? true,
+          intStateIndex: initialStateIndex(base.tag.states),
+          stringIndex: 0,
+          glitchTicksLeft: 0,
+          lastTimestamp: null,
+          lastValue: null,
+        },
+      });
     }
     this.entries = entries;
   }
@@ -224,9 +296,19 @@ export class SmartSiteSimulator {
     return new Set(this.entries.map((entry) => entry.deviceCode)).size;
   }
 
-  /** Number of simulated metrics (= tags) */
+  /** Number of simulated metrics (= tags), replicas included */
   get metricCount(): number {
     return this.entries.length;
+  }
+
+  /** Catalog tags before replication (`0` when the selected catalog is empty) */
+  get baseMetricCount(): number {
+    return this.baseCount;
+  }
+
+  /** Copies per catalog tag (`1` = native catalog, no replication) */
+  get replicaCount(): number {
+    return this.replicas;
   }
 
   /** Every metric name in catalog order */
@@ -260,7 +342,7 @@ export class SmartSiteSimulator {
     const currentTick = new Map<string, number | bigint | boolean | string>();
     for (const entry of this.entries) {
       const point = this.nextPoint(entry, timestamp, currentTick);
-      currentTick.set(`${entry.deviceCode}.${entry.tag.variable}`, point.value);
+      currentTick.set(entry.metricName, point.value);
       points.push(point);
     }
     return points;
@@ -317,7 +399,7 @@ export class SmartSiteSimulator {
         // Strictly increasing inside the window because `count <= window`.
         const timestamp = endTimestamp - window + Math.floor(((sample + 1) * window) / count);
         const point = this.nextPoint(entry, timestamp, currentValues);
-        currentValues.set(`${entry.deviceCode}.${entry.tag.variable}`, point.value);
+        currentValues.set(entry.metricName, point.value);
         points.push(point);
       }
     }
@@ -394,7 +476,8 @@ export class SmartSiteSimulator {
       if (spec.perSecond !== undefined) {
         increment = spec.perSecond * seconds;
       } else if (spec.rateFrom !== undefined) {
-        const rawRate = currentTick.get(`${entry.deviceCode}.${spec.rateFrom}`);
+        // Resolved inside this entry's replica group, so a replica integrates its own driving signal.
+        const rawRate = entry.rateFromMetric === null ? undefined : currentTick.get(entry.rateFromMetric);
         const rate = typeof rawRate === 'number' ? rawRate : 0;
         increment = rate * seconds * (spec.factor ?? 1);
       }

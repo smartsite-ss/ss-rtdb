@@ -17,6 +17,11 @@
  *   node packages/demo/client-smart-site/src/main.ts --rate 20000 --duration 30
  *   node packages/demo/client-smart-site/src/main.ts --points-per-tick 5000 --total-points 100000
  *
+ * Variable-count runs (`--metrics`) scale the catalog itself: 10000 metrics replicate the 44 tags 228 times
+ * (`hvac-chiller.supply-temp#2`, ...), each with its own signal stream, which both widens the per-batch
+ * capacity (`metrics x interval`) and exercises the server with many metrics:
+ *   node packages/demo/client-smart-site/src/main.ts --metrics 10000 --rate 200000 --duration 60
+ *
  * Defaults (server URL, token file, database, generation parameters) come from
  * `packages/demo/conf/client-smart-site.json`; command-line arguments always win, and
  * `--no-config` skips the file entirely.
@@ -36,7 +41,7 @@ import {
 } from './client.ts';
 import type { WireWindow } from './client.ts';
 import { SmartSiteSimulator } from './generator.ts';
-import type { MetricDescriptor, SimulatedPoint } from './generator.ts';
+import type { SimulatedPoint } from './generator.ts';
 import type { DemoValueType } from './catalog.ts';
 
 const DEFAULT_URL = 'http://127.0.0.1:6180';
@@ -61,6 +66,8 @@ interface CliOptions {
   rate: number;
   /** Stop after this many points have been sent (0 = unlimited) */
   totalPoints: number;
+  /** Simulated metric count (0 = the native catalog; larger replicates tags with a `#k` suffix) */
+  metrics: number;
   seed: number;
   devices: string[];
   glitchProbability: number;
@@ -122,6 +129,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
     pointsPerTick: 0,
     rate: 0,
     totalPoints: 0,
+    metrics: 0,
     seed: 20261017,
     devices: [],
     glitchProbability: 0,
@@ -196,6 +204,9 @@ function parseArgs(argv: readonly string[]): CliOptions {
         break;
       case 'total-points':
         options.totalPoints = readInteger(takeValue(), 'total-points', 1);
+        break;
+      case 'metrics':
+        options.metrics = readInteger(takeValue(), 'metrics', 0);
         break;
       case 'seed':
         options.seed = readInteger(takeValue(), 'seed', 0);
@@ -291,7 +302,7 @@ function resolveBatchPlan(options: CliOptions, metricCount: number): BatchPlan {
     throw new Error(
       `${pointsPerTick} points per ${options.intervalMs} ms batch exceed the catalog capacity ` +
         `(${metricCount} metrics x ${options.intervalMs} ms = ${capacity} distinct (metric, timestamp) pairs); ` +
-        'raise --interval, lower the point count, or widen --devices',
+        'raise --interval, raise --metrics, lower the point count, or widen --devices',
     );
   }
   return { pointsPerTick, source };
@@ -316,6 +327,8 @@ function printUsage(): void {
       '  --points-per-tick <n>  Points written per tick (default 0 = one sample per metric)',
       '  --rate <points/s>      Target write rate; derives the points per tick from --interval',
       '  --total-points <n>     Stop after N written points (default 0 = unlimited)',
+      '  --metrics <n>          Simulated metric count (default 0 = the 44-tag catalog); a larger value',
+      '                         replicates every tag with a "#k" metric-name suffix, a smaller one truncates',
       '  --once                 Write exactly one batch and exit',
       '  --seed <int>           RNG seed (default 20261017)',
       '  --devices <list>       Comma-separated device codes (default: all)',
@@ -333,6 +346,7 @@ function printUsage(): void {
       '  node packages/demo/client-smart-site/src/main.ts --devices hvac-chiller,sewage-in --interval 500',
       '  node packages/demo/client-smart-site/src/main.ts --rate 20000 --duration 30',
       '  node packages/demo/client-smart-site/src/main.ts --points-per-tick 5000 --total-points 100000',
+      '  node packages/demo/client-smart-site/src/main.ts --metrics 10000 --rate 200000 --duration 60',
     ].join('\n'),
   );
 }
@@ -383,7 +397,8 @@ function looksLikeTokenFile(value: string): boolean {
   return /[\\/]/.test(trimmed) || trimmed.toLowerCase().endsWith('.token');
 }
 
-function printCatalog(descriptors: readonly MetricDescriptor[]): void {
+function printCatalog(simulator: SmartSiteSimulator): void {
+  const descriptors = simulator.describe();
   const header = ['device', 'metric', 'smart-site', 'rtdb', 'unit', 'name'];
   const rows = descriptors.map((descriptor) => [
     descriptor.deviceCode,
@@ -405,6 +420,12 @@ function printCatalog(descriptors: readonly MetricDescriptor[]): void {
   const devices = new Set(descriptors.map((descriptor) => descriptor.deviceCode));
   console.log('');
   console.log(`Total: ${devices.size} devices, ${descriptors.length} metrics`);
+  if (simulator.replicaCount > 1) {
+    console.log(
+      `Scaled catalog: ${simulator.baseMetricCount} catalog tags x ${simulator.replicaCount} copies; ` +
+        `replica metric names carry a "#k" suffix (k >= 2)`,
+    );
+  }
 }
 
 function describeValueType(value: number | bigint | boolean | string): DemoValueType {
@@ -540,10 +561,11 @@ async function run(): Promise<number> {
     seed: options.seed,
     glitchProbability: options.glitchProbability,
     deviceCodes: options.devices,
+    metricTarget: options.metrics,
   });
 
   if (options.list) {
-    printCatalog(simulator.describe());
+    printCatalog(simulator);
     return 0;
   }
 
@@ -561,6 +583,9 @@ async function run(): Promise<number> {
   console.log(`  database  : ${options.database}`);
   console.log(
     `  catalog   : ${simulator.deviceCount} devices / ${simulator.metricCount} metrics ` +
+      (simulator.replicaCount > 1
+        ? `(${simulator.baseMetricCount} catalog tags x ${simulator.replicaCount}) `
+        : '') +
       `(seed=${options.seed}, glitch=${options.glitchProbability})`,
   );
   console.log(

@@ -57,7 +57,7 @@ All options are optional except `dataDir`.
 | `segmentMaxPerDay` | `1000` | Max segments per day directory. |
 | `blockTargetPoints` | `16384` | Primary block-finalize trigger. |
 | `blockMinPoints` | `1024` | Lower bound for the periodic finalize. |
-| `flushIntervalMs` | `5000` | Periodic flush fallback. |
+| `flushIntervalMs` | `5000` | Periodic flush fallback (each sweep runs in slices: the event loop is yielded every 2 metrics, so a high write rate cannot stall the main thread for hundreds of milliseconds in one sweep). |
 | `maxBufferBytes` | `268435456` | Memory watermark for buffered points → `E_RATE_LIMITED`. |
 | `maxPendingPoints` | `2000000` | Unflushed point watermark → `E_RATE_LIMITED`. |
 | `cacheBlocks` | `256` | LRU entries for decoded blocks. |
@@ -253,3 +253,4 @@ main()
 | 2026-10-17 | `Series` returned by `queryRange` gains the optional `received` field (server receive-time window, block/batch granularity) | GLM-5.3-Flash |
 | 2026-10-17 | `RtdbEngine` adds the fifth query primitive `queryAt` (batch point-in-time interpolated lookup, `step`/`linear`, `state` provenance markers; see the Interpolation Detailed Design) | GLM-5.3-Flash |
 | 2026-10-18 | Adds `hasMetric(database, metricName)` (existence only, cached per-segment name sets); fixes `readBlockValueType` probing too few bytes, which made `listMetrics` re-probe every block of the same metric (the HTTP layer validates the metric on every query; measured ~1.4 s → ~0.15 s per endpoint) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | The periodic flush fallback now runs in slices: the event loop is yielded every 2 metrics and the whole sweep performs a single segment `fsync` (measured at 20k points/s: the worst single-sweep stall dropped from ~210–275 ms to ≤58 ms; the residual jitter comes from the write batches themselves) | DeepSeek-V4.1-Flash |

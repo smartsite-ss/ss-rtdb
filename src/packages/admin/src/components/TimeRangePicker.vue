@@ -15,6 +15,10 @@
  * inclusive) write `00:00:00` / `23:59:59` into the exact fields, and editing the exact time moves the day
  * pickers back accordingly — there is no second copy of the range to keep in sync.
  *
+ * `granularity` selects how much of that machinery is exposed: `datetime` (default) is the exact query range of
+ * the metrics panel; `day` drops the second-precision fields and swaps the presets for whole-day ones, which is
+ * what day-granular consumers (the backup panel) need. In `day` mode an empty side means "unbounded".
+ *
  * Values are `<input type="datetime-local">` strings (`YYYY-MM-DDTHH:mm:ss`) owned by the parent, which keeps the
  * query inputs and the URL-free state model of the console unchanged.
  */
@@ -26,6 +30,7 @@ import {
   dateTimeLocalDay,
   formatDateTime,
   fromDateTimeLocalValue,
+  localDayString,
   toDateTimeLocalValue,
 } from '../format';
 import { t } from '../i18n';
@@ -34,9 +39,13 @@ import type { MessageKey } from '../locales/en';
 const props = defineProps<{
   start: string;
   end: string;
-  /** First / last timestamp of the selected metric, used by the "All" preset; `null` disables it */
-  spanStart: number | null;
-  spanEnd: number | null;
+  /** First / last timestamp of the selected metric, used by the "All" preset; absent disables it */
+  spanStart?: number | null;
+  spanEnd?: number | null;
+  /** `datetime` = exact second-precision range; `day` = whole local days with an optional unbounded side */
+  granularity?: 'datetime' | 'day';
+  /** Disables the trigger while the parent runs an action */
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -45,6 +54,8 @@ const emit = defineEmits<{
   /** The user picked a preset or pressed Apply: run the query with the new range */
   apply: [];
 }>();
+
+const isDay = computed(() => props.granularity === 'day');
 
 /** Quick presets; `null` = the metric's whole span */
 const PRESETS: ReadonlyArray<{ key: MessageKey; milliseconds: number | null }> = [
@@ -56,6 +67,22 @@ const PRESETS: ReadonlyArray<{ key: MessageKey; milliseconds: number | null }> =
   { key: 'metrics.quick7d', milliseconds: 7 * 24 * 3_600_000 },
   { key: 'metrics.quickAll', milliseconds: null },
 ];
+
+/** Day-mode presets, counted in whole local days ending today; `null` = clear both ends (unbounded) */
+const DAY_PRESETS: ReadonlyArray<{ key: MessageKey; days: number | null }> = [
+  { key: 'metrics.quickToday', days: 1 },
+  { key: 'metrics.quick3d', days: 3 },
+  { key: 'metrics.quick7d', days: 7 },
+  { key: 'metrics.quick30d', days: 30 },
+  { key: 'metrics.range.clear', days: null },
+];
+
+/** The preset row of the active granularity, each entry carrying its own apply action */
+const activePresets = computed<ReadonlyArray<{ key: MessageKey; run: () => void }>>(() =>
+  isDay.value
+    ? DAY_PRESETS.map((preset) => ({ key: preset.key, run: () => applyDayPreset(preset.days) }))
+    : PRESETS.map((preset) => ({ key: preset.key, run: () => applyDatetimePreset(preset.milliseconds) })),
+);
 
 const root = ref<HTMLElement | null>(null);
 const open = ref(false);
@@ -89,6 +116,13 @@ const draftEndDay = computed<string>({
 const invalidRange = ref(false);
 
 const rangeLabel = computed(() => {
+  if (isDay.value) {
+    const startDay = dateTimeLocalDay(props.start);
+    const endDay = dateTimeLocalDay(props.end);
+    // Both ends empty = unbounded, which reads as "no range" rather than as a broken trigger.
+    if (startDay.length === 0 && endDay.length === 0) return t('metrics.range.label');
+    return `${startDay.length > 0 ? startDay : '…'} → ${endDay.length > 0 ? endDay : '…'}`;
+  }
   const startMs = fromDateTimeLocalValue(props.start);
   const endMs = fromDateTimeLocalValue(props.end);
   if (startMs <= 0 || endMs <= 0) return t('metrics.range.label');
@@ -98,7 +132,7 @@ const rangeLabel = computed(() => {
   return `${startText} → ${startText.slice(0, 10) === endText.slice(0, 10) ? endText.slice(11) : endText}`;
 });
 
-const allPresetEnabled = computed(() => props.spanStart !== null && props.spanEnd !== null);
+const allPresetEnabled = computed(() => props.spanStart != null && props.spanEnd != null);
 
 function toggle(): void {
   if (open.value) {
@@ -115,9 +149,9 @@ function close(): void {
   open.value = false;
 }
 
-function applyPreset(milliseconds: number | null): void {
+function applyDatetimePreset(milliseconds: number | null): void {
   if (milliseconds === null) {
-    if (props.spanStart === null || props.spanEnd === null) return;
+    if (props.spanStart == null || props.spanEnd == null) return;
     draftStart.value = toDateTimeLocalValue(props.spanStart, true);
     draftEnd.value = toDateTimeLocalValue(props.spanEnd, true);
   } else {
@@ -129,10 +163,28 @@ function applyPreset(milliseconds: number | null): void {
   close();
 }
 
+/** `days` whole local days ending today; `null` clears both ends (an unbounded range) */
+function applyDayPreset(days: number | null): void {
+  if (days === null) {
+    draftStart.value = '';
+    draftEnd.value = '';
+  } else {
+    const today = new Date();
+    const first = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (days - 1));
+    draftStart.value = dayToDayStart(localDayString(first.getTime()));
+    draftEnd.value = dayToDayEnd(localDayString(today.getTime()));
+  }
+  emitValues();
+  close();
+}
+
 function applyDraft(): void {
   const startMs = fromDateTimeLocalValue(draftStart.value);
   const endMs = fromDateTimeLocalValue(draftEnd.value);
-  if (startMs <= 0 || endMs <= 0 || endMs < startMs) {
+  // An exact range must be complete; a day range may stay open on either side, but never inverted.
+  const complete = !isDay.value && (startMs <= 0 || endMs <= 0);
+  const inverted = startMs > 0 && endMs > 0 && endMs < startMs;
+  if (complete || inverted) {
     invalidRange.value = true;
     return;
   }
@@ -173,7 +225,7 @@ onUnmounted(() => {
   <div ref="root" class="range-picker">
     <div class="field">
       <label class="field-label">{{ t('metrics.range.label') }}</label>
-      <button class="range-trigger" :class="{ active: open }" @click="toggle">
+      <button class="range-trigger" :class="{ active: open }" :disabled="disabled" @click="toggle">
         <span class="range-clock">◷</span>
         <span class="range-text">{{ rangeLabel }}</span>
         <span class="range-caret">▾</span>
@@ -183,11 +235,11 @@ onUnmounted(() => {
     <div v-if="open" class="range-popover" @keydown.enter.stop>
       <div class="range-presets">
         <button
-          v-for="preset in PRESETS"
+          v-for="preset in activePresets"
           :key="preset.key"
           class="small"
-          :disabled="preset.milliseconds === null && !allPresetEnabled"
-          @click="applyPreset(preset.milliseconds)"
+          :disabled="preset.key === 'metrics.quickAll' && !allPresetEnabled"
+          @click="preset.run()"
         >
           {{ t(preset.key) }}
         </button>
@@ -204,20 +256,23 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <p class="toolbar-note">{{ t('metrics.range.dayHint') }}</p>
+      <p v-if="!isDay" class="toolbar-note">{{ t('metrics.range.dayHint') }}</p>
 
-      <div class="range-fields">
-        <div class="field">
-          <label class="field-label">{{ t('metrics.start') }}</label>
-          <input v-model="draftStart" type="datetime-local" step="1" />
+      <template v-if="!isDay">
+        <div class="range-fields">
+          <div class="field">
+            <label class="field-label">{{ t('metrics.start') }}</label>
+            <input v-model="draftStart" type="datetime-local" step="1" />
+          </div>
+          <div class="field">
+            <label class="field-label">{{ t('metrics.end') }}</label>
+            <input v-model="draftEnd" type="datetime-local" step="1" />
+          </div>
         </div>
-        <div class="field">
-          <label class="field-label">{{ t('metrics.end') }}</label>
-          <input v-model="draftEnd" type="datetime-local" step="1" />
-        </div>
-      </div>
 
-      <p class="toolbar-note">{{ t('metrics.range.hint') }}</p>
+        <p class="toolbar-note">{{ t('metrics.range.hint') }}</p>
+      </template>
+      <p v-else class="toolbar-note">{{ t('metrics.range.dayOnlyHint') }}</p>
       <p v-if="invalidRange" class="alert error">{{ t('metrics.range.invalid') }}</p>
 
       <div class="range-actions">
