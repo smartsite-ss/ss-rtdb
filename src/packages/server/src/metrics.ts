@@ -83,6 +83,13 @@ export function encodePrometheusMetrics(input: PrometheusMetricsInput): string {
   appendFamily(lines, 'rtdb_write_duplicate_points_total', 'Duplicate points silently discarded this session.', 'counter', [
     { value: stats.write.duplicatePoints },
   ]);
+  appendFamily(
+    lines,
+    'rtdb_write_quality_dropped_total',
+    'Points discarded by the quality store policy this session (quality.onReject=drop).',
+    'counter',
+    [{ value: stats.write.qualityDropped }],
+  );
   appendFamily(lines, 'rtdb_write_tags_ignored_total', 'Line Protocol tag fragments ignored this session.', 'counter', [
     { value: tagsIgnored },
   ]);

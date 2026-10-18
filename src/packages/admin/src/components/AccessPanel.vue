@@ -13,7 +13,7 @@
  * its hash; this panel keeps it in memory until the operator switches tab or reloads.
  */
 
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import type { RtdbAdminApiClient, RtdbConfigTokenUsage, RtdbPublicToken, RtdbPublicUser } from '../api';
 import { useAsyncAction } from '../async';
 import { formatBytes, formatDateTime, formatNumber } from '../format';
@@ -28,6 +28,11 @@ const HOURS_TO_MILLISECONDS = 3_600_000;
 const AUTO_REFRESH_MS = 5_000;
 /** Token id the server uses for the static `auth.token` / `rtdb.token` (no token-store record) */
 const STATIC_TOKEN_ID = 'config-token';
+/** Label of the console sign-in sessions; a new login revokes the previous ones (single-session semantics) */
+const SIGN_IN_LABEL = 'console login';
+
+/** Retired sign-in sessions are audit noise: hidden by default, revealed by the operator on demand */
+const showRetiredSessions = ref(false);
 
 const { busy, errorMessage, successMessage, run } = useAsyncAction();
 const users = ref<RtdbPublicUser[]>([]);
@@ -103,6 +108,17 @@ async function revokeToken(tokenId: string): Promise<void> {
     successMessage.value = t('access.success.revoked', { tokenId });
   }
 }
+
+/** A `console login` token retired by a later sign-in — kept server-side for audit, hidden from the table */
+function isRetiredSession(token: RtdbPublicToken): boolean {
+  return token.label === SIGN_IN_LABEL && token.revokedAt !== null;
+}
+
+/** Retired sessions the server still returns (the counter is always the full list, the table is filtered) */
+const retiredSessionCount = computed(() => tokens.value.filter(isRetiredSession).length);
+const visibleTokens = computed(() =>
+  showRetiredSessions.value ? tokens.value : tokens.value.filter((token) => !isRetiredSession(token)),
+);
 
 /** Older servers do not report the usage fields at all; show "not reported" instead of a misleading 0 */
 function hasUsage(entry: { pointsPerSec?: number; bytesPerSec?: number }): boolean {
@@ -238,12 +254,19 @@ watch(
 
       <div class="toolbar">
         <button :disabled="busy" @click="loadTokens">{{ t('access.refreshTokens') }}</button>
-        <span class="toolbar-note">{{ t('access.tokensCount', { count: tokens.length }) }}</span>
+        <label class="toolbar-note">
+          <input v-model="showRetiredSessions" type="checkbox" />
+          {{ t('access.showRetiredSessions') }}
+        </label>
+        <span class="toolbar-note">{{ t('access.tokensCount', { count: visibleTokens.length }) }}</span>
+        <span v-if="retiredSessionCount > 0" class="toolbar-note">
+          {{ t('access.tokensRetired', { count: retiredSessionCount }) }}
+        </span>
         <span class="toolbar-note">{{ t('access.tokensHint') }}</span>
         <span class="toolbar-note">{{ t('access.autoRefresh', { seconds: AUTO_REFRESH_MS / 1000 }) }}</span>
       </div>
 
-      <div v-if="tokens.length > 0 || configToken !== null" class="table-wrap">
+      <div v-if="visibleTokens.length > 0 || configToken !== null" class="table-wrap">
         <table class="data-table token-table">
           <thead>
             <tr>
@@ -292,7 +315,7 @@ watch(
               </td>
               <td><span class="badge success">{{ t('access.staticTokenBadge') }}</span></td>
             </tr>
-            <tr v-for="token in tokens" :key="token.tokenId">
+            <tr v-for="token in visibleTokens" :key="token.tokenId">
               <td class="mono" :title="token.tokenId">{{ shortTokenId(token.tokenId) }}</td>
               <td class="mono">
                 <template v-if="hasUsage(token)">
@@ -347,6 +370,7 @@ watch(
           </tbody>
         </table>
       </div>
+      <p v-else-if="retiredSessionCount > 0" class="empty-hint">{{ t('access.tokensEmptyRetired') }}</p>
       <p v-else class="empty-hint">{{ t('access.tokensEmpty') }}</p>
     </div>
   </section>

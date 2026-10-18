@@ -140,6 +140,7 @@ function statusLines(report: StatusReport): Array<[string, string]> {
     ['write.pointsPerSec', String(report.write.pointsPerSec)],
     ['write.buffered', formatNumber(report.write.buffered)],
     ['write.duplicates', formatNumber(report.write.duplicates)],
+    ['write.qualityDropped', formatNumber(report.write.qualityDropped ?? 0)],
     ['write.tagsIgnored', formatNumber(report.write.tagsIgnored)],
     ['wal.pendingBytes', formatBytes(report.wal.pendingBytes)],
     ['wal.outstandingBatches', String(report.wal.outstandingBatches)],

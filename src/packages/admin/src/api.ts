@@ -88,7 +88,14 @@ export interface RtdbStatusReport {
   uptimeMs: number;
   databases: number;
   metrics: number;
-  write: { pointsPerSec: number; buffered: number; duplicates: number; tagsIgnored: number };
+  write: {
+    pointsPerSec: number;
+    buffered: number;
+    duplicates: number;
+    /** Absent on servers built before the quality store policy landed */
+    qualityDropped?: number;
+    tagsIgnored: number;
+  };
   wal: { pendingBytes: number; outstandingBatches: number; pendingPoints: number; lastFsyncMs: number };
   segments: { openFiles: number; bytesToday: number };
   cpu: { percent: number; systemPercent: number; userMs: number; systemMs: number };

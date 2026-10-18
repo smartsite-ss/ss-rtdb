@@ -39,8 +39,7 @@ import {
   BLOCK_HEADER_FIXED_SIZE,
   SEGMENT_FOOTER_SIZE,
   SEGMENT_HEADER_SIZE,
-  blockDataCrc32,
-  blockDataCrc32WithReceived,
+  blockDataCrc32Full,
   footerCrc32,
   nextDayTimestampFromDateNumber,
   parseIndexRegion,
@@ -128,6 +127,8 @@ interface DecodedBlock {
   /** Server receive-time window carried by the block; null for blocks without the `receivedTime` flag */
   receivedMin: number | null;
   receivedMax: number | null;
+  /** u8 quality flags in timestamp order; null for blocks without the `qualityPresent` flag (all Good) */
+  qualities: Uint8Array | null;
 }
 
 /* ---------- Segment reader ---------- */
@@ -483,7 +484,10 @@ export class SegmentReader {
         if (timestamp < options.start || timestamp > options.end) continue;
         if (lastEmitted !== null && (order === 'asc' ? timestamp <= lastEmitted : timestamp >= lastEmitted)) continue;
         lastEmitted = timestamp;
-        yield { timestamp, value: block.values[index] };
+        const quality = block.qualities === null ? 0 : (block.qualities[index] ?? 0);
+        yield quality === 0
+          ? { timestamp, value: block.values[index] }
+          : { timestamp, value: block.values[index], quality };
       }
     };
 
@@ -494,14 +498,15 @@ export class SegmentReader {
       }
       // Multi-block overlapping cluster (backfill overlap): materialize inside the cluster only, then
       // merge + dedupe — same result as the old global sort, bounded by the cluster size
-      const collected: Array<{ timestamp: number; value: Point['value']; order: number }> = [];
+      const collected: Array<{ timestamp: number; value: Point['value']; quality: number; order: number }> = [];
       for (const item of cluster) {
         const block = this.readBlock(item.location.segmentFilePath, item.location.entry);
         checkBlockMeta(block);
         for (let index = 0; index < block.timestamps.length; index += 1) {
           const timestamp = block.timestamps[index];
           if (timestamp < options.start || timestamp > options.end) continue;
-          collected.push({ timestamp, value: block.values[index], order: item.sequence });
+          const quality = block.qualities === null ? 0 : (block.qualities[index] ?? 0);
+          collected.push({ timestamp, value: block.values[index], quality, order: item.sequence });
         }
       }
       collected.sort(
@@ -518,7 +523,9 @@ export class SegmentReader {
         }
         clusterPrevious = item.timestamp;
         lastEmitted = item.timestamp;
-        yield { timestamp: item.timestamp, value: item.value };
+        yield item.quality === 0
+          ? { timestamp: item.timestamp, value: item.value }
+          : { timestamp: item.timestamp, value: item.value, quality: item.quality };
       }
     }
   }
@@ -844,16 +851,16 @@ export class SegmentReader {
   private blockDataCrcMatches(segmentFilePath: string, header: BlockHeader): boolean {
     try {
       const blockBytes = this.store.readSegmentSlice(segmentFilePath, header.offset, header.totalLength);
+      const hasQuality = (header.flags & BLOCK_FLAG.qualityPresent) !== 0;
       const hasReceived = (header.flags & BLOCK_FLAG.receivedTime) !== 0;
       const dataEnd = hasReceived ? header.totalLength - 16 : header.totalLength;
-      const dataOffset = dataEnd - header.timestampRawLength - header.valueRawLength;
+      const qualityStart = hasQuality ? dataEnd - header.pointCount : dataEnd;
+      const qualityEncoded = hasQuality ? blockBytes.subarray(qualityStart, dataEnd) : null;
+      const dataOffset = qualityStart - header.timestampRawLength - header.valueRawLength;
       const timestampEncoded = blockBytes.subarray(dataOffset, dataOffset + header.timestampRawLength);
-      const valueEncoded = blockBytes.subarray(dataOffset + header.timestampRawLength, dataEnd);
-      if (hasReceived) {
-        const receivedEncoded = blockBytes.subarray(dataEnd, header.totalLength);
-        return blockDataCrc32WithReceived(timestampEncoded, valueEncoded, receivedEncoded) === header.crc32;
-      }
-      return blockDataCrc32(timestampEncoded, valueEncoded) === header.crc32;
+      const valueEncoded = blockBytes.subarray(dataOffset + header.timestampRawLength, qualityStart);
+      const receivedEncoded = hasReceived ? blockBytes.subarray(dataEnd, header.totalLength) : null;
+      return blockDataCrc32Full(timestampEncoded, valueEncoded, qualityEncoded, receivedEncoded) === header.crc32;
     } catch (error) {
       if (isRtdbError(error)) return false;
       throw error;
@@ -929,11 +936,16 @@ export class SegmentReader {
       const headerBytes = this.store.readSegmentSlice(descriptor.segmentFilePath, offset, headerLength);
       const headerView = new DataView(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength);
       const fieldsOffset = 2 + metricLength;
+      const pointCount = headerView.getUint32(fieldsOffset, true);
       const timestampRawLength = headerView.getUint32(fieldsOffset + 7, true);
       const valueRawLength = headerView.getUint32(fieldsOffset + 11, true);
       const flags = headerView.getUint16(fieldsOffset + 31, true);
       const totalLength =
-        headerLength + timestampRawLength + valueRawLength + ((flags & BLOCK_FLAG.receivedTime) !== 0 ? 16 : 0);
+        headerLength +
+        timestampRawLength +
+        valueRawLength +
+        ((flags & BLOCK_FLAG.qualityPresent) !== 0 ? pointCount : 0) +
+        ((flags & BLOCK_FLAG.receivedTime) !== 0 ? 16 : 0);
       if (offset + totalLength > descriptor.blockRegionEnd) break;
 
       const blockBytes = this.store.readSegmentSlice(descriptor.segmentFilePath, offset, totalLength);
@@ -975,20 +987,16 @@ export class SegmentReader {
       );
     }
 
+    const hasQuality = (header.flags & BLOCK_FLAG.qualityPresent) !== 0;
     const hasReceived = (header.flags & BLOCK_FLAG.receivedTime) !== 0;
     const dataEnd = hasReceived ? header.totalLength - 16 : header.totalLength;
-    const dataOffset = dataEnd - header.timestampRawLength - header.valueRawLength;
+    const qualityStart = hasQuality ? dataEnd - header.pointCount : dataEnd;
+    const qualityEncoded = hasQuality ? blockBytes.subarray(qualityStart, dataEnd) : null;
+    const dataOffset = qualityStart - header.timestampRawLength - header.valueRawLength;
     const timestampEncoded = blockBytes.subarray(dataOffset, dataOffset + header.timestampRawLength);
-    const valueEncoded = blockBytes.subarray(dataOffset + header.timestampRawLength, dataEnd);
-    if (hasReceived) {
-      const receivedEncoded = blockBytes.subarray(dataEnd, header.totalLength);
-      if (blockDataCrc32WithReceived(timestampEncoded, valueEncoded, receivedEncoded) !== header.crc32) {
-        throw new RtdbError(
-          ERROR_CODE.CorruptBlock,
-          `Block data CRC verification failed: ${segmentFilePath}@${entry.offset} (metric=${header.metricName})`,
-        );
-      }
-    } else if (blockDataCrc32(timestampEncoded, valueEncoded) !== header.crc32) {
+    const valueEncoded = blockBytes.subarray(dataOffset + header.timestampRawLength, qualityStart);
+    const receivedEncoded = hasReceived ? blockBytes.subarray(dataEnd, header.totalLength) : null;
+    if (blockDataCrc32Full(timestampEncoded, valueEncoded, qualityEncoded, receivedEncoded) !== header.crc32) {
       throw new RtdbError(
         ERROR_CODE.CorruptBlock,
         `Block data CRC verification failed: ${segmentFilePath}@${entry.offset} (metric=${header.metricName})`,
@@ -1009,6 +1017,8 @@ export class SegmentReader {
       values,
       receivedMin: header.receivedMin,
       receivedMax: header.receivedMax,
+      // Copy out of the block buffer so the cache entry does not pin the whole segment slice.
+      qualities: qualityEncoded === null ? null : new Uint8Array(qualityEncoded),
     };
     this.blockCache.set(cacheKey, block);
     this.evictBlockCache();

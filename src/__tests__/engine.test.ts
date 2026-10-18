@@ -1043,7 +1043,7 @@ describe('引擎: queryAt 插值取值', () => {
       const step = await engine.queryAt('db', 'm.edge', { timestamps: [between] });
       assert.deepStrictEqual(step, [{ timestamp: between, value: 0, state: 'exact' }]);
       const linear = await engine.queryAt('db', 'm.edge', { timestamps: [between], mode: 'linear' });
-      assert.deepStrictEqual(linear, [{ timestamp: between, value: 50, state: 'interpolated' }]);
+      assert.deepStrictEqual(linear, [{ timestamp: between, value: 50, state: 'interpolated', quality: 0x20 }]);
 
       // Request after the last point: beforeFirst supplies the held value
       const after = DAY_BASE + 20_000;
@@ -1073,8 +1073,8 @@ describe('引擎: queryAt 插值取值', () => {
         mode: 'linear',
       });
       assert.deepStrictEqual(linear, [
-        { timestamp: DAY_BASE + 500, value: 3, state: 'interpolated' },
-        { timestamp: DAY_BASE + 500, value: 3, state: 'interpolated' },
+        { timestamp: DAY_BASE + 500, value: 3, state: 'interpolated', quality: 0x20 },
+        { timestamp: DAY_BASE + 500, value: 3, state: 'interpolated', quality: 0x20 },
       ]);
     } finally {
       await engine.close();

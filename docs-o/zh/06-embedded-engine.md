@@ -60,6 +60,8 @@ await rtdb.close();   // 刷盘、封存活动段、截断 WAL、释放锁
 | `cacheFdGroups` | `32` | 打开的段文件句柄的 LRU 条目数。 |
 | `walEnabled` | `true` | 仅当数据可重新生成时才关闭。 |
 | `fsyncPolicy` | `wal` | `wal` = 每次 WAL 追加后成组 fsync，且块落段后先 fsync 段文件再推进 WAL 安全点；`none` = 依赖操作系统（仅限可重灌数据）。 |
+| `qualityStore` | `all` | 质量落盘阈值：`all`（好/不确定/坏全存）\| `good-uncertain`（丢 Bad）\| `good`（只存 Good）。库级 `{database}/quality.json` 优先于该全局值（与 `retention.json` 同风格，启动时读取）。 |
+| `qualityOnReject` | `reject` | 低于阈值时：`reject` 整批抛 `E_QUALITY_REJECTED`（不进 WAL）；`drop` 丢弃该点并累加 `stats.write.qualityDropped`。 |
 
 越界值会被钳制（钳制表见 [02 — 配置](./02-configuration.md) §3 配置项参考）。
 
@@ -72,6 +74,7 @@ const { accepted } = await rtdb.writeBatch('plant_a', [
   { metricName: 'station01.powerMeter.kwh', timestamp: Date.now(), value: 1024.5 },
   { metricName: 'station01.valve.open',     timestamp: Date.now(), value: true },
   { metricName: 'station01.pump.state',     timestamp: Date.now(), value: 'running', quality: 0 },
+  // quality 为 u8 位域（0x00 = Good；0x82 = Bad·CommFailure），是否落盘见 qualityStore
   // i64 用 bigint（或 ±2^53 范围内的 number）
   { metricName: 'station01.counter.pulses', timestamp: Date.now(), value: 9007199254740991n },
 ]);
@@ -105,6 +108,8 @@ const series = await rtdb.queryRange('plant_a', 'station01.powerMeter.kwh', {
 const last = await rtdb.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
 
 // at —— 任意时刻批量取值（step=前值保持 / linear=线性插值；state: exact|interpolated|extrapolated|no-data）
+// 结果带 quality（Good 时省略）：exact/extrapolated 继承来源点；interpolated 取较差 severity +
+// source=Interpolated(0x20) + 较差点 reason
 const atPoints = await rtdb.queryAt('plant_a', 'station01.powerMeter.kwh', {
   timestamps: [startMs, startMs + 60_000], mode: 'linear',
 });
@@ -174,7 +179,7 @@ const stats = await rtdb.stats();
 | 分组 | 字段 |
 | ---- | ---- |
 | `uptimeMs`、`databases`、`metrics` | 实例规模 |
-| `write` | `pointsPerSec`、`bufferedPoints`、`duplicatePoints` |
+| `write` | `pointsPerSec`、`bufferedPoints`、`duplicatePoints`、`qualityDropped` |
 | `wal` | `pendingBytes`、`pendingPoints`、`outstandingBatches`、`lastFsyncMs` |
 | `segments` | `openFiles`、`bytesToday` |
 | `cpu` | `percent`（单核百分比，可 >100）、`systemPercent`（占整机 0–100）、`userMs`、`systemMs` |
@@ -256,3 +261,4 @@ main()
 | 2026-10-18 | 周期性兜底刷盘改为切片执行：每 2 个指标让出一次事件循环、整个 sweep 只做一次段 fsync（实测 20k 点/s 下单次 sweep 阻塞由 ~210–275 ms 降至 ≤58 ms，残余抖动主要来自单批写入本身） | DeepSeek-V4.1-Flash |
 
 | 2026-10-18 | §7 `stats()` 新增 `cpu` / `memory` 分组（进程 CPU 占用率与内存占用率） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 质量位接入：§2 新增 `qualityStore` / `qualityOnReject`（含库级 `quality.json` 覆盖）；§3 说明 `quality` u8 位域；§4 `queryAt` 补充质量传播规则；§7 `stats().write` 新增 `qualityDropped` | DeepSeek-V4.1-Flash |

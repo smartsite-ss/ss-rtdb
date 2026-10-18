@@ -49,8 +49,9 @@ Every non-2xx response is JSON:
 
 | Code | HTTP | Meaning |
 | ---- | ---- | ------- |
-| `E_INVALID_POINT` | 400 | Malformed point / bad database name / bad Line Protocol line |
+| `E_INVALID_POINT` | 400 | Malformed point / bad database name / bad Line Protocol line / out-of-range quality flag |
 | `E_INVALID_RANGE` | 400 | Bad time range, bad `order`, too many aggregate windows |
+| `E_QUALITY_REJECTED` | 400 | Quality below the `quality.store` threshold with `quality.onReject='reject'` (nothing written; `message` carries the point index) |
 | `E_BAD_METRIC_NAME` | 400 | Missing or illegal metric name |
 | `E_TYPE_MISMATCH` | 400 | Value type differs from the type locked by the metric's first write |
 | `E_AUTH` | 401 | Missing or invalid credential |
@@ -170,10 +171,18 @@ Point fields:
 | `timestamp` | `t` | required, integer ms epoch |
 | `value` | `v` | required |
 | `vt` | — | optional type marker: `1`=f64, `2`=i64, `3`=bool, `4`=string |
-| `quality` | `q` | optional u8; `0` = good (default, not stored) |
+| `quality` | `q` | optional u8 quality flag; absent = `0x00` = Good (not stored) |
 
-> v0.1.0 (M0) only accepts `quality` `0` (equivalent to omitting it): any non-zero quality flag
-> returns `400 E_INVALID_POINT` (to avoid silent loss) until the flag enumeration is finalized.
+> `quality` is a **u8 bit field**: `bit7-6 severity` (00 Good / 01 Uncertain / 10 Bad / 11 Reserved),
+> `bit5-4 source` (00 Process / 01 Substituted / 10 Interpolated), `bit3-0 reason`
+> (0 None, 1 SensorFailure, 2 CommFailure, 3 OutOfRange, 4 Overflow, 5 Stale, 6 BadReference,
+> 7 ConfigurationError, 8 Maintenance, 9 Test, 10 Blocked, 11 CalculationError, 12 Inconsistent,
+> 13 Inaccurate, 14 Oscillatory). The value must be an integer `0..255`, otherwise the batch fails
+> with `400 E_INVALID_POINT`. Whether it is persisted is decided by `quality.store` (default `all`,
+> i.e. Good / Uncertain / Bad all stored): below the threshold, `quality.onReject='reject'` returns
+> `400 E_QUALITY_REJECTED` (whole batch rejected) while `'drop'` accepts the request but discards the
+> point and counts it in `status.write.qualityDropped`. Bit layout and block storage are in
+> [11 — Storage format](./11-segment-format.md) §2.2.
 
 **When you need `vt`**: JSON numbers can only express f64, so write i64 values as a **decimal string
 with `"vt": 2`**. Without `vt`, the type is inferred from the JSON type (number → f64, boolean → bool,
@@ -352,6 +361,9 @@ Batch value lookup at arbitrary timestamps (fifth query primitive; see the Inter
 - `state`: `exact` = the value exists in storage (previous-value hold included); `interpolated` =
   computed between two real points; `extrapolated` = flat from the nearest real point outside the
   data range; `no-data` = nothing available (`v: null`).
+- `quality` (response `q`): `exact` / `extrapolated` inherit the source point's flag; `interpolated`
+  uses the worse `severity` of the two neighbours with `source = Interpolated` (`0x20`) and the worse
+  point's `reason`; a `0x00` flag omits `q`.
 - Results echo the request order; unblocked buffered points participate (visible right after a
   write); a missing metric returns `404 E_METRIC_NOT_FOUND`.
 
@@ -576,7 +588,7 @@ curl http://127.0.0.1:6180/metrics      # Prometheus text exposition
   "uptimeMs": 12345,
   "databases": 2,
   "metrics": 1204,
-  "write":  { "pointsPerSec": 51230, "buffered": 0, "duplicates": 13, "tagsIgnored": 0 },
+  "write":  { "pointsPerSec": 51230, "buffered": 0, "duplicates": 13, "qualityDropped": 0, "tagsIgnored": 0 },
   "wal":    { "pendingBytes": 0, "outstandingBatches": 0, "pendingPoints": 0, "lastFsyncMs": 1760691600000 },
   "segments": { "openFiles": 3, "bytesToday": 610000000 },
   "cpu":    { "percent": 12.5, "systemPercent": 1.56, "userMs": 15230, "systemMs": 3210 },
@@ -792,3 +804,4 @@ curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlen
 | 2026-10-18 | §6 backup gains a **day range** (`startDay`/`endDay`): the response adds `partial`/`range`/`days`, a range backup writes `manifest.json` and restores by merging those days (data outside the range is never deleted); endpoint index row updated | DeepSeek-V4.1-Flash |
 | 2026-10-18 | New §4.2.1 **`POST /api/v1/query/last-batch`**: 1…1000 metric names in one round trip, response echoes the request order, unknown names yield `"point": null`; empty/non-string list `400 E_INVALID_POINT`, over 1000 names `413 E_BATCH_TOO_LARGE` | Step-5-Preview |
 | 2026-10-18 | §8 `/api/v1/status` gains `cpu` / `memory` (process CPU usage, resident memory, memory and heap usage); `/metrics` gains the `rtdb_process_*` families | DeepSeek-V4.1-Flash |
+| 2026-10-18 | Quality flags opened up: §3.2 `quality`/`q` documented as a u8 bit field with the `quality.store` / `quality.onReject` behavior; error table gains `E_QUALITY_REJECTED` (400); §4.5 documents `queryAt` quality propagation; §8 `status.write` gains `qualityDropped` | DeepSeek-V4.1-Flash |

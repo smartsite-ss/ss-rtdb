@@ -43,7 +43,7 @@ export interface SimulatedPoint {
   value: number | bigint | boolean | string;
   /**
    * Local-only marker: the sample repeats the previous value because the tag is inside a simulated
-   * communication fault. It never reaches the wire — rtdb v0.1.0 (M0) only accepts quality 0.
+   * communication fault. It never reaches the wire — this simulator sends no `q` (0x00 = Good).
    */
   stale?: boolean;
 }
@@ -424,8 +424,8 @@ export class SmartSiteSimulator {
       faulty = true;
     }
 
-    // A fault repeats the previous value (stale sample) instead of advancing the signal. The quality
-    // flag stays at 0 because rtdb v0.1.0 (M0) rejects any non-zero quality with E_INVALID_POINT.
+    // A fault repeats the previous value (stale sample) instead of advancing the signal. No quality
+    // flag is attached: this simulator keeps sending Good (0x00) samples only.
     if (faulty && state.lastValue !== null) {
       return { metricName: entry.metricName, timestamp, value: state.lastValue, stale: true };
     }

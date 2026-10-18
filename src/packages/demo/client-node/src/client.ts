@@ -157,6 +157,8 @@ export interface StatusReport {
     pointsPerSec: number;
     buffered: number;
     duplicates: number;
+    /** Points discarded by the quality store policy (`quality.onReject='drop'`); 0 against older servers */
+    qualityDropped?: number;
     tagsIgnored: number;
   };
   wal: {
@@ -448,6 +450,7 @@ export class RtdbClient {
         pointsPerSec: readIntegerField(write, 'pointsPerSec'),
         buffered: readIntegerField(write, 'buffered'),
         duplicates: readIntegerField(write, 'duplicates'),
+        qualityDropped: write.qualityDropped === undefined ? 0 : readIntegerField(write, 'qualityDropped'),
         tagsIgnored: readIntegerField(write, 'tagsIgnored'),
       },
       wal: {

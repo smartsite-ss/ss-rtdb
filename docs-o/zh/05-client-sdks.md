@@ -82,6 +82,11 @@ const { accepted } = await client.writeBatch('plant_a', [
 解码后的结果使用**长字段名**：点形如 `{ timestamp, value, quality? }`，
 聚合窗口形如 `{ start, end, value, count }`。
 
+`quality` 是 u8 质量位（位域定义见 [11 — 存储格式](./11-segment-format.md) §2.2）。写入时两个 SDK
+都会把非 `undefined` 的 `quality` 原样作为 `q` 发送；读取时仅在服务端返回非 0 质量位时带上该字段
+（缺省即 `0x00` = Good）。是否落盘由服务端 `quality.store` 决定，低于阈值时按 `quality.onReject`
+返回 `400 E_QUALITY_REJECTED` 或丢弃计数（见 [02 — 配置](./02-configuration.md) §3）。
+
 ```ts
 // range
 const series = await client.queryRange('plant_a', 'station01.powerMeter.kwh', {
@@ -305,3 +310,4 @@ except RtdbClientError as error:
 | 2026-10-18 | 两个 SDK 新增批量最新点接口（`queryLastBatch` → `Map<string, ClientPoint \\| null>`、`query_last_batch` → `Dict[str, Optional[Point]]`），走 `POST /api/v1/query/last-batch`，保持请求顺序、未知指标为 `null` | Step-5-Preview |
 
 | 2026-10-18 | §1.5 补充 `StatusReport` 的 `cpu` / `memory` 字段 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §1.4 补充 `quality` u8 质量位的收发与落盘策略说明；`StatusReport.write` 增加 `qualityDropped` | DeepSeek-V4.1-Flash |

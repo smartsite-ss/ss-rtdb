@@ -81,6 +81,25 @@ describe('server: 配置加载', () => {
     assert.equal(explicit.port, 6210);
   });
 
+  it('quality 段：配置文件生效、环境变量优先、未知值回退默认', () => {
+    const workspace = createWorkspace('runtime-quality', {
+      quality: { store: 'good', onReject: 'drop' },
+    });
+
+    const loaded = inWorkingDirectory(workspace, () => loadServerConfig({ env: {} }));
+    assert.deepEqual(loaded.quality, { store: 'good', onReject: 'drop' });
+
+    const overridden = inWorkingDirectory(workspace, () =>
+      loadServerConfig({ env: { RTDB_QUALITY_STORE: 'good-uncertain', RTDB_QUALITY_ON_REJECT: 'reject' } }),
+    );
+    assert.deepEqual(overridden.quality, { store: 'good-uncertain', onReject: 'reject' });
+
+    const invalid = inWorkingDirectory(workspace, () =>
+      loadServerConfig({ env: { RTDB_QUALITY_STORE: 'nonsense', RTDB_QUALITY_ON_REJECT: 'nonsense' } }),
+    );
+    assert.deepEqual(invalid.quality, SERVER_CONFIG_DEFAULTS.quality);
+  });
+
   it('默认只报告相对于工作目录的路径，admin.exposePaths=true 才给绝对目录', () => {
     const workspace = join(tempRoot, 'runtime-paths');
     mkdirSync(workspace, { recursive: true });

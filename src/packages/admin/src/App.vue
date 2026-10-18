@@ -7,18 +7,19 @@
 
 <script setup lang="ts">
 /**
- * Admin console shell: runtime connection settings, sign-in, plus in-page tab navigation.
+ * Admin console shell: sign-in gate, session lifecycle and the persistent sidebar layout.
  *
- * Sign-in exchanges a user name + password for an API token (`POST /api/v1/auth/login`) and keeps only the
- * token in `localStorage`, so every panel keeps calling the public REST API exactly as before; the token
- * field stays available for pasting a token issued elsewhere.
+ * The console renders nothing but the login page until a token is present and verified against
+ * `GET /api/v1/auth/session`; only then the workspace (sidebar + top bar + panel) is mounted. The token is
+ * the only credential persisted in `localStorage` (the password is dropped with the login form), so every
+ * panel keeps calling the public REST API exactly as before.
  *
- * Navigation is a plain `activeTab` state instead of a URL router on purpose — rtdb-server serves the
- * bundle through its SPA fallback, and keeping every route at `/admin` guarantees that the relative
- * asset URLs emitted by the `base: './'` build keep resolving correctly.
+ * Navigation is still a plain `activeTab` state instead of a URL router on purpose — rtdb-server serves the
+ * bundle through its SPA fallback, and keeping every route at `/admin` guarantees that the relative asset
+ * URLs emitted by the `base: './'` build keep resolving correctly.
  */
 
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RtdbAdminApiClient, RtdbAdminApiError } from './api';
 import { loadAdminSettings, normalizeApiBaseUrl, saveAdminSettings } from './settings';
 import type { AdminSettings } from './settings';
@@ -27,7 +28,9 @@ import { t, toggleLocale } from './i18n';
 import type { MessageKey } from './locales/en';
 import AccessPanel from './components/AccessPanel.vue';
 import BackupPanel from './components/BackupPanel.vue';
+import ConnectionDialog from './components/ConnectionDialog.vue';
 import DatabasesPanel from './components/DatabasesPanel.vue';
+import LoginView from './components/LoginView.vue';
 import MetricsPanel from './components/MetricsPanel.vue';
 import StatusPanel from './components/StatusPanel.vue';
 
@@ -38,6 +41,12 @@ interface AdminTab {
   labelKey: MessageKey;
 }
 
+/** Navigation order inside the sidebar; groups mirror the operator's mental model, not the HTTP routes */
+interface NavGroup {
+  labelKey: MessageKey;
+  tabs: AdminTabId[];
+}
+
 const TABS: AdminTab[] = [
   { id: 'status', labelKey: 'tabs.status' },
   { id: 'databases', labelKey: 'tabs.databases' },
@@ -45,6 +54,22 @@ const TABS: AdminTab[] = [
   { id: 'backup', labelKey: 'tabs.backup' },
   { id: 'access', labelKey: 'tabs.access' },
 ];
+
+const NAV_GROUPS: NavGroup[] = [
+  { labelKey: 'nav.group.overview', tabs: ['status'] },
+  { labelKey: 'nav.group.data', tabs: ['databases', 'metrics', 'backup'] },
+  { labelKey: 'nav.group.security', tabs: ['access'] },
+];
+
+/** Single-path outline icons drawn with `currentColor`, so no icon font / dependency is needed */
+const TAB_ICONS: Record<AdminTabId, string> = {
+  status: 'M3 12h3.5l2.5-6 3.5 12 2.5-6H21',
+  metrics: 'M4 19V5m0 14h16M7 15l3.5-4 3 2L18 8',
+  databases:
+    'M4 6c0-1.66 3.58-3 8-3s8 1.34 8 3-3.58 3-8 3-8-1.34-8-3Zm0 0v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6',
+  backup: 'M12 4v10m0 0-3-3m3 3 3-3M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2',
+  access: 'M12 3l7 3v5c0 4.4-2.9 7.6-7 9-4.1-1.4-7-4.6-7-9V6l7-3Zm-2.4 8.6 1.8 1.8 3.4-3.4',
+};
 
 /**
  * A rendered notice keeps its key + params instead of a finished string, so switching the locale
@@ -56,33 +81,27 @@ interface Notice {
   tone: 'success' | 'error';
 }
 
-/** Settings actually in use. Edited through the form refs below and only applied on "Save". */
+/** Settings actually in use. The login form / connection dialog only propose new values. */
 const appliedSettings = ref<AdminSettings>(loadAdminSettings());
-const apiBaseUrlInput = ref(appliedSettings.value.apiBaseUrl);
-const accessTokenInput = ref(appliedSettings.value.accessToken);
+/** Server address being typed on the login page (kept separate until the sign-in succeeds) */
+const loginBaseUrl = ref(appliedSettings.value.apiBaseUrl);
 
 const activeTab = ref<AdminTabId>('status');
-const savedNote = ref<Notice | null>(null);
+const sessionUser = ref<{ username: string; role: string } | null>(null);
+/**
+ * Instance with `auth.enabled=false` answers `GET /api/v1/auth/session` without a token; the console then
+ * runs in open-access mode instead of dead-ending on a sign-in page that can never succeed (no users).
+ */
+const openAccess = ref(false);
+/** False only while the stored token is being verified, which prevents a login-page flash on reload */
+const sessionChecked = ref(false);
+const loginBusy = ref(false);
+const authNotice = ref<Notice | null>(null);
+const shellNotice = ref<Notice | null>(null);
+
+const connectionOpen = ref(false);
 const connectionBusy = ref(false);
 const connectionNotice = ref<Notice | null>(null);
-
-/** Sign-in state: the credential is exchanged for a token, which is the only thing the REST API needs. */
-const loginUsername = ref('admin');
-/** Pre-filled with the documented bootstrap password, so a first sign-in is one click */
-const loginPassword = ref('ss-rtdb');
-const loginBusy = ref(false);
-const loginNotice = ref<Notice | null>(null);
-const sessionUser = ref<{ username: string; role: string } | null>(null);
-const showTokenInput = ref(false);
-
-/** DOM handles for the header "Sign in" button (jump to the form and focus the password field) */
-const loginCard = ref<HTMLElement | null>(null);
-const passwordInput = ref<HTMLInputElement | null>(null);
-
-function focusLogin(): void {
-  loginCard.value?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  passwordInput.value?.focus();
-}
 
 /**
  * Recreated only when `appliedSettings` is replaced, never while the operator is typing: every panel
@@ -96,14 +115,27 @@ const client = computed(
     }),
 );
 
-const isBundledForm = computed(() => normalizeApiBaseUrl(apiBaseUrlInput.value).length === 0);
-const isSignedIn = computed(() => appliedSettings.value.accessToken.trim().length > 0);
+const isSignedIn = computed(() => openAccess.value || appliedSettings.value.accessToken.trim().length > 0);
+const activeTabMeta = computed(() => TABS.find((tab) => tab.id === activeTab.value) ?? TABS[0]);
+const userInitial = computed(() => (sessionUser.value?.username ?? '?').slice(0, 1).toUpperCase());
 
 /**
  * Built-in API reference of the targeted server (`GET /api/docs`). It follows the *applied* base URL, so
  * the bundled form resolves relatively and a standalone console points at its remote instance.
  */
 const apiDocsUrl = computed(() => `${normalizeApiBaseUrl(appliedSettings.value.apiBaseUrl)}/api/docs`);
+
+const loginNoticeText = computed(() =>
+  authNotice.value === null ? '' : t(authNotice.value.key, authNotice.value.params),
+);
+const loginNoticeTone = computed(() => authNotice.value?.tone ?? 'error');
+const connectionNoticeText = computed(() =>
+  connectionNotice.value === null ? '' : t(connectionNotice.value.key, connectionNotice.value.params),
+);
+const connectionNoticeTone = computed(() => connectionNotice.value?.tone ?? 'error');
+const signInBusy = computed(() => loginBusy.value || connectionBusy.value);
+
+let shellNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Apply + persist a connection pair (base URL and token) without touching the notes. */
 function applyConnection(apiBaseUrl: string, accessToken: string): void {
@@ -112,59 +144,55 @@ function applyConnection(apiBaseUrl: string, accessToken: string): void {
     accessToken: accessToken.trim(),
   };
   appliedSettings.value = next;
-  apiBaseUrlInput.value = next.apiBaseUrl;
-  accessTokenInput.value = next.accessToken;
+  loginBaseUrl.value = next.apiBaseUrl;
   saveAdminSettings(next);
+  if (next.accessToken.length > 0) openAccess.value = false;
 }
 
-function persistSettings(): void {
-  applyConnection(apiBaseUrlInput.value, accessTokenInput.value);
-  connectionNotice.value = null;
-  savedNote.value = { key: 'app.savedNote', tone: 'success' };
+/** Transient confirmation in the workspace; authentication notices stay on the login page instead */
+function notifyShell(key: MessageKey, params?: Record<string, string | number>): void {
+  shellNotice.value = { key, params, tone: 'success' };
+  if (shellNoticeTimer !== null) clearTimeout(shellNoticeTimer);
+  shellNoticeTimer = setTimeout(() => {
+    shellNotice.value = null;
+    shellNoticeTimer = null;
+  }, 4_000);
 }
 
-async function testConnection(): Promise<void> {
-  connectionBusy.value = true;
+function openConnectionDialog(): void {
   connectionNotice.value = null;
+  connectionOpen.value = true;
+}
+
+/** Confirm the stored token and resolve who it belongs to; a rejected token is forgotten. */
+async function verifySession(): Promise<void> {
   try {
-    const health = await client.value.getHealth();
-    connectionNotice.value = {
-      key: 'app.connected',
-      params: { status: health.status },
-      tone: 'success',
-    };
+    sessionUser.value = (await client.value.getSession()).user;
   } catch (error) {
-    connectionNotice.value = {
-      key: 'app.connectFailed',
-      params: { message: describeError(error) },
-      tone: 'error',
-    };
-  } finally {
-    connectionBusy.value = false;
+    sessionUser.value = null;
+    if (error instanceof RtdbAdminApiError && error.status === 401) {
+      applyConnection(appliedSettings.value.apiBaseUrl, '');
+      authNotice.value = { key: 'app.tokenRejected', tone: 'error' };
+    }
   }
 }
 
-/** Exchange the credentials for an API token and start using it (the password is never stored). */
-async function signIn(): Promise<void> {
+/** Exchange the credentials for an API token and enter the workspace (the password is never stored). */
+async function signIn(credentials: { username: string; password: string }): Promise<void> {
   loginBusy.value = true;
-  loginNotice.value = null;
+  authNotice.value = null;
   try {
     const anonymous = new RtdbAdminApiClient({
-      apiBaseUrl: normalizeApiBaseUrl(apiBaseUrlInput.value),
+      apiBaseUrl: normalizeApiBaseUrl(loginBaseUrl.value),
       accessToken: '',
     });
-    const result = await anonymous.login(loginUsername.value.trim(), loginPassword.value);
-    loginPassword.value = '';
+    const result = await anonymous.login(credentials.username, credentials.password);
     sessionUser.value = result.user;
-    connectionNotice.value = null;
-    savedNote.value = {
-      key: 'app.signedInNote',
-      params: { user: result.user.username, role: result.user.role },
-      tone: 'success',
-    };
-    applyConnection(apiBaseUrlInput.value, result.token);
+    applyConnection(loginBaseUrl.value, result.token);
+    sessionChecked.value = true;
+    notifyShell('app.signedInNote', { user: result.user.username, role: result.user.role });
   } catch (error) {
-    loginNotice.value = {
+    authNotice.value = {
       key: 'app.signInFailed',
       params: { message: describeError(error) },
       tone: 'error',
@@ -172,6 +200,67 @@ async function signIn(): Promise<void> {
   } finally {
     loginBusy.value = false;
   }
+}
+
+/** Alternative to the password: verify a token issued elsewhere before adopting it. */
+async function signInWithToken(token: string): Promise<void> {
+  if (token.length === 0) {
+    authNotice.value = { key: 'app.login.tokenEmpty', tone: 'error' };
+    return;
+  }
+  loginBusy.value = true;
+  authNotice.value = null;
+  try {
+    const candidate = new RtdbAdminApiClient({
+      apiBaseUrl: normalizeApiBaseUrl(loginBaseUrl.value),
+      accessToken: token,
+    });
+    const session = await candidate.getSession();
+    sessionUser.value = session.user;
+    applyConnection(loginBaseUrl.value, token);
+    sessionChecked.value = true;
+    notifyShell('app.signedInNote', { user: session.user.username, role: session.user.role });
+  } catch (error) {
+    authNotice.value = {
+      key: 'app.tokenRejectedHint',
+      params: { message: describeError(error) },
+      tone: 'error',
+    };
+  } finally {
+    loginBusy.value = false;
+  }
+}
+
+/** Health probe of the server address currently being typed (login page) or entered in the dialog. */
+async function testConnection(baseUrl: string, onLoginPage: boolean): Promise<void> {
+  connectionBusy.value = true;
+  const notice: Notice = { key: 'app.connectFailed', tone: 'error' };
+  try {
+    const probe = new RtdbAdminApiClient({ apiBaseUrl: normalizeApiBaseUrl(baseUrl), accessToken: '' });
+    const health = await probe.getHealth();
+    notice.key = 'app.connected';
+    notice.params = { status: health.status };
+    notice.tone = 'success';
+  } catch (error) {
+    notice.params = { message: describeError(error) };
+  }
+  connectionBusy.value = false;
+  if (onLoginPage) authNotice.value = notice;
+  else connectionNotice.value = notice;
+}
+
+/** Persist the dialog values; an empty token signs out, and a new token is verified before use. */
+function saveConnection(connection: { apiBaseUrl: string; accessToken: string }): void {
+  applyConnection(connection.apiBaseUrl, connection.accessToken);
+  connectionOpen.value = false;
+  connectionNotice.value = null;
+  if (!isSignedIn.value) {
+    sessionUser.value = null;
+    authNotice.value = { key: 'app.signedOut', tone: 'success' };
+    return;
+  }
+  notifyShell('app.savedNote');
+  void verifySession();
 }
 
 /** Revoke the token server-side (best effort) and forget it in this browser. */
@@ -182,137 +271,135 @@ async function signOut(): Promise<void> {
     // An expired / already revoked token still has to be dropped locally.
   }
   sessionUser.value = null;
-  loginNotice.value = null;
-  applyConnection(apiBaseUrlInput.value, '');
-  savedNote.value = { key: 'app.signedOut', tone: 'success' };
+  applyConnection(appliedSettings.value.apiBaseUrl, '');
+  authNotice.value = { key: 'app.signedOut', tone: 'success' };
 }
 
-/** Confirm the stored token and resolve who it belongs to; a rejected token is forgotten. */
-async function refreshSession(): Promise<void> {
-  if (!isSignedIn.value) {
-    sessionUser.value = null;
-    return;
-  }
+onMounted(async () => {
   try {
-    const session = await client.value.getSession();
-    sessionUser.value = session.user;
-  } catch (error) {
-    sessionUser.value = null;
-    if (error instanceof RtdbAdminApiError && error.status === 401) {
-      applyConnection(apiBaseUrlInput.value, '');
-      savedNote.value = { key: 'app.tokenRejected', tone: 'error' };
+    if (!isSignedIn.value) {
+      // Anonymous requests only succeed when the instance disables authentication; then there is no
+      // credential to ask for, so the console opens directly instead of showing an unusable sign-in page.
+      try {
+        const session = await client.value.getSession();
+        sessionUser.value = session.user;
+        openAccess.value = true;
+      } catch {
+        // Authentication is required: the sign-in page is the correct destination.
+      }
+      return;
     }
+    await verifySession();
+  } finally {
+    sessionChecked.value = true;
   }
-}
+});
 
-onMounted(refreshSession);
+onUnmounted(() => {
+  if (shellNoticeTimer !== null) clearTimeout(shellNoticeTimer);
+});
 </script>
 
 <template>
-  <div class="admin-app">
-    <header class="admin-header">
-      <div class="admin-title">
-        <span>ss-rtdb</span>
-        <small>{{ t('app.subtitle') }}</small>
-      </div>
-      <div class="admin-header-tools">
-        <span v-if="isSignedIn" class="badge">
-          {{ sessionUser === null ? t('app.signedIn') : `${sessionUser.username} · ${sessionUser.role}` }}
-        </span>
-        <span v-else class="badge">{{ t('app.anonymous') }}</span>
-        <button v-if="!isSignedIn" class="primary" @click="focusLogin">{{ t('app.signIn') }}</button>
-        <button v-else @click="signOut">{{ t('app.signOut') }}</button>
-        <button class="small" :title="t('app.locale.switchTitle')" @click="toggleLocale">
-          {{ t('app.locale.switch') }}
-        </button>
-        <span class="badge">v0.1.0</span>
-      </div>
-    </header>
+  <div v-if="!sessionChecked" class="boot-splash">
+    <span class="boot-spinner" aria-hidden="true"></span>
+    <span>{{ t('app.login.sessionChecking') }}</span>
+  </div>
 
-    <main class="admin-main">
-      <section v-if="!isSignedIn" ref="loginCard" class="card">
-        <h2 class="card-title">
-          <span>{{ t('app.login.title') }}</span>
-          <span class="card-title-note">POST /api/v1/auth/login</span>
-        </h2>
-        <div class="toolbar">
-          <div class="field">
-            <label class="field-label">{{ t('app.login.username') }}</label>
-            <input v-model="loginUsername" type="text" autocomplete="username" placeholder="admin" />
-          </div>
-          <div class="field">
-            <label class="field-label">{{ t('app.login.password') }}</label>
-            <input
-              ref="passwordInput"
-              v-model="loginPassword"
-              type="password"
-              autocomplete="current-password"
-              placeholder="ss-rtdb"
-              @keyup.enter="signIn"
-            />
-          </div>
-          <button class="primary" :disabled="loginBusy" @click="signIn">
-            {{ loginBusy ? t('app.login.busy') : t('app.login.submit') }}
+  <LoginView
+    v-else-if="!isSignedIn"
+    v-model:base-url="loginBaseUrl"
+    :busy="signInBusy"
+    :notice-text="loginNoticeText"
+    :notice-tone="loginNoticeTone"
+    @submit="signIn"
+    @token="signInWithToken"
+    @test="testConnection(loginBaseUrl, true)"
+  />
+
+  <div v-else class="admin-shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-mark" aria-hidden="true">ss</span>
+        <div class="sidebar-brand-text">
+          <strong>ss-rtdb</strong>
+          <small>{{ t('app.brandNote') }}</small>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div v-for="group in NAV_GROUPS" :key="group.labelKey" class="nav-group">
+          <div class="nav-group-label">{{ t(group.labelKey) }}</div>
+          <button
+            v-for="tabId in group.tabs"
+            :key="tabId"
+            class="nav-item"
+            :class="{ active: tabId === activeTab }"
+            :aria-current="tabId === activeTab ? 'page' : undefined"
+            @click="activeTab = tabId"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path :d="TAB_ICONS[tabId]" />
+            </svg>
+            <span>{{ t((TABS.find((tab) => tab.id === tabId) ?? TABS[0]).labelKey) }}</span>
           </button>
-          <button @click="showTokenInput = !showTokenInput">
-            {{ showTokenInput ? t('app.login.hideToken') : t('app.login.useExisting') }}
-          </button>
-          <span class="toolbar-note">{{ t('app.login.defaultHint') }}</span>
         </div>
-        <div v-if="showTokenInput" class="toolbar" style="margin-top: 12px">
-          <div class="field field-wide">
-            <label class="field-label">{{ t('app.login.tokenLabel') }}</label>
-            <input v-model="accessTokenInput" type="password" placeholder="issued via Access control" />
-          </div>
-          <button class="primary" @click="persistSettings">{{ t('app.login.useToken') }}</button>
-          <span class="toolbar-note">{{ t('app.login.tokenHint') }}</span>
-        </div>
-        <p v-if="loginNotice !== null" class="alert" :class="loginNotice.tone" style="margin-top: 12px">
-          {{ t(loginNotice.key, loginNotice.params) }}
-        </p>
-      </section>
-
-      <div class="settings-bar">
-        <div class="field field-wide">
-          <label class="field-label">{{ t('app.settings.baseUrl') }}</label>
-          <input v-model="apiBaseUrlInput" type="text" placeholder="http://127.0.0.1:6180" />
-        </div>
-        <button class="primary" @click="persistSettings">{{ t('app.settings.save') }}</button>
-        <button :disabled="connectionBusy" @click="testConnection">
-          {{ connectionBusy ? t('app.settings.testing') : t('app.settings.test') }}
-        </button>
-        <span class="toolbar-note">
-          {{ isBundledForm ? t('app.settings.bundledHint') : t('app.settings.remoteHint') }}
-        </span>
-      </div>
-
-      <p v-if="savedNote !== null" class="alert" :class="savedNote.tone">
-        {{ t(savedNote.key, savedNote.params) }}
-      </p>
-      <p v-if="connectionNotice !== null" class="alert" :class="connectionNotice.tone">
-        {{ t(connectionNotice.key, connectionNotice.params) }}
-      </p>
-
-      <nav class="tab-nav">
-        <button
-          v-for="tab in TABS"
-          :key="tab.id"
-          class="tab-button"
-          :class="{ active: tab.id === activeTab }"
-          @click="activeTab = tab.id"
-        >
-          {{ t(tab.labelKey) }}
-        </button>
-        <a class="tab-link" :href="apiDocsUrl" target="_blank" rel="noopener noreferrer">
-          {{ t('tabs.apiDocs') }}<span class="tab-link-mark" aria-hidden="true">↗</span>
-        </a>
       </nav>
 
-      <StatusPanel v-if="activeTab === 'status'" :client="client" />
-      <DatabasesPanel v-else-if="activeTab === 'databases'" :client="client" />
-      <MetricsPanel v-else-if="activeTab === 'metrics'" :client="client" />
-      <BackupPanel v-else-if="activeTab === 'backup'" :client="client" />
-      <AccessPanel v-else :client="client" />
-    </main>
+      <div class="sidebar-footer">
+        <div class="sidebar-user">
+          <span class="avatar" aria-hidden="true">{{ userInitial }}</span>
+          <div class="sidebar-user-meta">
+            <div class="sidebar-user-name">{{ sessionUser?.username ?? t('app.signedIn') }}</div>
+            <div class="sidebar-user-role">
+              {{ openAccess ? t('app.openAccess') : (sessionUser?.role ?? '') }}
+            </div>
+          </div>
+        </div>
+        <button class="sidebar-button" @click="openConnectionDialog">{{ t('nav.connection') }}</button>
+        <button v-if="!openAccess" class="sidebar-button" @click="signOut">{{ t('app.signOut') }}</button>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1>{{ t(activeTabMeta.labelKey) }}</h1>
+          <p>{{ t('app.subtitle') }}</p>
+        </div>
+        <div class="topbar-tools">
+          <a class="link-button" :href="apiDocsUrl" target="_blank" rel="noopener noreferrer">
+            {{ t('tabs.apiDocs') }}<span aria-hidden="true">↗</span>
+          </a>
+          <button class="small" :title="t('app.locale.switchTitle')" @click="toggleLocale">
+            {{ t('app.locale.switch') }}
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <p v-if="shellNotice !== null" class="alert shell-notice" :class="shellNotice.tone">
+          {{ t(shellNotice.key, shellNotice.params) }}
+        </p>
+
+        <StatusPanel v-if="activeTab === 'status'" :client="client" />
+        <MetricsPanel v-else-if="activeTab === 'metrics'" :client="client" />
+        <DatabasesPanel v-else-if="activeTab === 'databases'" :client="client" />
+        <BackupPanel v-else-if="activeTab === 'backup'" :client="client" />
+        <AccessPanel v-else :client="client" />
+      </main>
+    </div>
   </div>
+
+  <ConnectionDialog
+    :open="connectionOpen"
+    :api-base-url="appliedSettings.apiBaseUrl"
+    :access-token="appliedSettings.accessToken"
+    :busy="connectionBusy"
+    :notice-text="connectionNoticeText"
+    :notice-tone="connectionNoticeTone"
+    @close="connectionOpen = false"
+    @save="saveConnection"
+    @test="(baseUrl) => testConnection(baseUrl, false)"
+  />
 </template>

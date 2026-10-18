@@ -14,10 +14,12 @@ look like and how data flows into them".
 
 ## 1. Data directory and file naming
 
-```
+```text
 {dataDir}/
 ├── lock                        # single-process exclusive lock (one dataDir = one process at a time)
 └── {database}/                 # one directory per database (directory-level isolation)
+    ├── retention.json          # per-database retention override (optional; beats the global retentionDays)
+    ├── quality.json            # per-database quality store override (optional, e.g. {"store":"good"}; beats quality.store)
     └── {yyyyMMdd}/             # one directory per day: retention / backup / quarantine unit
         ├── {yyyyMMdd}-NNN.seg  # capacity segment: physical IO / recovery unit; NNN is a 3-digit zero-padded sequence
         ├── {yyyyMMdd}-NNN.idx  # segment index mirror (a replaceable copy of the index region inside the .seg)
@@ -81,16 +83,26 @@ with the on-disk header would fail read-side verification.
 | tsRawLen | u32 | **on-disk** timestamp payload byte count (see below) |
 | valRawLen | u32 | **on-disk** value payload byte count (see below) |
 | tsMin / tsMax | i64×2 | ms timestamp range within the block |
-| flags | u16 | bit0 `backfill` = out-of-order backfill block; bit2 `qualityPresent` reserved (M0: always 0); bit3 `receivedTime` = a 16B server receive-time window is appended at the block tail |
+| flags | u16 | bit0 `backfill` = out-of-order backfill block; bit2 `qualityPresent` = a 1B-per-point quality array is appended at the block tail; bit3 `receivedTime` = a 16B server receive-time window is appended at the block tail |
 | reserved | u16 | 0 |
-| crc32 | u32 | covers the whole BlockData (including the receive-time window tail, §4) |
+| crc32 | u32 | covers the whole BlockData (including the quality array and the receive-time window tail, §4) |
 
-Block data: `BlockData = tsEncoded(tsRawLen B) ++ valEncoded(valRawLen B)`; when flags bit3 is set
-it is followed by `receivedWindow(16B) = [receivedMin i64][receivedMax i64]` (ms epoch; `totalLength`
-and the block CRC scope grow by 16 accordingly). Legacy blocks without the flag parse as
-`receivedMin/receivedMax = null` with unchanged behavior — the receive-time window is arrival
+Block data: `BlockData = tsEncoded(tsRawLen B) ++ valEncoded(valRawLen B) ++ quality(pointCount B, optional)`;
+when flags bit3 is set it is followed by `receivedWindow(16B) = [receivedMin i64][receivedMax i64]`
+(ms epoch; `totalLength` and the block CRC scope grow accordingly). Legacy blocks without the flag
+parse as `receivedMin/receivedMax = null` with unchanged behavior — the receive-time window is arrival
 traceability at **block/batch granularity** (backfill identification, link-latency observation),
 not stored per point.
+
+**Quality array (flags bit2)**: one u8 bit field per point, in the same order as `tsEncoded`:
+`bit7-6 severity` (00 Good / 01 Uncertain / 10 Bad / 11 Reserved, read as Bad),
+`bit5-4 source` (00 Process / 01 Substituted / 10 Interpolated),
+`bit3-0 reason` (0 None, 1 SensorFailure, 2 CommFailure, 3 OutOfRange, 4 Overflow, 5 Stale,
+6 BadReference, 7 ConfigurationError, 8 Maintenance, 9 Test, 10 Blocked, 11 CalculationError,
+12 Inconsistent, 13 Inaccurate, 14 Oscillatory). A block whose points are **all `0x00`** neither sets
+the flag nor appends the array, so existing all-Good data keeps its exact byte layout and size; a single
+non-zero quality makes the whole block append `pointCount` bytes (compressed together with the payload
+under `valCodec=4`). The `.idx` mirror carries no quality — quality is decoded only with the block.
 
 **Key convention**: `tsRawLen` / `valRawLen` carry the **on-disk (encoded) payload byte counts**,
 not the decompressed counts — the read side uses them to split BlockData. Timestamps inside a block
@@ -148,7 +160,7 @@ codecIds are fixed into the format and **must not be reused or reordered**:
 
 | Check | Scope | Algorithm | On failure |
 | ----- | ----- | --------- | ---------- |
-| Block CRC | the whole BlockData | chained `crc32(val, crc32(ts))` (node:zlib); when flags bit3 is set the 16B receive-time window is chained in as well (`crc32(received, crc32(val, crc32(ts)))`) | read side throws `E_CORRUPT_BLOCK` |
+| Block CRC | the whole BlockData | chained `crc32(val, crc32(ts))` (node:zlib); when flags bit2 is set the quality array is chained in (`crc32(quality, …)`), and when bit3 is set the 16B receive-time window follows (`crc32(received, …)`) | read side throws `E_CORRUPT_BLOCK` |
 | Footer CRC | Header 32B ++ indexOffset 8B | crc32 | read side treats it as `E_CORRUPT_SEGMENT` |
 
 - The segment header itself carries no CRC; it is validated via magic + version + field-range checks
@@ -167,27 +179,32 @@ codecIds are fixed into the format and **must not be reused or reordered**:
 One `append` call = one batch; the full pipeline:
 
 1. **Validation**: database name, metric name (≤512 UTF-8 bytes), value bounds (i64 ∈ ±2^53,
-   string ≤256 bytes, ms-epoch timestamp).
-2. **Type lock**: a metric's value type is locked on first write; a later mismatch throws
+   string ≤256 bytes, ms-epoch timestamp), quality as a u8 (`0..255`).
+2. **Quality store policy**: resolved per database (`quality.json` first, then the global
+   `quality.store`). Below the threshold, `quality.onReject='reject'` fails the whole batch with
+   `E_QUALITY_REJECTED` (nothing reaches the WAL); `'drop'` discards the point and counts it in
+   `write.qualityDropped`.
+3. **Type lock**: a metric's value type is locked on first write; a later mismatch throws
    `E_TYPE_MISMATCH`.
-3. **Idempotent dedupe**: duplicate `(metric, timestamp)` points are counted as `duplicates` and not
+4. **Idempotent dedupe**: duplicate `(metric, timestamp)` points are counted as `duplicates` and not
    written again (clients may retry safely).
-4. **WAL append**: the batch is written as a group of JSONL lines (§6); with `fsyncPolicy='wal'` one
+5. **WAL append**: the batch is written as a group of JSONL lines (§6); with `fsyncPolicy='wal'` one
    fsync per group; returns a `batchId` plus byte ranges in the day files, and the batch enters the
    FIFO ledger. **From this moment the batch survives power loss.**
-5. **Write buffer**: points enter per-metric in-memory buffers (bounded by the `maxBufferBytes` /
+6. **Write buffer**: points enter per-metric in-memory buffers (bounded by the `maxBufferBytes` /
    `maxPendingPoints` dual watermark; overflow triggers a synchronous flush or backpressure
    rejection).
-6. **Block trigger** (any of): a metric's buffered points ≥ `blockTargetPoints`; the flush timer
+7. **Block trigger** (any of): a metric's buffered points ≥ `blockTargetPoints`; the flush timer
    (default 5s) fires with ≥ `blockMinPoints`; an explicit `flush()`; the buffer byte watermark hits
    its ceiling.
-7. **Rolling check**: before appending, test "current segment bytes + estimated block size >
+8. **Rolling check**: before appending, test "current segment bytes + estimated block size >
    `segmentMaxBytes`" — the three triggers and three no-roll exceptions are in 08 §1.1 (blocks never
    split across segments; empty segments do not roll; at sequence 999 keep appending).
-8. **Sort + encode**: timestamps are stably sorted ascending within the block; timestamps and values
-   are encoded separately (§3); the block header and CRC are filled in.
-9. **Append to segment**: `appendBlock` writes the whole block bytes plus an index entry.
-10. **fsync the segment → advance the WAL safe point** (order must not be swapped): with
+9. **Sort + encode**: timestamps are stably sorted ascending within the block; timestamps and values
+   are encoded separately (§3), the quality array is appended bit-wise, and the block header and CRC
+   are filled in.
+10. **Append to segment**: `appendBlock` writes the whole block bytes plus an index entry.
+11. **fsync the segment → advance the WAL safe point** (order must not be swapped): with
     `fsyncPolicy='wal'` every committed block triggers an fsync of the active segment file, and only
     **then** may batches complete and the safe point advance (§6) — guaranteeing that "data released
     from the WAL is already stable in the segment file". Finally the FIFO completes batches one by
@@ -206,7 +223,7 @@ One `append` call = one batch; the full pipeline:
 ```
 
 - i64 is written as decimal text with `"vt":2` (JSON has no BigInt).
-- A non-zero quality adds `"q":n` (the M0 write path rejects non-zero, so this rarely appears).
+- A non-zero quality adds `"q":n` (u8 bit field, omitted when `0x00 = Good`); replay carries the flag back into the write path.
 - Metric names forbid newlines and NUL, which makes JSONL naturally safe.
 
 ### 6.2 Batch ledger and safe point
@@ -270,9 +287,11 @@ Engine defaults (`ENGINE_DEFAULTS`) and clamp ranges (`ENGINE_CLAMPS`):
 | cacheFdGroups | 32 | 4–256 | per-day file-handle group cache count |
 | walEnabled | true | — | disabling it makes writes unrecoverable after power loss (reloadable scenarios only) |
 | fsyncPolicy | `'wal'` | `'wal' \| 'none'` | `'none'` skips both the group-commit fsync and the segment fsync |
+| qualityStore | `'all'` | `'all' \| 'good-uncertain' \| 'good'` | quality store threshold; per-database `quality.json` wins |
+| qualityOnReject | `'reject'` | `'reject' \| 'drop'` | below the threshold: fail the batch or drop and count in `write.qualityDropped` |
 
 Write limits (`WRITE_LIMITS`): metric names ≤512 UTF-8 bytes; string values ≤256 UTF-8 bytes;
-i64 ∈ ±2^53; ms-epoch timestamps.
+i64 ∈ ±2^53; ms-epoch timestamps; quality is an integer `0..255` (out of range throws `E_INVALID_POINT`).
 
 ---
 
@@ -295,3 +314,4 @@ i64 ∈ ±2^53; ms-epoch timestamps.
 | ---- | ------ | ----- |
 | 2026-10-17 | Page created: segment physical layout, encoding & CRCs, ten-step write path, WAL line format & safe point (including the "WAL fills then resets" explanation), startup recovery, constants & clamp table | GLM-5.3-Flash |
 | 2026-10-17 | §2.2 block flags add bit3 `receivedTime`: 16B `[receivedMin][receivedMax]` server receive-time window at the block tail (included in `totalLength` and the CRC chain); §4 CRC chain updated | GLM-5.3-Flash |
+| 2026-10-18 | Quality flags implemented: §1 directory tree gains `retention.json` / `quality.json`; §2.2 flag bit2 `qualityPresent` turns from reserved into real (a `pointCount`-byte quality array at the block tail, zero cost for all-Good blocks); §4 CRC chain includes the quality array; §5 write path gains the quality store policy step (reject / drop); §6 WAL `q` semantics updated; §8 constants add `qualityStore` / `qualityOnReject` and the quality value range | DeepSeek-V4.1-Flash |

@@ -48,8 +48,9 @@
 
 | 错误码 | HTTP | 含义 |
 | ------ | ---- | ---- |
-| `E_INVALID_POINT` | 400 | 点格式错误 / 数据库名非法 / 行协议行非法 |
+| `E_INVALID_POINT` | 400 | 点格式错误 / 数据库名非法 / 行协议行非法 / 质量位越界 |
 | `E_INVALID_RANGE` | 400 | 时间区间非法、`order` 非法、聚合窗口过多 |
+| `E_QUALITY_REJECTED` | 400 | 质量低于 `quality.store` 阈值且 `quality.onReject='reject'`（整批不写，`message` 含点索引） |
 | `E_BAD_METRIC_NAME` | 400 | 指标名缺失或非法 |
 | `E_TYPE_MISMATCH` | 400 | 值类型与该指标首次写入锁定的类型不一致 |
 | `E_AUTH` | 401 | 凭据缺失或无效 |
@@ -168,10 +169,16 @@ curl -X POST "http://127.0.0.1:6180/api/v1/write?db=plant_a" \
 | `timestamp` | `t` | 必填，整数毫秒 epoch |
 | `value` | `v` | 必填 |
 | `vt` | — | 可选类型标记：`1`=f64，`2`=i64，`3`=bool，`4`=string |
-| `quality` | `q` | 可选 u8；`0` = 正常（默认值，不存储） |
+| `quality` | `q` | 可选 u8 质量位；缺省 `0x00` = Good（不存储） |
 
-> v0.1.0（M0）只接受 `quality` 为 `0`（等同省略）：任何非 0 质量位都会返回
-> `400 E_INVALID_POINT`（避免静默丢失），等质量位枚举确定后再开放。
+> `quality` 是 **u8 位域**：`bit7-6 severity`（00 Good / 01 Uncertain / 10 Bad / 11 Reserved）、
+> `bit5-4 source`（00 Process / 01 Substituted / 10 Interpolated）、`bit3-0 reason`
+> （0 None、1 SensorFailure、2 CommFailure、3 OutOfRange、4 Overflow、5 Stale、6 BadReference、
+> 7 ConfigurationError、8 Maintenance、9 Test、10 Blocked、11 CalculationError、12 Inconsistent、
+> 13 Inaccurate、14 Oscillatory）。取值必须是整数 `0..255`，否则返回 `400 E_INVALID_POINT`。
+> 是否落盘由 `quality.store` 决定（默认 `all` = 好坏全存）：低于阈值时 `quality.onReject='reject'`
+> 返回 `400 E_QUALITY_REJECTED`（整批不写），`'drop'` 接受请求但丢弃该点并计入
+> `status.write.qualityDropped`。位域与落盘布局见 [11 — 存储格式](./11-segment-format.md) §2.2。
 
 **何时需要 `vt`**：JSON 数字只能表达 f64，所以要写 i64 值请使用**十进制字符串配合 `"vt": 2`**。
 不写 `vt` 时，类型由 JSON 类型推断（number → f64，boolean → bool，string → string）。
@@ -339,6 +346,9 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/at" \
   仅 f64/i64 指标支持，其余值类型整批 `400 E_TYPE_MISMATCH`；i64 结果四舍五入后仍以 i64 返回）。
 - `state`：`exact`＝存储中真实存在的点（含前值保持）；`interpolated`＝两实测点之间推算；
   `extrapolated`＝数据范围之外按最近点平推；`no-data`＝无任何数据（`v: null`）。
+- `quality`（响应中的 `q`）：`exact` / `extrapolated` 继承来源点的质量位；`interpolated`
+  取前后两点中较差的 `severity`，`source` 置为 Interpolated（`0x20`），`reason` 继承较差点；
+  质量位为 `0x00` 时省略 `q`。
 - 结果按请求顺序回显；未成块缓冲点参与（写后立查即可见）；metric 不存在返回 `404 E_METRIC_NOT_FOUND`。
 
 ### 4.6 读取值
@@ -551,7 +561,7 @@ curl http://127.0.0.1:6180/metrics      # Prometheus 文本暴露格式
   "uptimeMs": 12345,
   "databases": 2,
   "metrics": 1204,
-  "write":  { "pointsPerSec": 51230, "buffered": 0, "duplicates": 13, "tagsIgnored": 0 },
+  "write":  { "pointsPerSec": 51230, "buffered": 0, "duplicates": 13, "qualityDropped": 0, "tagsIgnored": 0 },
   "wal":    { "pendingBytes": 0, "outstandingBatches": 0, "pendingPoints": 0, "lastFsyncMs": 1760691600000 },
   "segments": { "openFiles": 3, "bytesToday": 610000000 },
   "cpu":    { "percent": 12.5, "systemPercent": 1.56, "userMs": 15230, "systemMs": 3210 },
@@ -752,3 +762,4 @@ curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlen
 | 2026-10-18 | 新增 §4.2.1 **`POST /api/v1/query/last-batch`**：一次请求取 1…1000 个指标，响应按请求顺序回显，未知指标返回 `"point": null`；空数组/非字符串 `400 E_INVALID_POINT`，超过 1000 个返回 `413 E_BATCH_TOO_LARGE` | Step-5-Preview |
 
 | 2026-10-18 | §8 `/api/v1/status` 新增 `cpu` / `memory` 段（进程 CPU 占用率、常驻内存、内存与堆占用率），`/metrics` 新增 `rtdb_process_*` 进程资源指标族 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 质量位开放：§3.2 `quality`/`q` 说明改为 u8 位域并注明 `quality.store` / `quality.onReject` 行为；错误码表新增 `E_QUALITY_REJECTED`（400）；§4.5 补充 `queryAt` 的 `q` 传播规则；§8 `status.write` 增加 `qualityDropped` | DeepSeek-V4.1-Flash |

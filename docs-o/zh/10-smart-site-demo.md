@@ -25,7 +25,7 @@ rtdb 只有 `database → metric → point` 三层，没有标签（tag）维度
 | `dataType` = `int` / `int32` | `i64`（JSON 写入为十进制字符串 + `"vt": 2`） |
 | `dataType` = `bool` | `bool` |
 | `dataType` = `string` | `string` |
-| 写入 Influx 的 `quality`（0–100） | rtdb v0.1.0 只接受 `q=0`（省略即正常）；非 0 返回 `400 E_INVALID_POINT` |
+| 写入 Influx 的 `quality`（0–100） | rtdb 为 u8 位域质量位（省略即 `0x00` = Good）；本模拟器暂不发送 `q` |
 | `dev_data_tags.scanRate`（通常 1000 ms） | `--interval`（默认 1000 ms）；`--points-per-tick` / `--rate` 可在同一窗口内写入更多点 |
 | `dev_data_tags.unit` / `name` | 仅用于 `--list` 展示（rtdb 不存单位与显示名） |
 
@@ -35,9 +35,10 @@ rtdb 只有 `database → metric → point` 三层，没有标签（tag）维度
   标签在 Smart Site 与 rtdb 中可以直接对照。
 - **值类型首次写入即锁定**：目录中每个标签的类型固定（f64 / i64 / bool / string），模拟器不会
   中途改变类型，避免 `E_TYPE_MISMATCH`。
-- **质量位在 v0.1.0 不可用**：Smart Site 用 0–100 的比例式质量，rtdb 用 u8 标志位且 `0` 表示正常；
-  当前版本（M0）**拒绝任何非 0 质量位**（`400 E_INVALID_POINT`），以免静默丢失。因此模拟器只在
-  通信故障时重复上一采样值（stale），报文始终不带 `q`。
+- **模拟器不发送质量位**：Smart Site 用 0–100 的比例式质量，rtdb 用 u8 位域质量位（`0x00` = Good）；
+  引擎已支持非 0 质量位，并按 `quality.store` / `quality.onReject` 决定落盘或拒绝（见
+  [06 — 嵌入式引擎](./06-embedded-engine.md) §2 与 [11 — 存储格式](./11-segment-format.md) §2.2）。
+  本模拟器仍在通信故障时只重复上一采样值（stale），报文不带 `q`；质量映射留待后续版本。
 
 ---
 
@@ -303,7 +304,7 @@ bin\demo-smart-site.bat dry --points-per-tick 5000
 
 - `t` 为毫秒 epoch，`vt` 为类型标记（`1`=f64，`2`=i64，`3`=bool，`4`=string）；
 - i64 必须以**十进制字符串**传输，避免 JSON number 丢精度；
-- 报文不带质量位：v0.1.0 只接受 `q=0`（省略即正常），非 0 会被拒绝。
+- 报文不带质量位（本模拟器的选择）：省略 `q` 即 `0x00` = Good。
 
 ---
 
@@ -355,7 +356,8 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | `401 E_AUTH` 且写成了 `--token rtdb.token` | `--token` 收的是令牌**值**，不是文件路径（会原样作为 Bearer 发出，并**压过**配置里的 `tokenFile`） | 改用 `--token-file rtdb.token`，或用 `--token <64 位令牌值>`；同名令牌文件不等于同一个令牌——demo 服务器用 `packages\demo\conf\rtdb.token`，SEA 发布包（`release\sea\rtdb-server.exe`）用 `release\sea\rtdb.token` |
 | `--url` 连接失败 | 服务未启动或端口不同 | 先启动 `rtdb-server`，再确认端口 |
 | `E_TYPE_MISMATCH` | 目标库中同名指标已用其他类型写入 | 换 `--db`，或清理该库后重跑 |
-| `400 E_INVALID_POINT ... quality=…` | 写入了非 0 质量位（v0.1.0 不支持） | 省略 `q`；本 demo 已默认不发送质量位 |
+| `400 E_INVALID_POINT ... Illegal quality flag` | `q` 不是整数 `0..255` | 使用合法 u8 质量位，或省略 `q` |
+| `400 E_QUALITY_REJECTED` | 质量低于库/全局 `quality.store` 阈值且 `onReject='reject'` | 省略 `q`、放宽 `quality.store`，或改用 `onReject='drop'` |
 | `--db` 被拒绝 | 数据库名不能包含 `-` 等字符 | 使用字母、数字、下划线，如 `smartfactory_demo` |
 | `--list` 报未知设备 | `--devices` 拼写错误 | 先用 `--list` 查看设备编码 |
 | 启动即报 `exceed the catalog capacity` | 每批点数超过 `指标数 × interval` 的容量 | 提高 `--interval`、提高 `--metrics`、降低 `--points-per-tick`，或减少 `--devices` |
@@ -382,3 +384,4 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-17 | §6 补充 `--token rtdb.token` 导致 `401 E_AUTH` 的排障行（`--token` 收令牌值且优先于配置 `tokenFile`；demo 实例与 SEA 发布包令牌文件不同）；客户端对「`--token` 传入路径」新增 `[WARN]` 提示，401 提示语补充优先级说明 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §3.5 与 `bin\demo-smart-site.bat` 新增**大数据测试**示例（`--rate 20000 --duration 60 --verify`、`--points-per-tick 5000 --total-points 1000000`、`dry --points-per-tick 5000`），并补充容量上限与实测吞吐（21 823 点/s） | DeepSeek-V4.1-Flash |
 | 2026-10-18 | 新增 §3.3.1 **变量数模式** `--metrics <n>`（配置键 `metrics`）：目录按 `#k` 指标名后缀复制（1000 / 3000 / 6000 / 10000 变量 = 44 标签 × 23/69/137/228），每个副本为独立信号流且 `counter.rateFrom` 在副本组内解析；`bin\start-demo-server.bat` 新增 `vars <pts/s> <seconds>` 阶梯（每档独立 `perf_vars_<count>` 数据库）并支持 `bench … --metrics` 转发 | Step-5-Preview |
+| 2026-10-18 | 质量位说明改为与实现一致：引擎已支持 u8 质量位与 `quality.store` / `quality.onReject` 落盘策略，模拟器仍不发送 `q`；§6 排障表补 `E_QUALITY_REJECTED` 与非法质量位两行 | DeepSeek-V4.1-Flash |

@@ -28,10 +28,12 @@
  *     valRawLen     u32  on-disk payload byte count
  *     tsMin         i64
  *     tsMax         i64
- *     flags         u16  bit0=backfill
+ *     flags         u16  bit0=backfill bit2=qualityPresent bit3=receivedTime
  *     reserved      u16
- *     crc32         u32  (over the whole BlockData)
+ *     crc32         u32  (over the whole BlockData, see below)
  *   BlockData     tsEncoded(tsRawLen B) ++ valEncoded(valRawLen B)
+ *                 ++ quality[pointCount] (only when bit2 is set)
+ *                 ++ [receivedMin i64][receivedMax i64] (only when bit3 is set)
  * Footer (16B)                 immediately after the last block
  *   indexOffset   u64  start of the intra-segment index region (= Footer start + 16)
  *   crc32         u32  (over Header 32B ++ indexOffset 8B)
@@ -91,7 +93,11 @@ export const SEGMENT_HEADER_FLAG = {
 export const BLOCK_FLAG = {
   /** bit0: out-of-order backfill block */
   backfill: 0b0000_0001,
-  /** bit2 reserved: quality-flags persisted marker (M0 decision: all-zero is not persisted, so this bit is always 0; enabling it later once the enumeration table is fixed won't change the format) */
+  /**
+   * bit2: the block carries a quality array — `pointCount` bytes appended after the value payload,
+   * one u8 quality flag per point in timestamp order (Storage Design §3.1). Set only when at least
+   * one point has a non-zero quality, so all-Good blocks keep the original byte layout and size.
+   */
   qualityPresent: 0b0000_0100,
   /**
    * bit3: the block carries a server receive-time window — 16B appended after BlockData
@@ -398,14 +404,22 @@ export function tryParseBlockHeader(
   const flags = view.getUint16(fieldsOffset + 31, true);
   if ((flags & ~(BLOCK_FLAG.backfill | BLOCK_FLAG.qualityPresent | BLOCK_FLAG.receivedTime)) !== 0) return null;
 
+  const hasQuality = (flags & BLOCK_FLAG.qualityPresent) !== 0;
   const hasReceivedTime = (flags & BLOCK_FLAG.receivedTime) !== 0;
   let receivedMin: number | null = null;
   let receivedMax: number | null = null;
   let totalLength = BLOCK_HEADER_FIXED_SIZE + metricLength + dataLength;
+  let tailOffset = dataOffset + dataLength;
+  if (hasQuality) {
+    // One u8 quality flag per point, right after the value payload and before the receive window.
+    if (tailOffset + pointCount > limit) return null;
+    totalLength += pointCount;
+    tailOffset += pointCount;
+  }
   if (hasReceivedTime) {
-    if (dataOffset + dataLength + BLOCK_RECEIVED_WINDOW_SIZE > limit) return null;
-    receivedMin = Number(view.getBigInt64(dataOffset + dataLength, true));
-    receivedMax = Number(view.getBigInt64(dataOffset + dataLength + 8, true));
+    if (tailOffset + BLOCK_RECEIVED_WINDOW_SIZE > limit) return null;
+    receivedMin = Number(view.getBigInt64(tailOffset, true));
+    receivedMax = Number(view.getBigInt64(tailOffset + 8, true));
     if (receivedMin <= 0 || receivedMin > receivedMax) return null;
     totalLength += BLOCK_RECEIVED_WINDOW_SIZE;
   }
@@ -617,13 +631,29 @@ export function blockDataCrc32(timestampEncoded: Uint8Array, valueEncoded: Uint8
   return crc32(valueEncoded, crc32(timestampEncoded));
 }
 
+/**
+ * Block CRC over every payload section actually present, in on-disk order:
+ * `ts ++ val [++ quality] [++ receive window]` (null = section absent).
+ */
+export function blockDataCrc32Full(
+  timestampEncoded: Uint8Array,
+  valueEncoded: Uint8Array,
+  qualityEncoded: Uint8Array | null,
+  receivedEncoded: Uint8Array | null,
+): number {
+  let crc = crc32(valueEncoded, crc32(timestampEncoded));
+  if (qualityEncoded !== null) crc = crc32(qualityEncoded, crc);
+  if (receivedEncoded !== null) crc = crc32(receivedEncoded, crc);
+  return crc;
+}
+
 /** Block CRC scope when the `receivedTime` flag is set: chained over BlockData ++ receive window */
 export function blockDataCrc32WithReceived(
   timestampEncoded: Uint8Array,
   valueEncoded: Uint8Array,
   receivedEncoded: Uint8Array,
 ): number {
-  return crc32(receivedEncoded, crc32(valueEncoded, crc32(timestampEncoded)));
+  return blockDataCrc32Full(timestampEncoded, valueEncoded, null, receivedEncoded);
 }
 
 /* ---------- Internal: fixed-size little-endian write buffer ---------- */

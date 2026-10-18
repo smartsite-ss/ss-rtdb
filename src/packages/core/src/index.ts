@@ -38,6 +38,35 @@ export type {
 export { ERROR_CODE, ERROR_CODE_HTTP_STATUS, RtdbError, isRtdbError } from './errors.ts';
 export type { ErrorCode } from './errors.ts';
 
+/* ---------- Data quality (u8 bit field; Storage Design §3.1) ---------- */
+export {
+  QUALITY,
+  QUALITY_DEFAULTS,
+  QUALITY_REASON,
+  QUALITY_REASON_MASK,
+  QUALITY_SEVERITY,
+  QUALITY_SEVERITY_MASK,
+  QUALITY_SOURCE,
+  QUALITY_SOURCE_MASK,
+  composeQuality,
+  isQualityStored,
+  isQualityValue,
+  normalizeQualityPolicy,
+  qualityReasonOf,
+  qualitySeverityOf,
+  qualitySourceOf,
+  qualityStoreMaxSeverity,
+  requireQualityValue,
+} from './quality.ts';
+export type {
+  QualityOnReject,
+  QualityPolicy,
+  QualityReason,
+  QualitySeverity,
+  QualitySource,
+  QualityStorePolicy,
+} from './quality.ts';
+
 /* ---------- Segment file format (§2.5) ---------- */
 export {
   BACKFILL_MARKER,
@@ -200,6 +229,7 @@ export {
   MAX_AGGREGATE_WINDOWS,
   MAX_QUERY_AT_TIMESTAMPS,
   MAX_QUERY_LAST_METRICS,
+  QUALITY_FILE_NAME,
   RETENTION_FILE_NAME,
   RtdbEngine,
 } from './engine.ts';

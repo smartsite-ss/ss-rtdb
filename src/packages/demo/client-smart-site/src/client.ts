@@ -114,7 +114,7 @@ export class DemoHttpError extends Error {
 /** SimulatedPoint -> wire JSON (i64 travels as a decimal string with `vt: 2`) */
 export function encodeWritePoint(point: SimulatedPoint): WireWritePoint {
   const encoded = encodeWireValue(point.value);
-  // No `q` is emitted: rtdb v0.1.0 (M0) only accepts quality 0, which is the wire default.
+  // No `q` is emitted: the simulator sends Good (0x00) samples only, which is the wire default.
   return { metricName: point.metricName, t: point.timestamp, v: encoded.v, vt: encoded.vt };
 }
 

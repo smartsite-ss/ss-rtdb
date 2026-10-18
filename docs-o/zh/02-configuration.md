@@ -45,6 +45,8 @@ ss-rtdb/            （仓库根目录，或发布包的根目录）
   "archiveDir": "",
   "archiveBeforeDelete": false,
 
+  "quality": { "store": "all", "onReject": "reject" },
+
   "auth": {
     "enabled": true,
     "mode": "token",
@@ -102,6 +104,8 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `retentionDays` | `0` | 全局默认保留天数；`0` = 永久保留。按库覆盖优先。 |
 | `archiveDir` | `""` | 冷归档目标目录；留空 = `{dataDir}/archive`。必须与数据根在同一卷。 |
 | `archiveBeforeDelete` | `false` | 删除过期日目录前先打包成 `tar.gz`。 |
+| `quality.store` | `all` | 质量落盘阈值：`all`（好/不确定/坏全存）\| `good-uncertain`（丢 Bad）\| `good`（只存 Good）。库级 `{database}/quality.json`（如 `{"store":"good"}`）优先。 |
+| `quality.onReject` | `reject` | 低于阈值时：`reject` 整批拒绝并返回 `400 E_QUALITY_REJECTED`；`drop` 接受请求但丢弃该点，仅计入 `write.qualityDropped`。 |
 | `auth.enabled` | `true` | 鉴权总开关。 |
 | `auth.mode` | `token` | `token` \| `basic` \| `both`。 |
 | `auth.token` | `""` | 静态 Bearer 令牌。留空 → 读取/生成 `auth.tokenFile`。 |
@@ -180,6 +184,8 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `RTDB_HOST` | `host` |
 | `RTDB_DATA_DIR` | `dataDir` |
 | `RTDB_RETENTION_DAYS` | `retentionDays` |
+| `RTDB_QUALITY_STORE` | `quality.store` |
+| `RTDB_QUALITY_ON_REJECT` | `quality.onReject` |
 | `RTDB_AUTH_ENABLED` | `auth.enabled`（`true`/`1`、`false`/`0`） |
 | `RTDB_TOKEN` | `auth.token` |
 | `RTDB_AUTH_USERNAME` | `auth.username` |
@@ -327,3 +333,4 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 | 2026-10-17 | 补充运行期 `conf/rtdb-server.json`（由工作目录自动加载，仓库与发布包均自带）与 `admin.exposePaths` / `RTDB_ADMIN_EXPOSE_PATHS` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `admin.exposePaths` 默认改为 `false`：数据库目录按工作目录相对路径报告，`true` 才返回绝对路径 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | 新增 §3「兼容层（`compat.influx`）」12 个配置项说明与 12 个 `RTDB_COMPAT_INFLUX_*` 环境变量（默认开启写入兼容、InfluxQL `read-only`，并说明 tag/field 折叠、precision、跨请求不覆盖等语义） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | 新增 `quality.store` / `quality.onReject` 配置项（含库级 `quality.json` 覆盖）与 `RTDB_QUALITY_STORE` / `RTDB_QUALITY_ON_REJECT` 环境变量 | DeepSeek-V4.1-Flash |

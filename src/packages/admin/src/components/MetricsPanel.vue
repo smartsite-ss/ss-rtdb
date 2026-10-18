@@ -22,7 +22,7 @@
  * (`step` = previous-value hold, `linear` = piecewise-linear) with per-point provenance markers.
  */
 
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import LineChart from './LineChart.vue';
 import MetricRangeDialog from './MetricRangeDialog.vue';
 import TimeRangePicker from './TimeRangePicker.vue';
@@ -66,6 +66,13 @@ const MAX_QUERY_AT_TIMESTAMPS = 10_000;
  */
 const PAGE_SIZES = [50, 100, 200, 500] as const;
 const DEFAULT_PAGE_SIZE = 100;
+/**
+ * How often the inventory's live values (and their `Updated` timestamps) are re-read.
+ *
+ * One `query/last-batch` per tick covers the whole visible page, so the cost follows the page size rather than
+ * the metric count; the timer pauses on the preview tab and while the browser tab is hidden.
+ */
+const LIVE_REFRESH_MS = 5_000;
 
 const AGGREGATE_TYPES: RtdbAggregateType[] = Object.values(RTDB_AGGREGATE_TYPE);
 const INTERPOLATION_MODES: RtdbInterpolationMode[] = Object.values(RTDB_INTERPOLATION_MODE);
@@ -119,6 +126,11 @@ const latestLoading = ref(false);
 const latestLoadedAt = ref<number | null>(null);
 /** Monotonic refresh id: a newer refresh (or a database switch) invalidates the in-flight one */
 let latestRequestId = 0;
+/** Auto-refresh toggle for the live-value columns (default on, so `Updated` keeps following the data) */
+const autoRefreshLive = ref(true);
+/** Guards overlapping live-value requests (manual button + auto-refresh tick) */
+let liveRequestPending = false;
+let liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Current inventory page (1-based) and its size; the table renders only this slice */
 const currentPage = ref(1);
@@ -258,33 +270,63 @@ function liveUpdatedAt(metricName: string): string {
 }
 
 /**
- * Load the newest point of the **visible page** in one `POST /api/v1/query/last-batch` call.
+ * Read the newest point of the **visible page** in one `POST /api/v1/query/last-batch` call.
  *
  * Batching is what makes the inventory usable at 10 000 metrics: the request count follows the page, not the
- * metric count (previously one `query/last` per row, capped at 50 rows). Values of pages refreshed earlier are
- * kept, so scrolling back does not blank the columns; a metric the server no longer knows comes back as `null`
- * and renders as `—`.
+ * metric count. Values of pages refreshed earlier are kept, so scrolling back does not blank the columns; a
+ * metric the server no longer knows comes back as `null` and renders as `—`.
+ *
+ * `reportError` separates the explicit button (errors reach the alert banner) from the auto-refresh tick
+ * (best effort: a transient failure keeps the previous snapshot instead of flashing an error every 5 s).
  */
-async function refreshLiveValues(): Promise<void> {
+async function fetchLiveValues(reportError: boolean): Promise<void> {
   const database = selectedDatabase.value;
   const targets = pageMetrics.value;
-  if (database.length === 0 || targets.length === 0) {
-    latestLoadedAt.value = null;
-    return;
-  }
+  if (database.length === 0 || targets.length === 0 || liveRequestPending) return;
   const requestId = (latestRequestId += 1);
+  liveRequestPending = true;
+  try {
+    const request = () => props.client.queryLastBatch(database, targets.map((metric) => metric.metricName));
+    const snapshot = reportError ? await run(request) : await request();
+    if (requestId !== latestRequestId || snapshot === undefined) return;
+    latestByMetric.value = { ...latestByMetric.value, ...snapshot };
+    latestLoadedAt.value = Date.now();
+  } catch {
+    // Auto-refresh is best effort: keep the last snapshot rather than repeating the same banner every tick.
+  } finally {
+    liveRequestPending = false;
+  }
+}
+
+/** Manual refresh (`Refresh live values`): the button shows its own busy state and errors reach the banner */
+async function refreshLiveValues(): Promise<void> {
   latestLoading.value = true;
-  const snapshot = await run(() =>
-    props.client.queryLastBatch(
-      database,
-      targets.map((metric) => metric.metricName),
-    ),
-  );
-  if (requestId !== latestRequestId) return;
-  latestLoading.value = false;
-  if (snapshot === undefined) return;
-  latestByMetric.value = { ...latestByMetric.value, ...snapshot };
-  latestLoadedAt.value = Date.now();
+  try {
+    await fetchLiveValues(true);
+  } finally {
+    latestLoading.value = false;
+  }
+}
+
+/** Auto-refresh tick: only while the inventory tab is visible (a hidden browser tab costs nothing) */
+async function pollLiveValues(): Promise<void> {
+  if (activeTab.value !== 'inventory') return;
+  if (document.visibilityState === 'hidden') return;
+  await fetchLiveValues(false);
+}
+
+function startLiveRefresh(): void {
+  stopLiveRefresh();
+  liveRefreshTimer = setInterval(() => {
+    void pollLiveValues();
+  }, LIVE_REFRESH_MS);
+}
+
+function stopLiveRefresh(): void {
+  if (liveRefreshTimer !== null) {
+    clearInterval(liveRefreshTimer);
+    liveRefreshTimer = null;
+  }
 }
 
 /** Jump to a page; when live values were already loaded, refresh the page that just became visible */
@@ -292,14 +334,14 @@ async function goToPage(page: number): Promise<void> {
   const target = Math.min(Math.max(1, Math.trunc(page)), pageCount.value);
   if (target === currentPage.value) return;
   currentPage.value = target;
-  // The user opted into live values: keep the newly visible rows filled instead of showing stale blanks.
-  if (latestLoadedAt.value !== null) await refreshLiveValues();
+  // Keep the newly visible rows filled without flipping the toolbar's busy state.
+  if (latestLoadedAt.value !== null) await fetchLiveValues(false);
 }
 
 /** Page-size change: back to page 1 (the visible slice changes completely) and refresh if values were loaded */
 async function onPageSizeChange(): Promise<void> {
   currentPage.value = 1;
-  if (latestLoadedAt.value !== null) await refreshLiveValues();
+  if (latestLoadedAt.value !== null) await fetchLiveValues(false);
 }
 
 async function loadDatabases(): Promise<void> {
@@ -344,8 +386,9 @@ async function loadMetrics(): Promise<void> {
   // A reload starts from the first page: the old page number may no longer exist.
   currentPage.value = 1;
   selectedMetric.value = list.length > 0 ? list[0].metricName : '';
-  // Live values are NOT loaded automatically: the user opts in per page, so a reload never hides the
-  // inventory latency behind a background request they did not ask for.
+  // With auto-refresh on, fill the live-value columns of the first page right away (one `query/last-batch`
+  // for the whole page), so `Updated` is populated without an extra click.
+  if (autoRefreshLive.value) void fetchLiveValues(false);
 }
 
 /**
@@ -550,6 +593,17 @@ function exportRow(point: RtdbJsonPoint): XlsCellValue[] {
 onMounted(() => {
   resetRange();
   void loadDatabases();
+  startLiveRefresh();
+});
+
+onUnmounted(() => {
+  stopLiveRefresh();
+});
+
+/** Toggling auto-refresh stops/starts the timer without discarding the values already on screen */
+watch(autoRefreshLive, (enabled) => {
+  if (enabled) startLiveRefresh();
+  else stopLiveRefresh();
 });
 
 watch(
@@ -606,6 +660,10 @@ watch(
         <button :disabled="busy || latestLoading || metrics.length === 0" @click="refreshLiveValues">
           {{ latestLoading ? t('metrics.refreshing') : t('metrics.refreshLive') }}
         </button>
+        <label class="toolbar-note">
+          <input v-model="autoRefreshLive" type="checkbox" />
+          {{ t('metrics.autoRefreshLive', { seconds: LIVE_REFRESH_MS / 1000 }) }}
+        </label>
         <span class="toolbar-note">{{ t('metrics.count', { count: metrics.length }) }}</span>
         <span v-if="latestLoadedAt !== null" class="toolbar-note">
           {{ t('metrics.liveLoadedAt', { time: formatDateTime(latestLoadedAt) }) }}
@@ -613,7 +671,7 @@ watch(
       </div>
 
       <p v-if="!latestLoading && latestLoadedAt === null && metrics.length > 0" class="toolbar-note hint">
-        {{ t('metrics.liveHint') }}
+        {{ t('metrics.liveHint', { seconds: LIVE_REFRESH_MS / 1000 }) }}
       </p>
 
       <p v-if="errorMessage.length > 0" class="alert error">{{ errorMessage }}</p>
@@ -645,7 +703,7 @@ watch(
               <td class="mono">{{ liveUpdatedAt(metric.metricName) }}</td>
               <td>
                 <button class="small" :disabled="busy" @click="selectMetric(metric.metricName)">
-                  {{ t('metrics.select') }}
+                  {{ t('metrics.view') }}
                 </button>
               </td>
             </tr>

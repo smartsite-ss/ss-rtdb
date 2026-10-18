@@ -12,6 +12,8 @@ export const ERROR_CODE = {
   InvalidRange: 'E_INVALID_RANGE',
   BadMetricName: 'E_BAD_METRIC_NAME',
   TypeMismatch: 'E_TYPE_MISMATCH',
+  /** Quality below the database/global `quality.store` threshold (only when `quality.onReject='reject'`) */
+  QualityRejected: 'E_QUALITY_REJECTED',
   Auth: 'E_AUTH',
   DatabaseNotFound: 'E_DB_NOT_FOUND',
   MetricNotFound: 'E_METRIC_NOT_FOUND',
@@ -33,6 +35,7 @@ export const ERROR_CODE_HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   [ERROR_CODE.InvalidRange]: 400,
   [ERROR_CODE.BadMetricName]: 400,
   [ERROR_CODE.TypeMismatch]: 400,
+  [ERROR_CODE.QualityRejected]: 400,
   [ERROR_CODE.Auth]: 401,
   [ERROR_CODE.DatabaseNotFound]: 404,
   [ERROR_CODE.MetricNotFound]: 404,

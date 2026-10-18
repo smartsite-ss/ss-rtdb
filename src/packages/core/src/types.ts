@@ -12,6 +12,7 @@
  */
 
 import { ERROR_CODE, RtdbError } from './errors.ts';
+import type { QualityOnReject, QualityStorePolicy } from './quality.ts';
 
 /** Value type: locked on the first write of a metric; later type mismatches are rejected (E_TYPE_MISMATCH) */
 export const ValueType = {
@@ -43,7 +44,11 @@ export interface Point {
   timestamp: number;
   /** f64→number; i64→bigint; bool→boolean; string→string */
   value: number | bigint | string | boolean;
-  /** u8 quality flags, default 0 = good (M0 decision: all-zero is not persisted; see Pre-Development Checklist §2.2) */
+  /**
+   * u8 quality flags, default `0x00` = Good; bit field (severity / source / reason) defined in
+   * `quality.ts` and Storage Design §3.1. All-Good blocks carry no quality array on disk; blocks with
+   * at least one non-zero quality append one byte per point.
+   */
   quality?: number;
 }
 
@@ -107,6 +112,12 @@ export interface AtPoint {
    * `no-data` = no point is available for the request
    */
   state: 'exact' | 'interpolated' | 'extrapolated' | 'no-data';
+  /**
+   * Quality of the returned value (absent = Good / no data):
+   * `exact` inherits the stored point's flag; `interpolated` uses the worse severity of the two
+   * neighbors with `source = Interpolated` (`0x20`); `extrapolated` inherits the source point.
+   */
+  quality?: number;
 }
 
 /** Engine options (all config items for Form A library integration; the key mapping for Form B is in Detailed Design §6.2) */
@@ -141,6 +152,13 @@ export interface EngineOptions {
   walEnabled?: boolean;
   /** Default 'wal': group fsync after WAL append */
   fsyncPolicy?: 'wal' | 'none';
+  /**
+   * Which quality levels are persisted (buffer -> WAL -> segment); default `'all'` (Good / Uncertain / Bad).
+   * A per-database `{database}/quality.json` overrides it (Storage Design §3.1.5).
+   */
+  qualityStore?: QualityStorePolicy;
+  /** Behavior below the store threshold: `'reject'` (default, whole batch fails) or `'drop'` (counted, not stored) */
+  qualityOnReject?: QualityOnReject;
 }
 
 /** Engine defaults (item-by-item consistent with the authoritative table in Detailed Design §6.2) */
@@ -158,6 +176,8 @@ export const ENGINE_DEFAULTS = {
   cacheFdGroups: 32,
   walEnabled: true,
   fsyncPolicy: 'wal',
+  qualityStore: 'all',
+  qualityOnReject: 'reject',
 } as const;
 
 /** Container-level clamps (Detailed Design §6.2.2 / §6.5: out-of-range values are always clamped + WARN, startup is not blocked) */

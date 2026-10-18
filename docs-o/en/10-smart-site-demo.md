@@ -26,7 +26,7 @@ rtdb only has `database → metric → point`; it has no tag dimension, so the S
 | `dataType` = `int` / `int32` | `i64` (JSON write: decimal string + `"vt": 2`) |
 | `dataType` = `bool` | `bool` |
 | `dataType` = `string` | `string` |
-| Influx `quality` (0–100) | rtdb v0.1.0 only accepts `q=0` (omitted = good); non-zero returns `400 E_INVALID_POINT` |
+| Influx `quality` (0–100) | rtdb uses a u8 bit-field quality flag (omitted = `0x00` = good); this demo does not send `q` yet |
 | `dev_data_tags.scanRate` (usually 1000 ms) | `--interval` (default 1000 ms); `--points-per-tick` / `--rate` add more samples to the same window |
 | `dev_data_tags.unit` / `name` | Shown by `--list` only (rtdb stores neither) |
 
@@ -36,10 +36,12 @@ Notes:
   separated), so the same tag can be matched one-to-one across Smart Site and rtdb.
 - **Value types lock on first write**: every catalog tag has a fixed type (f64 / i64 / bool /
   string) and the simulator never changes it, avoiding `E_TYPE_MISMATCH`.
-- **Quality flags are not usable in v0.1.0**: Smart Site uses a 0–100 ratio, rtdb a u8 flag where
-  `0` = good; the current version (M0) **rejects any non-zero quality** (`400 E_INVALID_POINT`) to
-  avoid silent loss. The simulator therefore only repeats the previous sample (stale) on a simulated
-  communication fault and never sends `q`.
+- **The simulator sends no quality flag**: Smart Site uses a 0–100 ratio, rtdb a u8 bit-field flag
+  (`0x00` = good); the engine accepts non-zero flags and lets `quality.store` / `quality.onReject`
+  decide whether they are persisted or rejected (see [06 — Embedded engine](./06-embedded-engine.md) §2
+  and [11 — Storage format](./11-segment-format.md) §2.2). The simulator still only repeats the
+  previous sample (stale) on a simulated communication fault and sends no `q`; the quality mapping is
+  left for a later version.
 
 ---
 
@@ -320,7 +322,7 @@ The body printed by `--dry-run` is exactly what is sent
 
 - `t` is a millisecond epoch and `vt` the type marker (`1`=f64, `2`=i64, `3`=bool, `4`=string);
 - i64 **must** travel as a decimal string so JSON numbers cannot lose precision;
-- no quality flag is sent: v0.1.0 only accepts `q=0` (omitted = good) and rejects non-zero values.
+- no quality flag is sent (this demo's choice): omitting `q` means `0x00` = good.
 
 ---
 
@@ -372,7 +374,8 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | `401 E_AUTH` after `--token rtdb.token` | `--token` takes the token **value**, not a file path (it is sent as the bearer token as-is and **overrides** the config `tokenFile`) | Use `--token-file rtdb.token`, or `--token <64-char value>`; identical file names do not mean identical tokens — the demo server uses `packages\demo\conf\rtdb.token`, the SEA release (`release\sea\rtdb-server.exe`) uses `release\sea\rtdb.token` |
 | `--url` connection failure | Server not running or a different port | Start `rtdb-server` and check the port |
 | `E_TYPE_MISMATCH` | The metric already exists with another value type | Use another `--db`, or clear that database and rerun |
-| `400 E_INVALID_POINT ... quality=…` | A non-zero quality flag was written (unsupported in v0.1.0) | Omit `q`; this demo never sends a quality flag |
+| `400 E_INVALID_POINT ... Illegal quality flag` | `q` is not an integer `0..255` | Send a valid u8 flag, or omit `q` |
+| `400 E_QUALITY_REJECTED` | Quality is below the database/global `quality.store` threshold with `onReject='reject'` | Omit `q`, relax `quality.store`, or switch to `onReject='drop'` |
 | `--db` rejected | Database names cannot contain `-` and similar characters | Use letters, digits and underscores, e.g. `smartfactory_demo` |
 | `--list` reports an unknown device | Typo in `--devices` | Run `--list` to see the available device codes |
 | `exceed the catalog capacity` at startup | Points per batch exceed `metricCount × interval` | Raise `--interval`, raise `--metrics`, lower `--points-per-tick`, or use fewer `--devices` |
@@ -399,3 +402,4 @@ curl -X POST "http://127.0.0.1:6180/api/v1/query/last" \
 | 2026-10-17 | §6 troubleshooting covers `--token rtdb.token` → `401 E_AUTH` (`--token` takes the value and overrides the config `tokenFile`; the demo instance and the SEA release use different token files); the client now warns when `--token` looks like a path and the 401 hint explains the precedence | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §3.5 and `bin\demo-smart-site.bat` add **large-volume** examples (`--rate 20000 --duration 60 --verify`, `--points-per-tick 5000 --total-points 1000000`, `dry --points-per-tick 5000`), plus the capacity bound and a measured 21,823 points/s run | DeepSeek-V4.1-Flash |
 | 2026-10-18 | New §3.3.1 **variable-count mode** `--metrics <n>` (and config key `metrics`): the catalog is replicated with a `#k` metric-name suffix (1000 / 3000 / 6000 / 10000 variables = 44 tags × 23/69/137/228), each replica an independent signal stream with its own `counter.rateFrom` group; `bin\start-demo-server.bat` gains the `vars <pts/s> <seconds>` ladder (one `perf_vars_<count>` database per point) and `bench … --metrics` forwarding | Step-5-Preview |
+| 2026-10-18 | Quality wording aligned with the implementation: the engine now accepts u8 quality flags with `quality.store` / `quality.onReject` storage policies while the simulator still sends no `q`; §6 troubleshooting gains `E_QUALITY_REJECTED` and illegal-quality rows | DeepSeek-V4.1-Flash |

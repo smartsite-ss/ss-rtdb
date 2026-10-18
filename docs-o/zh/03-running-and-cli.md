@@ -167,6 +167,7 @@ memory.heapPercent: 45.39 %
 write.pointsPerSec: 51,230
 write.buffered: 0
 write.duplicates: 13
+write.qualityDropped: 0
 write.tagsIgnored: 0
 wal.pendingBytes: 0 B
 wal.outstandingBatches: 0
@@ -340,3 +341,4 @@ systemctl start ss-rtdb
 | 2026-10-17 | 新增「交互式控制台按键」：`q` 安全退出、`r` 安全重启（就地重读配置），仅 TTY 生效 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §2.2 命令表与 §2.6 `backup` 新增 `--from` / `--to` 时间段参数（只复制范围内日目录、写 `manifest.json`、还原时按天合并） | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §2.4 `status` 输出新增 `cpu.percent`、`cpu.systemPercent`、`memory.rssMb`、`memory.systemPercent`、`memory.heapPercent`，并补充单核百分比与整机占比的口径说明 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §2.4 `status` 输出新增 `write.qualityDropped`（质量落盘策略丢弃的点数） | DeepSeek-V4.1-Flash |

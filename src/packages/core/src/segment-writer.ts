@@ -60,11 +60,12 @@ import {
   BLOCK_FLAG,
   BLOCK_RECEIVED_WINDOW_SIZE,
   SEGMENT_HEADER_FLAG,
-  blockDataCrc32WithReceived,
+  blockDataCrc32Full,
   dateNumberFromTimestamp,
   encodeBlockHeader,
 } from './format.ts';
 import { BufferPool } from './pool.ts';
+import { QUALITY, requireQualityValue } from './quality.ts';
 import type { SealedSegment, SegmentStore } from './segment-store.ts';
 import { ENGINE_DEFAULTS, VALUE_TYPE_NAME, ValueType, WRITE_LIMITS, clampEngineOption } from './types.ts';
 import type { Point, WritePoint } from './types.ts';
@@ -115,6 +116,8 @@ interface MetricBuffer {
   valueType: ValueType;
   timestamps: number[];
   values: Array<Point['value']>;
+  /** u8 quality flags parallel to `timestamps` / `values` (0 = Good) */
+  qualities: number[];
   bytes: number;
   /**
    * Server receive-time window of the points currently buffered (ms epoch; null = no points tracked
@@ -128,6 +131,8 @@ interface MetricBuffer {
 
 /** Base point memory usage estimate (timestamp number slot) */
 const TIMESTAMP_COST_BYTES = 8;
+/** Quality flag slot per buffered point (u8; also the on-disk cost when the block carries a quality array) */
+const QUALITY_COST_BYTES = 1;
 /** string value memory baseline (rough overhead of the object header + length field, etc.) */
 const STRING_BASE_COST_BYTES = 16;
 /** Bytes per UTF-16 code unit (a JS string is measured internally at 2 bytes/unit) */
@@ -239,6 +244,7 @@ export class SegmentWriter {
       const buffer = this.requireBuffer(point.metricName, batchValueTypes);
       buffer.timestamps.push(point.timestamp);
       buffer.values.push(point.value);
+      buffer.qualities.push(point.quality ?? QUALITY.good);
       buffer.bytes += pointCostBytes(buffer.valueType, point.value);
       if (buffer.receivedMin === null) buffer.receivedMin = receivedAt;
       buffer.receivedMax = receivedAt;
@@ -391,7 +397,11 @@ export class SegmentWriter {
     if (buffer === undefined) return [];
     const points: Point[] = new Array(buffer.timestamps.length);
     for (let index = 0; index < buffer.timestamps.length; index += 1) {
-      points[index] = { timestamp: buffer.timestamps[index], value: buffer.values[index] };
+      const quality = buffer.qualities[index] ?? QUALITY.good;
+      points[index] =
+        quality === QUALITY.good
+          ? { timestamp: buffer.timestamps[index], value: buffer.values[index] }
+          : { timestamp: buffer.timestamps[index], value: buffer.values[index], quality };
     }
     points.sort((left, right) => left.timestamp - right.timestamp);
     return points;
@@ -494,6 +504,7 @@ export class SegmentWriter {
       valueType,
       timestamps: [],
       values: [],
+      qualities: [],
       bytes: 0,
       receivedMin: null,
       receivedMax: null,
@@ -537,6 +548,7 @@ export class SegmentWriter {
   private commitBlock(buffer: MetricBuffer, count: number, result: WriterFlushResult): void {
     const timestamps = buffer.timestamps.splice(0, count);
     const values = buffer.values.splice(0, count);
+    const qualities = buffer.qualities.splice(0, count);
     let releasedBytes = 0;
     for (const value of values) releasedBytes += pointCostBytes(buffer.valueType, value);
     buffer.bytes -= releasedBytes;
@@ -553,6 +565,7 @@ export class SegmentWriter {
       buffer.valueType,
       timestamps,
       values,
+      qualities,
       receivedMin,
       receivedMax,
     );
@@ -630,13 +643,9 @@ function validateWritePoint(point: WritePoint, index: number): ValueType {
       throw new RtdbError(ERROR_CODE.Internal, `Unknown value type: ${String(valueType)}`);
   }
 
-  // M0 decision (00-pre-development confirmation checklist §2.2): all-zero quality is not persisted; non-zero quality is explicitly rejected until the enum table is finalized (to avoid silent loss)
-  if (point.quality !== undefined && point.quality !== 0) {
-    throw new RtdbError(
-      ERROR_CODE.InvalidPoint,
-      `M0 only supports quality 0 (all-zero is not persisted); received quality=${String(point.quality)} (index=${index})`,
-    );
-  }
+  // Quality is a u8 bit field (Storage Design §3.1); the store/reject policy is applied by the engine, so the
+  // writer only rejects values outside 0..255 (a bad batch fails as a whole with the point index).
+  requireQualityValue(point.quality, index);
 
   return valueType;
 }
@@ -704,15 +713,18 @@ function pointCostBytes(valueType: ValueType, value: Point['value']): number {
   switch (valueType) {
     case ValueType.Float64:
     case ValueType.Int64:
-      return TIMESTAMP_COST_BYTES + 8;
+      return TIMESTAMP_COST_BYTES + QUALITY_COST_BYTES + 8;
     case ValueType.Bool:
-      return TIMESTAMP_COST_BYTES + 1;
+      return TIMESTAMP_COST_BYTES + QUALITY_COST_BYTES + 1;
     case ValueType.String:
       return (
-        TIMESTAMP_COST_BYTES + STRING_BASE_COST_BYTES + (value as string).length * UTF16_BYTES_PER_CODE_UNIT
+        TIMESTAMP_COST_BYTES +
+        QUALITY_COST_BYTES +
+        STRING_BASE_COST_BYTES +
+        (value as string).length * UTF16_BYTES_PER_CODE_UNIT
       );
     default:
-      return TIMESTAMP_COST_BYTES + 8;
+      return TIMESTAMP_COST_BYTES + QUALITY_COST_BYTES + 8;
   }
 }
 
@@ -741,6 +753,7 @@ function encodeSegmentBlock(
   valueType: ValueType,
   unsortedTimestamps: readonly number[],
   unsortedValues: readonly Point['value'][],
+  unsortedQualities: readonly number[],
   receivedMin: number,
   receivedMax: number,
 ): EncodedSegmentBlock {
@@ -749,7 +762,7 @@ function encodeSegmentBlock(
     throw new RtdbError(ERROR_CODE.Internal, `The block point count cannot be 0: metric=${metricName}`);
   }
 
-  const sorted = sortByTimestamp(unsortedTimestamps, unsortedValues);
+  const sorted = sortByTimestamp(unsortedTimestamps, unsortedValues, unsortedQualities);
   const timestampEncoded = encodeTimestamps(sorted.timestamps, count);
   const encodedValues = encodeValues(
     valueType,
@@ -757,7 +770,20 @@ function encodeSegmentBlock(
     count,
   );
 
-  // Server receive-time window: 16B appended after BlockData (flag bit3), included in the CRC scope
+  // Quality array: appended only when at least one point is not Good (flag bit2), one u8 per point in
+  // timestamp order. All-Good blocks keep the exact pre-quality byte layout (zero storage cost).
+  let qualityBytes: Uint8Array | null = null;
+  for (let index = 0; index < count; index += 1) {
+    if (sorted.qualities[index] !== QUALITY.good) {
+      qualityBytes = new Uint8Array(count);
+      for (let flagIndex = 0; flagIndex < count; flagIndex += 1) {
+        qualityBytes[flagIndex] = sorted.qualities[flagIndex] ?? QUALITY.good;
+      }
+      break;
+    }
+  }
+
+  // Server receive-time window: 16B appended after BlockData/quality (flag bit3), included in the CRC scope
   const receivedBytes = new Uint8Array(BLOCK_RECEIVED_WINDOW_SIZE);
   const receivedView = new DataView(receivedBytes.buffer);
   receivedView.setBigInt64(0, BigInt(Math.trunc(receivedMin)), true);
@@ -775,12 +801,16 @@ function encodeSegmentBlock(
     valueRawLength: encodedValues.payload.length,
     timestampMin,
     timestampMax,
-    flags: BLOCK_FLAG.receivedTime,
-    crc32: blockDataCrc32WithReceived(timestampEncoded, encodedValues.payload, receivedBytes),
+    flags: BLOCK_FLAG.receivedTime | (qualityBytes === null ? 0 : BLOCK_FLAG.qualityPresent),
+    crc32: blockDataCrc32Full(timestampEncoded, encodedValues.payload, qualityBytes, receivedBytes),
   });
 
+  const blockParts: Uint8Array[] = [blockHeader, timestampEncoded, encodedValues.payload];
+  if (qualityBytes !== null) blockParts.push(qualityBytes);
+  blockParts.push(receivedBytes);
+
   return {
-    blockBytes: concatBytes(pool, [blockHeader, timestampEncoded, encodedValues.payload, receivedBytes]),
+    blockBytes: concatBytes(pool, blockParts),
     pointCount: count,
     timestampMin,
     timestampMax,
@@ -788,23 +818,26 @@ function encodeSegmentBlock(
   };
 }
 
-/** Stable ascending sort of block timestamps (equal timestamps keep write order) */
+/** Stable ascending sort of block timestamps (equal timestamps keep write order; quality flags follow) */
 function sortByTimestamp(
   timestamps: readonly number[],
   values: readonly Point['value'][],
-): { timestamps: number[]; values: Array<Point['value']> } {
+  qualities: readonly number[],
+): { timestamps: number[]; values: Array<Point['value']>; qualities: number[] } {
   const order = new Array<number>(timestamps.length);
   for (let index = 0; index < timestamps.length; index += 1) order[index] = index;
   order.sort((left, right) => timestamps[left] - timestamps[right]);
 
   const sortedTimestamps = new Array<number>(timestamps.length);
   const sortedValues = new Array<Point['value']>(timestamps.length);
+  const sortedQualities = new Array<number>(timestamps.length);
   for (let index = 0; index < order.length; index += 1) {
     const source = order[index];
     sortedTimestamps[index] = timestamps[source];
     sortedValues[index] = values[source];
+    sortedQualities[index] = qualities[source] ?? QUALITY.good;
   }
-  return { timestamps: sortedTimestamps, values: sortedValues };
+  return { timestamps: sortedTimestamps, values: sortedValues, qualities: sortedQualities };
 }
 
 /** Buffered values -> encoder input container (four narrow types, avoiding the encoder doing Number/BigInt round-trips point by point) */

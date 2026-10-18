@@ -607,6 +607,7 @@ export class RtdbServer {
         pointsPerSec: stats.write.pointsPerSec,
         buffered: stats.write.bufferedPoints,
         duplicates: stats.write.duplicatePoints,
+        qualityDropped: stats.write.qualityDropped,
         tagsIgnored: this.tagsIgnoredCount,
       },
       wal: {

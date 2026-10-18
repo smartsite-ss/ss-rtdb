@@ -171,6 +171,7 @@ memory.heapPercent: 45.39 %
 write.pointsPerSec: 51,230
 write.buffered: 0
 write.duplicates: 13
+write.qualityDropped: 0
 write.tagsIgnored: 0
 wal.pendingBytes: 0 B
 wal.outstandingBatches: 0
@@ -348,3 +349,4 @@ systemctl start ss-rtdb
 | 2026-10-17 | Added "Interactive console keys": `q` = graceful shutdown, `r` = safe restart that re-reads the configuration in place (TTY only) | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §2.2 command table and §2.6 `backup` gain `--from` / `--to` (copy only the day directories in range, write `manifest.json`, restore merges by day) | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §2.4 `status` output gains `cpu.percent`, `cpu.systemPercent`, `memory.rssMb`, `memory.systemPercent` and `memory.heapPercent`, with the single-core vs machine-share wording | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §2.4 `status` output gains `write.qualityDropped` (points discarded by the quality store policy) | DeepSeek-V4.1-Flash |

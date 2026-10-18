@@ -50,6 +50,8 @@ their default:
   "archiveDir": "",
   "archiveBeforeDelete": false,
 
+  "quality": { "store": "all", "onReject": "reject" },
+
   "auth": {
     "enabled": true,
     "mode": "token",
@@ -107,6 +109,8 @@ RTDB_CONFIG=/etc/rtdb/rtdb.config.json npm start --workspace @ss/rtdb-server
 | `retentionDays` | `0` | Global default retention in days; `0` = keep forever. Per-database override wins. |
 | `archiveDir` | `""` | Cold-archive destination; empty = `{dataDir}/archive`. Must be on the same volume. |
 | `archiveBeforeDelete` | `false` | Pack an expiring day directory into `tar.gz` before deleting it. |
+| `quality.store` | `all` | Quality store threshold: `all` (Good/Uncertain/Bad all stored) \| `good-uncertain` (drop Bad) \| `good` (Good only). A per-database `{database}/quality.json` (e.g. `{"store":"good"}`) wins. |
+| `quality.onReject` | `reject` | Below the threshold: `reject` fails the batch with `400 E_QUALITY_REJECTED`; `drop` accepts the request but discards the point, counting it only in `write.qualityDropped`. |
 | `auth.enabled` | `true` | Master authentication switch. |
 | `auth.mode` | `token` | `token` \| `basic` \| `both`. |
 | `auth.token` | `""` | Static bearer token. Empty → read/generate `auth.tokenFile`. |
@@ -191,6 +195,8 @@ The compatibility layer is a **side adapter**: it never changes the `/api/v1/*` 
 | `RTDB_HOST` | `host` |
 | `RTDB_DATA_DIR` | `dataDir` |
 | `RTDB_RETENTION_DAYS` | `retentionDays` |
+| `RTDB_QUALITY_STORE` | `quality.store` |
+| `RTDB_QUALITY_ON_REJECT` | `quality.onReject` |
 | `RTDB_AUTH_ENABLED` | `auth.enabled` (`true`/`1`, `false`/`0`) |
 | `RTDB_TOKEN` | `auth.token` |
 | `RTDB_AUTH_USERNAME` | `auth.username` |
@@ -341,3 +347,4 @@ curl -X POST http://127.0.0.1:6180/api/v1/auth/login \
 | 2026-10-17 | Documented the runtime `conf/rtdb-server.json` (auto-loaded from the working directory, shipped by the repository and the release package) and `admin.exposePaths` with `RTDB_ADMIN_EXPOSE_PATHS` | DeepSeek-V4.1-Flash |
 | 2026-10-17 | `admin.exposePaths` now defaults to `false`: the reported database directory is relative to the working directory; `true` opts into the absolute path | DeepSeek-V4.1-Flash |
 | 2026-10-18 | Added the §3 "Compatibility layer (`compat.influx`)" block: 12 configuration keys and 12 `RTDB_COMPAT_INFLUX_*` environment variables (write compatibility on by default, InfluxQL `read-only`, tag/field folding, precision and the no-cross-request-overwrite caveat) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | Added `quality.store` / `quality.onReject` (with the per-database `quality.json` override) and the `RTDB_QUALITY_STORE` / `RTDB_QUALITY_ON_REJECT` environment variables | DeepSeek-V4.1-Flash |

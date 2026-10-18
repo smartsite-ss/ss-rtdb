@@ -427,9 +427,9 @@ describe('segment-writer: 整批校验', () => {
       /exceeds the 256B UTF-8 limit/,
     );
     expect(
-      [{ metricName: 'm', timestamp: base, value: 1, quality: 1 }],
+      [{ metricName: 'm', timestamp: base, value: 1, quality: 256 }],
       ERROR_CODE.InvalidPoint,
-      /supports quality 0/,
+      /Illegal quality flag/,
     );
     expect(
       [{ metricName: 'm', timestamp: base, value: null as unknown as number }],

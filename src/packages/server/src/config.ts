@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import { ERROR_CODE, RtdbError } from '../../core/src/errors.ts';
+import type { QualityOnReject, QualityStorePolicy } from '../../core/src/quality.ts';
 import type { EngineOptions } from '../../core/src/types.ts';
 import { isAuthMode } from './auth.ts';
 import type { AuthMode } from './auth.ts';
@@ -122,6 +123,11 @@ export interface ServerConfig {
   retentionDays: number;
   archiveDir: string;
   archiveBeforeDelete: boolean;
+  /** Quality store policy of the write path (Storage Design §3.1.5; per-database `quality.json` overrides `store`) */
+  quality: {
+    store: QualityStorePolicy;
+    onReject: QualityOnReject;
+  };
   auth: AuthConfig;
   admin: AdminConfig;
   cors: CorsConfig;
@@ -174,6 +180,7 @@ export const SERVER_CONFIG_DEFAULTS: ServerConfig = {
   retentionDays: 0,
   archiveDir: '',
   archiveBeforeDelete: false,
+  quality: { store: 'all', onReject: 'reject' },
   auth: {
     enabled: true,
     mode: 'token',
@@ -284,6 +291,8 @@ function applyEnvironment(raw: JsonObject, env: NodeJS.ProcessEnv): void {
   setStringAt(raw, ['host'], env.RTDB_HOST);
   setStringAt(raw, ['dataDir'], env.RTDB_DATA_DIR);
   setNumberAt(raw, ['retentionDays'], env.RTDB_RETENTION_DAYS);
+  setStringAt(raw, ['quality', 'store'], env.RTDB_QUALITY_STORE);
+  setStringAt(raw, ['quality', 'onReject'], env.RTDB_QUALITY_ON_REJECT);
   setBooleanAt(raw, ['auth', 'enabled'], env.RTDB_AUTH_ENABLED);
   setStringAt(raw, ['auth', 'token'], env.RTDB_TOKEN);
   setStringAt(raw, ['auth', 'username'], env.RTDB_AUTH_USERNAME);
@@ -316,6 +325,7 @@ function applyEnvironment(raw: JsonObject, env: NodeJS.ProcessEnv): void {
 function normalizeServerConfig(raw: JsonObject): ServerConfig {
   const defaults = SERVER_CONFIG_DEFAULTS;
   const auth = readObject(raw, 'auth');
+  const quality = readObject(raw, 'quality');
   const admin = readObject(raw, 'admin');
   const cors = readObject(raw, 'cors');
   const compat = readObject(raw, 'compat');
@@ -336,6 +346,13 @@ function normalizeServerConfig(raw: JsonObject): ServerConfig {
     retentionDays: asInteger(raw.retentionDays, defaults.retentionDays),
     archiveDir: asString(raw.archiveDir, defaults.archiveDir),
     archiveBeforeDelete: asBoolean(raw.archiveBeforeDelete, defaults.archiveBeforeDelete),
+    quality: {
+      store:
+        quality.store === 'all' || quality.store === 'good-uncertain' || quality.store === 'good'
+          ? quality.store
+          : defaults.quality.store,
+      onReject: quality.onReject === 'drop' ? 'drop' : defaults.quality.onReject,
+    },
     auth: {
       enabled: asBoolean(auth.enabled, defaults.auth.enabled),
       mode: isAuthMode(mode) ? mode : defaults.auth.mode,
@@ -468,6 +485,8 @@ export function toEngineOptions(config: ServerConfig): EngineOptions {
     retentionDays: config.retentionDays,
     archiveBeforeDelete: config.archiveBeforeDelete,
     archiveDir: config.archiveDir.length > 0 ? config.archiveDir : undefined,
+    qualityStore: config.quality.store,
+    qualityOnReject: config.quality.onReject,
     segmentMaxBytes: config.storage.segment.maxBytes,
     segmentMaxPerDay: config.storage.segment.maxPerDay,
     blockTargetPoints: config.write.blockTargetPoints,

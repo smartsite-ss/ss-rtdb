@@ -248,6 +248,39 @@ describe('server: JSON 写入与 i64 vt 协议', () => {
     }
   });
 
+  it('quality below the store threshold returns 400 E_QUALITY_REJECTED with the point index', async () => {
+    const { server, baseUrl } = await startTestServer({ quality: { store: 'good', onReject: 'reject' } });
+    try {
+      const response = await postJson(baseUrl, '/api/v1/write?db=quality', [
+        { metricName: 'm', t: BASE, v: 1 },
+        { metricName: 'm', t: BASE + 1, v: 2, q: 0x82 },
+      ]);
+      assert.equal(response.status, 400);
+      const body = (await response.json()) as { error: string; message: string };
+      assert.equal(body.error, ERROR_CODE.QualityRejected);
+      assert.match(body.message, /index=1/);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('quality onReject=drop counts discarded points in /status write.qualityDropped', async () => {
+    const { server, baseUrl } = await startTestServer({ quality: { store: 'good', onReject: 'drop' } });
+    try {
+      const response = await postJson(baseUrl, '/api/v1/write?db=quality', [
+        { metricName: 'm', t: BASE, v: 1, q: 0x82 },
+      ]);
+      const result = (await response.json()) as { accepted: number; duplicates: number };
+      assert.equal(result.accepted, 0);
+
+      const status = await fetch(`${baseUrl}/api/v1/status`);
+      const statusBody = (await status.json()) as { write: { qualityDropped: number } };
+      assert.equal(statusBody.write.qualityDropped, 1);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it('JSON body 含非法点时返回 400 E_INVALID_POINT 且 details 携带索引', async () => {
     const { server, baseUrl } = await startTestServer();
     try {
@@ -1912,6 +1945,7 @@ const EXPECTED_PROMETHEUS_METRIC_NAMES = [
   'rtdb_write_points_per_second',
   'rtdb_write_buffered_points',
   'rtdb_write_duplicate_points_total',
+  'rtdb_write_quality_dropped_total',
   'rtdb_write_tags_ignored_total',
   'rtdb_wal_pending_bytes',
   'rtdb_wal_outstanding_batches',
@@ -2024,7 +2058,7 @@ describe('server: Prometheus /metrics 与 /healthz（S14）', () => {
       uptimeMs: 12_500,
       databases: 3,
       metrics: 10,
-      write: { acceptedPoints: 0, bufferedPoints: 7, duplicatePoints: 2, pointsPerSec: 0 },
+      write: { acceptedPoints: 0, bufferedPoints: 7, duplicatePoints: 2, qualityDropped: 0, pointsPerSec: 0 },
       wal: { pendingBytes: 100, outstandingBatches: 1, pendingPoints: 5, lastFsyncMs: 2_000 },
       segments: { openFiles: 4, bytesToday: 1_000 },
       cpu: { percent: 12.5, systemPercent: 1.25, userMs: 1_500, systemMs: 500 },

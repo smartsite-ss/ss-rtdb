@@ -6,6 +6,11 @@
   "archiveDir": "",
   "archiveBeforeDelete": false,
 
+  "quality": {
+    "store": "all",
+    "onReject": "reject"
+  },
+
   "auth": {
     "enabled": true,
     "mode": "token",

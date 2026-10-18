@@ -47,6 +47,16 @@ import { PerformanceObserver } from 'node:perf_hooks';
 
 import { ERROR_CODE, RtdbError } from './errors.ts';
 import {
+  QUALITY,
+  QUALITY_SOURCE,
+  composeQuality,
+  isQualityStored,
+  normalizeQualityPolicy,
+  qualityReasonOf,
+  qualitySeverityOf,
+} from './quality.ts';
+import type { QualityOnReject, QualitySeverity, QualityStorePolicy } from './quality.ts';
+import {
   dateNumberFromTimestamp,
   formatDateFolderName,
   nextDayTimestampFromDateNumber,
@@ -113,6 +123,9 @@ const DAY_MS = 86_400_000;
 
 /** Per-database retention policy file name (listed under the database directory, atomically written by `setRetention`; §6.2.1) */
 export const RETENTION_FILE_NAME = 'retention.json';
+
+/** Per-database quality store policy file name (`{"store":"good"}`; overrides the global `quality.store`, Storage Design §3.1.5) */
+export const QUALITY_FILE_NAME = 'quality.json';
 
 /**
  * Backup manifest file name (only written by range backups)
@@ -187,6 +200,8 @@ export interface EngineStats {
     bufferedPoints: number;
     /** Duplicate points silently discarded this session */
     duplicatePoints: number;
+    /** Points discarded by the quality store policy this session (`quality.onReject='drop'` only) */
+    qualityDropped: number;
     /** Session-average accepted points per second (`acceptedPoints` / seconds since the first write; 0 before it) */
     pointsPerSec: number;
   };
@@ -397,6 +412,10 @@ export class RtdbEngine {
   readonly archiveDir: string;
   /** Whether to archive each whole day as tar.gz before expiration deletion */
   readonly archiveBeforeDelete: boolean;
+  /** Global quality store threshold (already normalized; per-database `quality.json` overrides it) */
+  readonly qualityStore: QualityStorePolicy;
+  /** Behavior below the store threshold: `'reject'` the whole batch or `'drop'` the affected points */
+  readonly qualityOnReject: QualityOnReject;
 
   private readonly store: SegmentStore;
   private readonly reader: SegmentReader;
@@ -406,6 +425,8 @@ export class RtdbEngine {
   private readonly contexts = new Map<string, DatabaseContext>();
   /** Per-database retention overrides (read from `retention.json`; used by the S7 retention sweep path) */
   private readonly retentionByDatabase = new Map<string, number>();
+  /** Per-database quality store overrides (read from `quality.json`; `store` only, `onReject` stays global) */
+  private readonly qualityStoreByDatabase = new Map<string, QualityStorePolicy>();
 
   private flushTimer: NodeJS.Timeout | null = null;
   /** A sliced flush sweep is in progress (a tick that lands mid-sweep is skipped, not queued) */
@@ -415,6 +436,7 @@ export class RtdbEngine {
   private openedAt = 0;
   private acceptedPointCount = 0;
   private duplicatePointCount = 0;
+  private qualityDroppedPointCount = 0;
   /** Epoch ms of the first write this session (0 = no write yet; base of `write.pointsPerSec`) */
   private firstWriteEpochMs = 0;
   /** GC observation (perf_hooks; disconnected on `close()`); cumulative over this open session */
@@ -458,6 +480,13 @@ export class RtdbEngine {
     this.fsyncPolicy = options.fsyncPolicy ?? ENGINE_DEFAULTS.fsyncPolicy;
     this.archiveBeforeDelete = options.archiveBeforeDelete ?? ENGINE_DEFAULTS.archiveBeforeDelete;
     this.archiveDir = resolve(options.archiveDir ?? join(this.dataDir, ARCHIVE_DIRECTORY_NAME));
+    // Unknown values fall back to the defaults (same loose parser the server config uses; Storage Design §3.1.5)
+    const qualityPolicy = normalizeQualityPolicy({
+      store: options.qualityStore ?? ENGINE_DEFAULTS.qualityStore,
+      onReject: options.qualityOnReject ?? ENGINE_DEFAULTS.qualityOnReject,
+    });
+    this.qualityStore = qualityPolicy.store;
+    this.qualityOnReject = qualityPolicy.onReject;
 
     this.store = new SegmentStore({
       dataDir: this.dataDir,
@@ -503,6 +532,7 @@ export class RtdbEngine {
         if (databaseReport.replayedEntries.length > 0) this.replayDatabase(databaseReport);
       }
       this.loadRetentionOverrides();
+      this.loadQualityOverrides();
       this.flushTimer = setInterval(() => this.runFlushTimer(), this.flushIntervalMs);
       this.flushTimer.unref();
       this.retentionTimer = setInterval(() => this.runRetentionTimer(), RETENTION_SWEEP_INTERVAL_MS);
@@ -574,8 +604,8 @@ export class RtdbEngine {
    * Write a batch of points (the only write entry point besides the four primitives)
    *
    * Order is as in the file header; any failure of `E_INVALID_POINT` / `E_TYPE_MISMATCH` / `E_RATE_LIMITED`
-   * **rejects the whole batch and does not append to the WAL**.
-   * Returns `accepted` = points actually buffered (after dedupe).
+   * / `E_QUALITY_REJECTED` **rejects the whole batch and does not append to the WAL**.
+   * Returns `accepted` = points actually buffered (after the quality store policy and dedupe).
    */
   async writeBatch(database: string, points: WritePoint[]): Promise<{ accepted: number }> {
     this.requireOpen();
@@ -584,13 +614,16 @@ export class RtdbEngine {
     const context = this.requireContext(database);
     // 1. Whole-batch validation + two-watermark backpressure (zero state change; a rejected batch never enters the WAL)
     context.writer.checkBatch(points);
-    // 2. In-batch (metric, ts) dedupe (keep the first)
-    const { points: deduped, duplicateCount } = dedupeBatch(points);
-    // 3. WAL append (consistency point)
+    // 2. Quality store policy (below-threshold points are rejected as a batch or dropped before the WAL)
+    const stored = this.applyQualityPolicy(database, points);
+    if (stored.length === 0) return { accepted: 0 };
+    // 3. In-batch (metric, ts) dedupe (keep the first)
+    const { points: deduped, duplicateCount } = dedupeBatch(stored);
+    // 4. WAL append (consistency point)
     const receipt = context.wal.append(deduped);
-    // 4. Buffer + block formation
+    // 5. Buffer + block formation
     const result = context.writer.append(deduped);
-    // 5. Batch ledger -> completion decision -> safe point
+    // 6. Batch ledger -> completion decision -> safe point
     this.recordBatch(context, receipt.batchId, deduped);
     this.duplicatePointCount += duplicateCount;
     this.acceptedPointCount += result.accepted;
@@ -1066,6 +1099,7 @@ export class RtdbEngine {
         acceptedPoints: this.acceptedPointCount,
         bufferedPoints,
         duplicatePoints: this.duplicatePointCount,
+        qualityDropped: this.qualityDroppedPointCount,
         pointsPerSec: this.sessionPointsPerSecond(),
       },
       wal: {
@@ -1189,7 +1223,7 @@ export class RtdbEngine {
       sourceDirectory,
       targetDirectory,
       dateNumbers: days,
-      rootFileNames: [RETENTION_FILE_NAME],
+      rootFileNames: [RETENTION_FILE_NAME, QUALITY_FILE_NAME],
     });
     const effectiveStart = startDay ?? days[0];
     const effectiveEnd = endDay ?? days[days.length - 1];
@@ -1259,7 +1293,7 @@ export class RtdbEngine {
         sourceDirectory,
         targetDirectory,
         dateNumbers: manifest.days,
-        rootFileNames: [RETENTION_FILE_NAME],
+        rootFileNames: [RETENTION_FILE_NAME, QUALITY_FILE_NAME],
       });
       // The manifest is backup metadata; never let it leak into the live data root.
       try {
@@ -1660,6 +1694,78 @@ export class RtdbEngine {
     for (const database of this.store.listDatabases()) {
       const days = this.readRetentionFile(database);
       if (days !== null) this.retentionByDatabase.set(database, days);
+    }
+  }
+
+  /** Read each database's `quality.json` override (databases missing it inherit the global `quality.store`) */
+  private loadQualityOverrides(): void {
+    for (const database of this.store.listDatabases()) {
+      const store = this.readQualityFile(database);
+      if (store !== null) this.qualityStoreByDatabase.set(database, store);
+    }
+  }
+
+  /**
+   * Apply the effective quality store policy to an already validated batch.
+   *
+   * Returns the points that may enter the persistence chain. `'reject'` fails the whole batch with
+   * `E_QUALITY_REJECTED` and writes nothing; `'drop'` removes the offending points and counts them in
+   * `write.qualityDropped`. Under the default `'all'` policy the batch is returned untouched.
+   */
+  private applyQualityPolicy(database: string, points: readonly WritePoint[]): readonly WritePoint[] {
+    const store = this.qualityStoreOf(database);
+    if (store === 'all') return points;
+    const kept: WritePoint[] = [];
+    let dropped = 0;
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index];
+      const quality = point.quality ?? QUALITY.good;
+      if (isQualityStored(quality, store)) {
+        kept.push(point);
+        continue;
+      }
+      if (this.qualityOnReject === 'reject') {
+        throw new RtdbError(
+          ERROR_CODE.QualityRejected,
+          `Quality 0x${quality.toString(16).padStart(2, '0')} (severity=${qualitySeverityOf(quality)}) is below the store policy '${store}': index=${index}, metric=${JSON.stringify(point.metricName)}`,
+        );
+      }
+      dropped += 1;
+    }
+    this.qualityDroppedPointCount += dropped;
+    return kept;
+  }
+
+  /* ---------- Internal: quality policy file ---------- */
+
+  private qualityFilePath(database: string): string {
+    return join(this.store.databaseDirectoryPath(database), QUALITY_FILE_NAME);
+  }
+
+  /** Effective store policy of a database (per-database `quality.json` wins over the global default) */
+  private qualityStoreOf(database: string): QualityStorePolicy {
+    return this.qualityStoreByDatabase.get(database) ?? this.qualityStore;
+  }
+
+  /** Read a database's `quality.json`; missing / unparsable / unknown values mean "inherit the global default" */
+  private readQualityFile(database: string): QualityStorePolicy | null {
+    let text: string;
+    try {
+      text = readFileSync(this.qualityFilePath(database), 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw new RtdbError(
+        ERROR_CODE.Io,
+        `Failed to read the quality policy file: ${this.qualityFilePath(database)} (${(error as Error).message})`,
+      );
+    }
+    try {
+      const parsed = JSON.parse(text) as { store?: unknown };
+      const store = parsed.store;
+      if (store === 'all' || store === 'good-uncertain' || store === 'good') return store;
+      return null;
+    } catch {
+      return null;
     }
   }
 
@@ -2224,7 +2330,7 @@ function evaluateQueryAtPoint(
   afterLast: Point | null,
 ): AtPoint {
   if (left !== null && left.timestamp === t) {
-    return { timestamp: t, value: left.value, state: 'exact' };
+    return withPointQuality({ timestamp: t, value: left.value, state: 'exact' }, left);
   }
 
   if (mode === 'step') {
@@ -2233,22 +2339,50 @@ function evaluateQueryAtPoint(
     const source = left ?? beforeFirst;
     return source === null
       ? { timestamp: t, value: null, state: 'no-data' }
-      : { timestamp: t, value: source.value, state: 'exact' };
+      : withPointQuality({ timestamp: t, value: source.value, state: 'exact' }, source);
   }
 
   const leftNeighbor = left ?? beforeFirst;
   const rightNeighbor = right ?? afterLast;
   if (leftNeighbor !== null && rightNeighbor !== null && leftNeighbor.timestamp < t && t < rightNeighbor.timestamp) {
+    // Storage Design §3.1.6: interpolated values use the worse neighbor's severity, keep its reason,
+    // and mark the source as Interpolated (`0x20`).
+    const leftQuality = leftNeighbor.quality ?? QUALITY.good;
+    const rightQuality = rightNeighbor.quality ?? QUALITY.good;
+    const leftSeverity = effectiveQualitySeverity(leftQuality);
+    const rightSeverity = effectiveQualitySeverity(rightQuality);
+    const reasonSource = rightSeverity > leftSeverity ? rightQuality : leftQuality;
     return {
       timestamp: t,
       value: interpolateQueryAtValue(leftNeighbor, rightNeighbor, t),
       state: 'interpolated',
+      quality: composeQuality(
+        (leftSeverity > rightSeverity ? leftSeverity : rightSeverity) as QualitySeverity,
+        QUALITY_SOURCE.interpolated,
+        qualityReasonOf(reasonSource),
+      ),
     };
   }
   // Outside the data range: flat from the nearest real point ('extrapolated'); nothing at all -> no-data
-  if (leftNeighbor !== null) return { timestamp: t, value: leftNeighbor.value, state: 'extrapolated' };
-  if (rightNeighbor !== null) return { timestamp: t, value: rightNeighbor.value, state: 'extrapolated' };
+  if (leftNeighbor !== null) {
+    return withPointQuality({ timestamp: t, value: leftNeighbor.value, state: 'extrapolated' }, leftNeighbor);
+  }
+  if (rightNeighbor !== null) {
+    return withPointQuality({ timestamp: t, value: rightNeighbor.value, state: 'extrapolated' }, rightNeighbor);
+  }
   return { timestamp: t, value: null, state: 'no-data' };
+}
+
+/** Severity read by consumers: Reserved (`11`) is treated as Bad (`10`), so it never looks better than Bad */
+function effectiveQualitySeverity(quality: number): QualitySeverity {
+  const severity = qualitySeverityOf(quality);
+  return (severity === 3 ? 2 : severity) as QualitySeverity;
+}
+
+/** Attach the stored quality to a result (`0x00 = Good` is omitted, matching the JSON `q` only-when-non-zero rule) */
+function withPointQuality(result: AtPoint, point: Point): AtPoint {
+  const quality = point.quality ?? QUALITY.good;
+  return quality === QUALITY.good ? result : { ...result, quality };
 }
 
 /** Linear interpolation between two real points at `t` (i64 stays i64: rounded back to bigint) */

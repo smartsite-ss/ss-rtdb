@@ -84,6 +84,12 @@ have no JSON representation.
 Decoded results use **long field names**: `{ timestamp, value, quality? }` for points and
 `{ start, end, value, count }` for aggregate windows.
 
+`quality` is a u8 quality flag (bit layout in [11 — Storage format](./11-segment-format.md) §2.2).
+On write both SDKs forward a non-`undefined` `quality` verbatim as `q`; on read the field is present
+only when the server returns a non-zero flag (absent = `0x00` = Good). Whether a flag is persisted is
+decided by the server's `quality.store`: below the threshold it either returns `400 E_QUALITY_REJECTED`
+or drops the point (`quality.onReject`; see [02 — Configuration](./02-configuration.md#3-key-reference)).
+
 ```ts
 // range
 const series = await client.queryRange('plant_a', 'station01.powerMeter.kwh', {
@@ -307,3 +313,4 @@ Same retry policy as the Node SDK: only `429` and transport failures are retried
 | 2026-10-18 | Node SDK `backup` gains the optional day range `{ startDay, endDay }` and returns `partial` / `range` / `days`; example updated | DeepSeek-V4.1-Flash |
 | 2026-10-18 | Both SDKs gain the batch latest-point call (`queryLastBatch` → `Map<string, ClientPoint \\| null>` / `query_last_batch` → `Dict[str, Optional[Point]]`) over `POST /api/v1/query/last-batch`, keeping request order and mapping unknown metrics to `null` | Step-5-Preview |
 | 2026-10-18 | §1.5 documents the new `cpu` / `memory` fields of `StatusReport` | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §1.4 documents sending/receiving the u8 `quality` flag and the storage policy; `StatusReport.write` gains `qualityDropped` | DeepSeek-V4.1-Flash |

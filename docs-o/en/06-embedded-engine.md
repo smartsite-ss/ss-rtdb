@@ -64,6 +64,8 @@ All options are optional except `dataDir`.
 | `cacheFdGroups` | `32` | LRU entries for open segment handles. |
 | `walEnabled` | `true` | Disable only for reloadable data. |
 | `fsyncPolicy` | `wal` | `wal` = group fsync per WAL append, plus a segment fsync before the WAL safe point is advanced; `none` = rely on the OS (reloadable data only). |
+| `qualityStore` | `all` | Quality store threshold: `all` (Good/Uncertain/Bad all stored) \| `good-uncertain` (drop Bad) \| `good` (Good only). A per-database `{database}/quality.json` wins over this global value (read at startup, same style as `retention.json`). |
+| `qualityOnReject` | `reject` | Below the threshold: `reject` fails the whole batch with `E_QUALITY_REJECTED` (nothing reaches the WAL); `drop` discards the point and increments `stats.write.qualityDropped`. |
 
 Out-of-range values are clamped (see [02 — Configuration](./02-configuration.md#3-key-reference) for
 the clamp table).
@@ -77,6 +79,7 @@ const { accepted } = await rtdb.writeBatch('plant_a', [
   { metricName: 'station01.powerMeter.kwh', timestamp: Date.now(), value: 1024.5 },
   { metricName: 'station01.valve.open',     timestamp: Date.now(), value: true },
   { metricName: 'station01.pump.state',     timestamp: Date.now(), value: 'running', quality: 0 },
+  // quality is a u8 bit field (0x00 = Good; 0x82 = Bad · CommFailure); storage is decided by qualityStore
   // i64 uses bigint (or a number within ±2^53)
   { metricName: 'station01.counter.pulses', timestamp: Date.now(), value: 9007199254740991n },
 ]);
@@ -110,6 +113,8 @@ const series = await rtdb.queryRange('plant_a', 'station01.powerMeter.kwh', {
 const last = await rtdb.queryLast('plant_a', 'station01.powerMeter.kwh', { before: endMs });
 
 // at — batch point-in-time lookup (step = previous-value hold / linear = piecewise-linear; state: exact|interpolated|extrapolated|no-data)
+// Results carry quality (omitted when Good): exact/extrapolated inherit the source point; interpolated
+// takes the worse severity + source=Interpolated (0x20) + the worse point's reason
 const atPoints = await rtdb.queryAt('plant_a', 'station01.powerMeter.kwh', {
   timestamps: [startMs, startMs + 60_000], mode: 'linear',
 });
@@ -180,7 +185,7 @@ const stats = await rtdb.stats();
 | Group | Fields |
 | ----- | ------ |
 | `uptimeMs`, `databases`, `metrics` | instance scale |
-| `write` | `pointsPerSec`, `bufferedPoints`, `duplicatePoints` |
+| `write` | `pointsPerSec`, `bufferedPoints`, `duplicatePoints`, `qualityDropped` |
 | `wal` | `pendingBytes`, `pendingPoints`, `outstandingBatches`, `lastFsyncMs` |
 | `segments` | `openFiles`, `bytesToday` |
 | `cpu` | `percent` (percent of one core, may exceed 100), `systemPercent` (whole machine, 0–100), `userMs`, `systemMs` |
@@ -262,3 +267,4 @@ main()
 | 2026-10-18 | Adds `hasMetric(database, metricName)` (existence only, cached per-segment name sets); fixes `readBlockValueType` probing too few bytes, which made `listMetrics` re-probe every block of the same metric (the HTTP layer validates the metric on every query; measured ~1.4 s → ~0.15 s per endpoint) | DeepSeek-V4.1-Flash |
 | 2026-10-18 | The periodic flush fallback now runs in slices: the event loop is yielded every 2 metrics and the whole sweep performs a single segment `fsync` (measured at 20k points/s: the worst single-sweep stall dropped from ~210–275 ms to ≤58 ms; the residual jitter comes from the write batches themselves) | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §7 `stats()` gains the `cpu` / `memory` groups (process CPU and memory usage) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | Quality flags wired in: §2 gains `qualityStore` / `qualityOnReject` (with the per-database `quality.json` override); §3 describes the u8 `quality` bit field; §4 documents `queryAt` quality propagation; §7 `stats().write` gains `qualityDropped` | DeepSeek-V4.1-Flash |
