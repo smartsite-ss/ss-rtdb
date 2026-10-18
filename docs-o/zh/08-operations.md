@@ -72,8 +72,13 @@ systemctl start ss-rtdb
 ## 3. 备份
 
 ```bash
+# 整库
 rtdbctl backup plant_a /mnt/backups/2026-10-17
 # -> /mnt/backups/2026-10-17/plant_a
+
+# 按天时间段（含首末；--from/--to 均可用 yyyyMMdd，缺省一侧取最早/最新日目录）
+rtdbctl backup plant_a /mnt/backups/2026-09 --from 20260901 --to 20260930
+# -> /mnt/backups/2026-09/plant_a（含 manifest.json，还原时按天合并）
 ```
 
 或通过 API / SDK：
@@ -82,11 +87,20 @@ rtdbctl backup plant_a /mnt/backups/2026-10-17
 curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"targetDir":"/mnt/backups/2026-10-17"}'
+
+curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"targetDir":"/mnt/backups/2026-09","startDay":"2026-09-01","endDay":"2026-09-30"}'
 ```
 
 - **无需停服**：已封存的段不可变，因此拷贝结果是一致的。
 - 由于日目录自包含，**拷走一个日目录 = 该天的完整备份**。
   `cp -a {dataDir}/{db}/20261017 /backup/` 就是一次合法的日级备份。
+- **时间段备份**只复制范围内的日目录（外加库级 `retention.json`），并在备份目录写入 `manifest.json`。
+  还原时按清单**合并**：同日整体替换、范围外的日目录保持不动 —— 用于"只回补某几天"而不会冲掉其余历史。
+  整库备份不带清单，还原仍是整目录替换。
+- 范围内没有日目录、起止倒置或日期非法 → `400 E_INVALID_RANGE`；备份目录已存在同名库目录时会被整体替换
+  （同一目标重复备份是幂等的）。
 - `rsync` / `cp` / 快照工具都可用；没有专有的 dump 格式。
 
 ## 4. 恢复
@@ -103,7 +117,14 @@ rtdbctl restore plant_a --archive 20261015
 systemctl start ss-rtdb
 ```
 
-恢复是**替换式**的：目标数据库目录被备份内容替换，然后重新执行该库的启动恢复与 WAL 重放。
+恢复的语义取决于备份类型：
+
+- **整库备份**（无 `manifest.json`）→ **替换式**：目标数据库目录被备份内容整体替换，然后重新执行该库的
+  启动恢复与 WAL 重放。
+- **时间段备份**（含 `manifest.json`）→ **合并式**：只写入清单里的日目录（同日整体替换），范围外的日目录
+  与库级保留策略保持不变，随后同样重跑启动恢复与 WAL 重放。`rtdbctl restore` 会打印 `mode: merge` 与
+  实际写入的日期；清单损坏会直接报错而不会退化为整库替换。
+
 恢复后请校验：
 
 ```bash
@@ -270,3 +291,4 @@ rtdbctl archive plant_a            # 复查冷归档
 | 2026-10-17 | 重写一致性承诺：点要么在段文件（落段后先 fsync 段文件再推进 WAL 安全点）要么在 WAL（追加即成组 fsync）；`fsyncPolicy='wal'` 下崩溃与断电均不丢点 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增 §1.1 段文件的生成与滚动规则：三种创建触发（首次写入续号 / 跨天预创建 / 容量滚动）、三条不滚动例外（空段、块不跨段即软上限、序号到顶继续追加）、封口动作与 `.idx` 重建口径 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §10 容量估算补「查询的内存上界」行：查询原语按块簇流式扫描，内存与命中点数解耦（`count exact` / 聚合 / `queryAt` / 降序 `range` 不再物化全部命中点） | GLM-5.3-Flash |
+| 2026-10-18 | §3 备份新增按天时间段（`rtdbctl backup --from/--to`、API `startDay`/`endDay`、`manifest.json`）；§4 恢复区分替换式（整库）与合并式（时间段，范围外数据不删） | DeepSeek-V4.1-Flash |

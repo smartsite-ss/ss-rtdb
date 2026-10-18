@@ -194,8 +194,17 @@ export {
 } from './encoder/values.ts';
 
 /* ---------- Engine facade (§2.2) ---------- */
-export { MAX_AGGREGATE_WINDOWS, MAX_QUERY_AT_TIMESTAMPS, RETENTION_FILE_NAME, RtdbEngine } from './engine.ts';
+export {
+  BACKUP_MANIFEST_FILE_NAME,
+  MAX_AGGREGATE_WINDOWS,
+  MAX_QUERY_AT_TIMESTAMPS,
+  RETENTION_FILE_NAME,
+  RtdbEngine,
+} from './engine.ts';
 export type {
+  BackupManifest,
+  BackupOptions,
+  BackupRange,
   BackupResult,
   DatabaseMetricStats,
   DatabaseRuntimeStats,
@@ -214,9 +223,11 @@ export {
   ARCHIVE_FILE_EXTENSION,
   RETENTION_SWEEP_INTERVAL_MS,
   archiveDayDirectory,
+  copyDayDirectoriesReplacing,
   copyDirectoryReplacing,
   deleteDayDirectory,
   directoryExists,
+  mergeDayDirectories,
   extractTarGzipArchive,
   isDayDirectoryExpired,
   listArchivedDays,

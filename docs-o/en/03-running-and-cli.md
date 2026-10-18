@@ -132,7 +132,7 @@ rtdbctl <command> [arguments] [options]
 | `serve [--config <path>]` | in-process | Start the server in the foreground |
 | `status [--json]` | HTTP `GET /api/v1/status` | Print the runtime status report |
 | `metrics <db> [--prefix <p>]` | HTTP `GET /api/v1/metrics/:db` | List metrics with first/last timestamps |
-| `backup <db> <dir>` | HTTP `POST /api/v1/backup/:db` | Back a database up to `<dir>/<db>` |
+| `backup <db> <dir> [--from <day>] [--to <day>]` | HTTP `POST /api/v1/backup/:db` | Back a database up to `<dir>/<db>`; `--from`/`--to` restrict the day range (`yyyyMMdd`, inclusive) |
 | `retention <db> [days]` | HTTP `PUT` / local read | Print (no `days`) or set the retention policy |
 | `size <db> [--by-day]` | offline | On-disk size of a database |
 | `repair <db> [<yyyyMMdd>]` | offline | Rebuild indexes, truncate corrupt block tails |
@@ -194,12 +194,21 @@ station01.powerMeter.voltage  2026-10-17 09:00:00   2026-10-17 09:05:00
 ### 2.6 `backup`
 
 ```bash
+# whole database
 rtdbctl backup plant_a /mnt/backups
+
+# only September 2026 (both ends inclusive)
+rtdbctl backup plant_a /mnt/backups/2026-09 --from 20260901 --to 20260930
 ```
 
-Copies the whole database directory to `/mnt/backups/plant_a` and reports `files` / `totalBytes`.
+Copies the whole database directory to `/mnt/backups/plant_a` and reports `mode` / `files` / `totalBytes`.
 This copies **sealed** data plus the current day's active segment; because sealed segments are
 immutable, the copy is consistent without stopping the server.
+
+With `--from` / `--to` only the day directories inside the range are copied (plus the database-level
+`retention.json`) and a `manifest.json` is written; `mode` is `range` and `days` lists what was copied.
+Such a backup is restored by **merging** those days — days outside the range are never deleted (see
+[08 — Operations](./08-operations.md) §3 and §4).
 
 ### 2.7 `restore`
 
@@ -327,3 +336,4 @@ systemctl start ss-rtdb
 | 2026-10-17 | Revision-history section introduced (earlier revisions of this page predate the log) | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §1 notes the runtime config file `conf/rtdb-server.json` (working-directory relative) and how the two start paths differ | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Added "Interactive console keys": `q` = graceful shutdown, `r` = safe restart that re-reads the configuration in place (TTY only) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §2.2 command table and §2.6 `backup` gain `--from` / `--to` (copy only the day directories in range, write `manifest.json`, restore merges by day) | DeepSeek-V4.1-Flash |

@@ -90,7 +90,7 @@
 | `POST` | `/api/v1/query/aggregate` | query | 窗口聚合 |
 | `POST` | `/api/v1/query/at` | query | 任意时刻插值取值 |
 | `PUT` | `/api/v1/retention/:db` | write | 设置按库保留策略 |
-| `POST` | `/api/v1/backup/:db` | write | 触发整库备份 |
+| `POST` | `/api/v1/backup/:db` | write | 触发备份（整库，或按 `startDay`/`endDay` 的时间段） |
 | `GET` `POST` | `/api/v1/admin/users` | admin | 列出 / 创建用户 |
 | `PUT` `DELETE` | `/api/v1/admin/users/:username` | admin | 更新 / 删除用户 |
 | `GET` `POST` | `/api/v1/admin/tokens` | admin | 列出 / 签发 API 令牌 |
@@ -183,6 +183,10 @@ curl -X POST "http://127.0.0.1:6180/api/v1/write?db=plant_a" \
 
 `(指标, 时间戳)` 已存在的点被计为 `duplicates` —— 写入是**幂等**的，
 客户端可以安全重试失败的批次。
+
+`duplicates` 只统计**同一批次内**的重复点。跨请求重复（典型场景：超时后重试同一批）在块合并阶段
+被静默去重，响应仍为 `accepted=N, duplicates=0`，不会体现在任何计数字段里。因此判断重试是否生效
+应看 `count` 精确计数是否保持不变，而不是 `duplicates`。
 
 ### 3.4 限制
 
@@ -381,8 +385,30 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases/pl
 curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"targetDir":"/mnt/backups/2026-10-17"}'
-# {"files":42,"totalBytes":1932735283,"database":"plant_a","targetDirectory":"/mnt/backups/2026-10-17/plant_a"}
+# {"files":42,"totalBytes":1932735283,"database":"plant_a","targetDirectory":"/mnt/backups/2026-10-17/plant_a",
+#  "partial":false,"range":null,"days":null}
+
+# 按天时间段备份（含首末，服务端本地时区；yyyy-MM-dd 或 yyyyMMdd）
+curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"targetDir":"/mnt/backups/2026-09","startDay":"2026-09-01","endDay":"2026-09-30"}'
+# {"files":840,"totalBytes":1932735283,"database":"plant_a","targetDirectory":"/mnt/backups/2026-09/plant_a",
+#  "partial":true,
+#  "range":{"startDay":20260901,"endDay":20260930,"dayCount":30,
+#           "startTimestamp":1756656000000,"endTimestamp":1759247999999},
+#  "days":[20260901,"…"]}
 ```
+
+时间段备份口径：
+
+- **粒度是天目录**（存储与保留的最小单元），`startDay` / `endDay` 可只给一边（缺省侧取最早 / 最新日目录）；
+  两者都不给即整库备份。日期为服务端本地时区，含首末两天。
+- 范围备份只复制范围内的 `yyyyMMdd/` 目录与库级 `retention.json`，并在备份目录写入 `manifest.json`。
+  还原（`rtdbctl restore` 或 `RtdbEngine.restore`）读到该清单时按天**合并**：同日目录整体替换、范围外的日目录
+  保持不动 —— 因此范围备份永远不会删掉范围外的现场数据；整库备份（无清单）仍是整目录替换。
+- 范围内没有任何日目录、`startDay` 晚于 `endDay`、或日期非法（如 `2026-02-30`）→ `400 E_INVALID_RANGE`。
+- 备份是**服务端路径复制**，需要 `write` 权限域，且目标目录必须在服务端主机上可写；备份期间无需停写
+  （同步执行，单线程 run-to-completion 即一致性快照）。
 
 ---
 
@@ -622,6 +648,9 @@ SHOW DATABASES | MEASUREMENTS [ON db] | TAG KEYS [FROM m] | TAG VALUES [FROM m] 
 - `mean()` 是**等权平均**（用 `sum/count` 计算，与 InfluxQL 一致）；原生 `avg` 是时间加权，二者不要混用。
 - `GROUP BY time()` 的窗口按 epoch 对齐（起点向上取整到窗口边界），与 InfluxDB 一致；`fill` 默认 `null`。
 - `count()` 无 `GROUP BY time` 时走精确计数；`last()` 走索引回溯；`first()` 按窗口做有界扫描（≤2000 个窗口）。
+- **可见性边界**：InfluxQL 只可见**折叠形态**的指标（`measurement|field[|tag=value…]`，即经兼容层写入的数据）。
+  通过原生 `/api/v1/write` 写入的指标名（不含 `|`）不会出现在 `SHOW MEASUREMENTS` 与 `SELECT` 结果中，
+  而是计入 `status.compat.influx.unmappedMetrics`。需要在一个库内同时使用两族 API 时请注意这一隔离。
 - 多语句（`;`）、多 measurement、`OR`、正则、子查询、`INTO`、`DELETE`/`DROP`/`CREATE` 一律 `501` 并给出原因。
 
 `epoch` 默认返回 RFC3339（毫秒精度），`epoch=ms|s|m|h|u|us|ns` 返回整数。
@@ -679,4 +708,6 @@ curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlen
 | 2026-10-18 | 新增 §10「InfluxDB 兼容层」：三族行协议写入（tag/field 折叠、precision、gzip、204、`accept_partial`）、`/ping`、InfluxQL 只读子集（`/query`、`/api/v3/query_influxql`）、错误族、已知差异与示例；端点索引补 `/health`、`/ping`、写入/查询/501 行；§8 status 补 `compat.influx` 计数并说明 `rtdb_compat_influx_*` 指标；原「下一步」顺延为 §11 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | 新增 §8.1「内置接口参考」：`GET /api/docs`（自包含 HTML、公开、随配置过滤）与 `GET /api/docs/openapi.json`（OpenAPI 3.1，同源于路由元数据表）；端点索引补两行；说明控制台「接口文档」导航入口 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §8.1 改为按**两大 API 族**（ss-rtdb 原生 / InfluxDB 兼容）分类展示：独立区块、独立侧栏分组与计数；筛选同时匹配族名/组名并覆盖 `501` 表；OpenAPI 操作打上 `[族, 组]` 标签并附 `x-family` | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.3 明确 `duplicates` 只统计**批内**重复（跨请求重试在块合并阶段静默去重，判断幂等需看精确 `count`）；§10.5 补充 InfluxQL **可见性边界**（仅可见折叠形态指标，原生指标计入 `unmappedMetrics`） | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §6 备份新增**按天时间段**（`startDay`/`endDay`）：响应增加 `partial`/`range`/`days`，范围备份写 `manifest.json`、还原时按天合并（范围外数据不删）；端点索引行同步 | DeepSeek-V4.1-Flash |
 

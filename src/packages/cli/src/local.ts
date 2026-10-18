@@ -59,10 +59,14 @@ export interface RestoreSummary {
   database: string;
   /** Absolute directory the backup was read from */
   sourceDirectory: string;
-  /** Absolute database directory that was replaced */
+  /** Absolute database directory that was replaced (or merged into) */
   targetDirectory: string;
   fileCount: number;
   totalBytes: number;
+  /** `replace` = whole-database replacement; `merge` = a range backup merged into the existing database */
+  mode: 'replace' | 'merge';
+  /** Day directories written by a merge restore (`yyyyMMdd`, ascending; empty for a full restore) */
+  days: number[];
 }
 
 /** One already-landed day archive of a database */
@@ -197,6 +201,8 @@ export async function restoreDatabase(
       targetDirectory: engine.dataDir,
       fileCount: result.fileCount,
       totalBytes: result.totalBytes,
+      mode: result.mode ?? 'replace',
+      days: result.days ?? [],
     };
   } finally {
     await engine.close();

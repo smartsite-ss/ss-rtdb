@@ -91,7 +91,7 @@ Every non-2xx response is JSON:
 | `POST` | `/api/v1/query/aggregate` | query | Windowed aggregation |
 | `POST` | `/api/v1/query/at` | query | Point-in-time interpolated lookup |
 | `PUT` | `/api/v1/retention/:db` | write | Set per-database retention |
-| `POST` | `/api/v1/backup/:db` | write | Trigger a whole-database backup |
+| `POST` | `/api/v1/backup/:db` | write | Trigger a backup (whole database, or a `startDay`/`endDay` day range) |
 | `GET` `POST` | `/api/v1/admin/users` | admin | List / create users |
 | `PUT` `DELETE` | `/api/v1/admin/users/:username` | admin | Update / remove a user |
 | `GET` `POST` | `/api/v1/admin/tokens` | admin | List / issue API tokens |
@@ -186,6 +186,11 @@ string → string).
 
 Points whose `(metric, timestamp)` already exists are counted as `duplicates` — writes are
 **idempotent**, so a client can safely retry a failed batch.
+
+`duplicates` only covers duplicates **inside the same batch**. Cross-request duplicates (typically a
+retry of the same batch after a timeout) are dropped silently during block merge: the response is still
+`accepted=N, duplicates=0` and no counter reflects them. To verify that a retry was idempotent, check
+that the exact `count` is unchanged instead.
 
 ### 3.4 Limits
 
@@ -394,8 +399,34 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:6180/api/v1/databases/pl
 curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"targetDir":"/mnt/backups/2026-10-17"}'
-# {"files":42,"totalBytes":1932735283,"database":"plant_a","targetDirectory":"/mnt/backups/2026-10-17/plant_a"}
+# {"files":42,"totalBytes":1932735283,"database":"plant_a","targetDirectory":"/mnt/backups/2026-10-17/plant_a",
+#  "partial":false,"range":null,"days":null}
+
+# Day-granular range backup (inclusive, server local time; yyyy-MM-dd or yyyyMMdd)
+curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"targetDir":"/mnt/backups/2026-09","startDay":"2026-09-01","endDay":"2026-09-30"}'
+# {"files":840,"totalBytes":1932735283,"database":"plant_a","targetDirectory":"/mnt/backups/2026-09/plant_a",
+#  "partial":true,
+#  "range":{"startDay":20260901,"endDay":20260930,"dayCount":30,
+#           "startTimestamp":1756656000000,"endTimestamp":1759247999999},
+#  "days":[20260901,"…"]}
 ```
+
+Range backup semantics:
+
+- **Day granularity** (the day directory is the storage and retention unit). `startDay` / `endDay` can be given
+  alone (the missing side defaults to the earliest / latest day directory); omitting both means a
+  whole-database backup. Days are server local time and both ends are inclusive.
+- A range backup copies only the matching `yyyyMMdd/` directories plus the database-level `retention.json`, and
+  writes `manifest.json` into the backup directory. Restoring it (`rtdbctl restore` or `RtdbEngine.restore`)
+  **merges** the recorded days: same-day directories are replaced as a group, every other day is kept — a range
+  restore can never delete live data outside the range. A full backup (no manifest) still replaces the whole
+  database.
+- No day directory inside the range, `startDay` after `endDay`, or an invalid date (`2026-02-30`) → `400
+  E_INVALID_RANGE`.
+- The backup is a **server-side directory copy**: it needs the `write` scope and a writable target on the server
+  host, and it does not pause writes (synchronous run-to-completion gives a consistent snapshot).
 
 ---
 
@@ -651,6 +682,10 @@ Semantics:
   to `null`, matching InfluxDB.
 - `count()` without `GROUP BY time` uses the exact count, `last()` uses index backtracking, and `first()` performs
   a bounded per-window scan (≤2000 windows).
+- **Visibility boundary**: InfluxQL only sees **folded** metric names (`measurement|field[|tag=value…]`, i.e. data
+  written through the compatibility layer). Metrics written via the native `/api/v1/write` (no `|` separator) never
+  appear in `SHOW MEASUREMENTS` or `SELECT`; they are counted in `status.compat.influx.unmappedMetrics`. Keep this
+  isolation in mind when both API families share one database.
 - Multi-statement (`;`), multiple measurements, `OR`, regex, subqueries, `INTO`, `DELETE`/`DROP`/`CREATE` all answer
   `501` with a reason.
 
@@ -709,3 +744,5 @@ curl -G "http://127.0.0.1:6180/query" --data-urlencode "db=plant_a" --data-urlen
 | 2026-10-18 | Added §10 "InfluxDB compatibility layer": three Line Protocol write endpoints (tag/field folding, precision, gzip, 204, `accept_partial`), `/ping`, InfluxQL read-only subset (`/query`, `/api/v3/query_influxql`), error families, known differences and examples; endpoint index gains `/health`, `/ping`, write/query/501 rows; §8 status gains `compat.influx` counters and the `rtdb_compat_influx_*` families; "Next steps" renumbered to §11 | DeepSeek-V4.1-Flash |
 | 2026-10-18 | Added §8.1 "Built-in API reference": `GET /api/docs` (self-contained HTML, public, configuration-aware) and `GET /api/docs/openapi.json` (OpenAPI 3.1 generated from the same route-metadata table); two endpoint-index rows; noted the console **API docs** nav entry | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §8.1 now describes the reference as **two API families** (ss-rtdb native vs InfluxDB compatibility): separate page sections, sidebar groups and counts; the search also matches family/group names and the `501` table; OpenAPI operations are tagged `[family, group]` with `x-family` | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §3.3 clarifies that `duplicates` only counts **in-batch** duplicates (cross-request retries are de-duplicated silently during block merge, so idempotence must be verified via exact `count`); §10.5 adds the InfluxQL **visibility boundary** (only folded metric names are visible; native metrics are reported as `unmappedMetrics`) | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §6 backup gains a **day range** (`startDay`/`endDay`): the response adds `partial`/`range`/`days`, a range backup writes `manifest.json` and restores by merging those days (data outside the range is never deleted); endpoint index row updated | DeepSeek-V4.1-Flash |

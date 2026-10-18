@@ -32,7 +32,9 @@
 import type { Dirent } from 'node:fs';
 import {
   closeSync,
+  copyFileSync,
   cpSync,
+  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -394,6 +396,105 @@ export function copyDirectoryReplacing(sourceDirectory: string, targetDirectory:
     throw toIoError(`Failed to copy the directory ${sourceDirectory} -> ${targetDirectory}`, error);
   }
   return measureDirectory(targetDirectory);
+}
+
+/**
+ * Copy only the selected **day directories** (plus a few root-level files) into a fresh target directory
+ *
+ * Used by the day-granular range backup: the day directory is the retention/backup unit, so copying a subset of
+ * them stays consistent without touching block contents. The target directory is cleared first (idempotent
+ * re-backup). Missing day directories in the source are skipped instead of failing, so a range that partly
+ * predates the database's first write still succeeds.
+ */
+export function copyDayDirectoriesReplacing(options: {
+  readonly sourceDirectory: string;
+  readonly targetDirectory: string;
+  readonly dateNumbers: readonly number[];
+  /** Root-level files of the database directory to copy when present (e.g. `retention.json`) */
+  readonly rootFileNames?: readonly string[];
+}): DirectoryCopyResult {
+  if (!directoryExists(options.sourceDirectory)) {
+    throw new RtdbError(
+      ERROR_CODE.DatabaseNotFound,
+      `Directory to back up does not exist: ${options.sourceDirectory}`,
+    );
+  }
+  try {
+    rmSync(options.targetDirectory, { recursive: true, force: true });
+    mkdirSync(options.targetDirectory, { recursive: true });
+    for (const dateNumber of options.dateNumbers) {
+      const folderName = formatDateFolderName(dateNumber);
+      const source = join(options.sourceDirectory, folderName);
+      if (!directoryExists(source)) continue;
+      cpSync(source, join(options.targetDirectory, folderName), { recursive: true, force: true });
+    }
+    for (const fileName of options.rootFileNames ?? []) {
+      const source = join(options.sourceDirectory, fileName);
+      if (!existsSync(source)) continue;
+      copyFileSync(source, join(options.targetDirectory, fileName));
+    }
+  } catch (error) {
+    throw toIoError(
+      `Failed to copy the day directories ${options.sourceDirectory} -> ${options.targetDirectory}`,
+      error,
+    );
+  }
+  return measureDirectory(options.targetDirectory);
+}
+
+/**
+ * Merge backup day directories into an existing database directory (partial restore)
+ *
+ * Same-day directories are replaced **as a group** (the backup wins for those days), every other day
+ * directory in the target is left untouched — this is what makes restoring a range backup safe: it can never
+ * delete data outside the restored range. Root-level files are copied only when the target does not already
+ * have them, so the live retention policy is not silently overwritten by an older backup.
+ *
+ * Returns the number of files/bytes written by this merge (not the final target size).
+ */
+export function mergeDayDirectories(options: {
+  readonly sourceDirectory: string;
+  readonly targetDirectory: string;
+  readonly dateNumbers: readonly number[];
+  readonly rootFileNames?: readonly string[];
+}): DirectoryCopyResult {
+  if (!directoryExists(options.sourceDirectory)) {
+    throw new RtdbError(
+      ERROR_CODE.DatabaseNotFound,
+      `Backup directory does not exist: ${options.sourceDirectory}`,
+    );
+  }
+  let fileCount = 0;
+  let totalBytes = 0;
+  try {
+    mkdirSync(options.targetDirectory, { recursive: true });
+    for (const dateNumber of options.dateNumbers) {
+      const folderName = formatDateFolderName(dateNumber);
+      const source = join(options.sourceDirectory, folderName);
+      // A backup may legitimately miss a day (empty range edge); never delete the target's own day for it.
+      if (!directoryExists(source)) continue;
+      const target = join(options.targetDirectory, folderName);
+      rmSync(target, { recursive: true, force: true });
+      cpSync(source, target, { recursive: true, force: true });
+      const measured = measureDirectory(target);
+      fileCount += measured.fileCount;
+      totalBytes += measured.totalBytes;
+    }
+    for (const fileName of options.rootFileNames ?? []) {
+      const source = join(options.sourceDirectory, fileName);
+      const target = join(options.targetDirectory, fileName);
+      if (!existsSync(source) || existsSync(target)) continue;
+      copyFileSync(source, target);
+      fileCount += 1;
+      totalBytes += statSync(target).size;
+    }
+  } catch (error) {
+    throw toIoError(
+      `Failed to merge the day directories ${options.sourceDirectory} -> ${options.targetDirectory}`,
+      error,
+    );
+  }
+  return { fileCount, totalBytes };
 }
 
 /** Whether the directory already exists */

@@ -120,6 +120,8 @@ const databases = await client.listDatabases();              // string[]
 const metrics = await client.listMetrics('plant_a');         // [{ metricName, firstTs, lastTs, valueType }]
 await client.setRetention('plant_a', 90);                    // days; 0 = forever
 await client.backup('plant_a', '/mnt/backups/2026-10-17');   // server-side copy
+// Optional day range (inclusive; omit for a whole-database backup). Returns partial / range / days
+await client.backup('plant_a', '/mnt/backups/2026-09', { startDay: '2026-09-01', endDay: '2026-09-30' });
 ```
 
 ### 1.6 Users and tokens (admin)
@@ -288,3 +290,4 @@ Same retry policy as the Node SDK: only `429` and transport failures are retried
 | 2026-10-17 | Node SDK `listMetrics` items now include `valueType` (in sync with the server `GET /api/v1/metrics/:db`) | GLM-5.3-Flash |
 | 2026-10-17 | Both SDKs' `queryRange`/`query_range` results gain the optional `received` field (server receive-time window, block/batch granularity); Python `Series.received` in sync | GLM-5.3-Flash |
 | 2026-10-17 | Both SDKs add `queryAt`/`query_at` (point-in-time interpolated lookup, `step`/`linear`, `state` provenance markers), examples updated | GLM-5.3-Flash |
+| 2026-10-18 | Node SDK `backup` gains the optional day range `{ startDay, endDay }` and returns `partial` / `range` / `days`; example updated | DeepSeek-V4.1-Flash |

@@ -128,7 +128,7 @@ rtdbctl <命令> [参数] [选项]
 | `serve [--config <path>]` | 进程内 | 前台启动服务 |
 | `status [--json]` | HTTP `GET /api/v1/status` | 打印运行时状态报告 |
 | `metrics <db> [--prefix <p>]` | HTTP `GET /api/v1/metrics/:db` | 列出指标及其首/末时间戳 |
-| `backup <db> <dir>` | HTTP `POST /api/v1/backup/:db` | 把某库备份到 `<dir>/<db>` |
+| `backup <db> <dir> [--from <day>] [--to <day>]` | HTTP `POST /api/v1/backup/:db` | 把某库备份到 `<dir>/<db>`；`--from`/`--to` 限定日期范围（`yyyyMMdd`，含首末） |
 | `retention <db> [days]` | HTTP `PUT` / 本地读取 | 打印（不传 `days`）或设置保留策略 |
 | `size <db> [--by-day]` | 离线 | 某库的磁盘占用 |
 | `repair <db> [<yyyyMMdd>]` | 离线 | 重建索引、截断损坏的块尾 |
@@ -191,12 +191,20 @@ station01.powerMeter.voltage  2026-10-17 09:00:00   2026-10-17 09:05:00
 ### 2.6 `backup`
 
 ```bash
+# 整库
 rtdbctl backup plant_a /mnt/backups
+
+# 只备份 2026-09 全月（含首末两天）
+rtdbctl backup plant_a /mnt/backups/2026-09 --from 20260901 --to 20260930
 ```
 
-把整个数据库目录复制到 `/mnt/backups/plant_a`，并报告 `files` / `totalBytes`。
+把整个数据库目录复制到 `/mnt/backups/plant_a`，并报告 `mode` / `files` / `totalBytes`。
 该操作复制的是**已封存**数据加上当日活动段；由于已封存的段不可变，
 因此无需停服即可得到一致的副本。
+
+带 `--from` / `--to` 时只复制范围内的日目录（外加库级 `retention.json`），并在备份目录写入
+`manifest.json`；输出中的 `mode` 为 `range`，`days` 给出实际范围。此类备份在 `restore` 时**按天合并**，
+范围外的日目录不会被删除（详见 [08 — 运维](./08-operations.md) §3、§4）。
 
 ### 2.7 `restore`
 
@@ -322,3 +330,4 @@ systemctl start ss-rtdb
 | 2026-10-17 | 创建中文译本 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | §1 补充运行期配置文件 `conf/rtdb-server.json`（相对工作目录）及两种启动方式的差异 | DeepSeek-V4.1-Flash |
 | 2026-10-17 | 新增「交互式控制台按键」：`q` 安全退出、`r` 安全重启（就地重读配置），仅 TTY 生效 | DeepSeek-V4.1-Flash |
+| 2026-10-18 | §2.2 命令表与 §2.6 `backup` 新增 `--from` / `--to` 时间段参数（只复制范围内日目录、写 `manifest.json`、还原时按天合并） | DeepSeek-V4.1-Flash |

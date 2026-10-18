@@ -821,12 +821,17 @@ export class RtdbServer {
     this.requireAuth(request, 'write', database);
     const body = requireJsonObject(this.parseJsonBody(await this.readRequestBody(request), 'backup'), 'backup');
     const targetDir = requireNonEmptyString(body.targetDir, 'targetDir');
-    const result = await this.engine.backup(database, targetDir);
+    const startDay = readOptionalDay(body.startDay, 'startDay');
+    const endDay = readOptionalDay(body.endDay, 'endDay');
+    const result = await this.engine.backup(database, targetDir, { startDay, endDay });
     this.sendJson(response, 200, {
       files: result.fileCount,
       totalBytes: result.totalBytes,
       database: result.database,
       targetDirectory: result.targetDirectory,
+      partial: result.partial ?? false,
+      range: result.range ?? null,
+      days: result.days ?? null,
     });
   }
 
@@ -1213,6 +1218,29 @@ function requireJsonObject(value: unknown, label: string): Record<string, unknow
     throw new RtdbError(ERROR_CODE.InvalidPoint, `${label} request body must be a JSON object`);
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * Optional day selector of the backup range: `"2026-09-01"`, `"20260901"` or `20260901`; empty/absent = unbounded
+ *
+ * Day granularity matches the on-disk layout (one directory per local day), so a range backup copies whole day
+ * directories. Calendar validity is checked by the engine (`E_INVALID_RANGE` for e.g. `2026-02-30`).
+ */
+function readOptionalDay(value: unknown, fieldName: string): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  let digits: string;
+  if (typeof value === 'number' && Number.isInteger(value)) digits = String(value);
+  else if (typeof value === 'string') digits = value.trim().replaceAll('-', '');
+  else {
+    throw new RtdbError(
+      ERROR_CODE.InvalidRange,
+      `${fieldName} must be a yyyy-MM-dd or yyyyMMdd day: ${String(value)}`,
+    );
+  }
+  if (!/^\d{8}$/.test(digits)) {
+    throw new RtdbError(ERROR_CODE.InvalidRange, `${fieldName} must be a yyyy-MM-dd or yyyyMMdd day: ${digits}`);
+  }
+  return Number(digits);
 }
 
 function toAggregateType(value: unknown): AggregateType {

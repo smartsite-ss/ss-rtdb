@@ -141,11 +141,36 @@ export interface RtdbTokenListReport {
   configToken?: RtdbConfigTokenUsage;
 }
 
+/** Day range of a range backup (`null` for a whole-database backup); days are `yyyyMMdd` in server local time */
+export interface RtdbBackupRange {
+  startDay: number;
+  endDay: number;
+  dayCount: number;
+  startTimestamp: number;
+  endTimestamp: number;
+}
+
+/** Raw `POST /api/v1/backup/{db}` response (the server reports `files`, not `fileCount`) */
+interface RtdbBackupResponse {
+  database: string;
+  targetDirectory: string;
+  files: number;
+  totalBytes: number;
+  partial?: boolean;
+  range?: RtdbBackupRange | null;
+  days?: number[] | null;
+}
+
 export interface RtdbBackupResult {
   database: string;
   targetDirectory: string;
   fileCount: number;
   totalBytes: number;
+  /** `true` = range backup (restoring it merges those days, it does not replace the database) */
+  partial: boolean;
+  range: RtdbBackupRange | null;
+  /** Day directories copied (`yyyyMMdd`, ascending); `null` for a whole-database backup */
+  days: number[] | null;
 }
 
 export interface IssueTokenResult {
@@ -329,11 +354,34 @@ export class RtdbAdminApiClient {
     await this.request<{ ok: boolean }>('PUT', `/api/v1/retention/${encodeURIComponent(database)}`, { days });
   }
 
-  /** Trigger a backup; `targetDirectory` is required and must be non-empty (§3.1) */
-  backup(database: string, targetDirectory: string): Promise<RtdbBackupResult> {
-    return this.request<RtdbBackupResult>('POST', `/api/v1/backup/${encodeURIComponent(database)}`, {
-      targetDir: targetDirectory,
-    });
+  /**
+   * Trigger a backup; `targetDirectory` is required and must be non-empty (§3.1)
+   *
+   * `range.startDay` / `range.endDay` (`yyyy-MM-dd`, inclusive) restrict the backup to those day directories;
+   * leaving both empty produces a whole-database backup.
+   */
+  async backup(
+    database: string,
+    targetDirectory: string,
+    range?: { startDay?: string; endDay?: string },
+  ): Promise<RtdbBackupResult> {
+    const body: Record<string, string> = { targetDir: targetDirectory };
+    if (range?.startDay !== undefined && range.startDay.length > 0) body.startDay = range.startDay;
+    if (range?.endDay !== undefined && range.endDay.length > 0) body.endDay = range.endDay;
+    const raw = await this.request<RtdbBackupResponse>(
+      'POST',
+      `/api/v1/backup/${encodeURIComponent(database)}`,
+      body,
+    );
+    return {
+      database: raw.database,
+      targetDirectory: raw.targetDirectory,
+      fileCount: raw.files,
+      totalBytes: raw.totalBytes,
+      partial: raw.partial === true,
+      range: raw.range ?? null,
+      days: raw.days ?? null,
+    };
   }
 
   async listUsers(): Promise<RtdbPublicUser[]> {

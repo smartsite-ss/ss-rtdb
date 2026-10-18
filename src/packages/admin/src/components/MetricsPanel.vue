@@ -32,8 +32,14 @@ import type {
   RtdbMetricSummary,
 } from '../api';
 import { useAsyncAction } from '../async';
-import { formatDateTime, fromDateTimeLocalValue, toDateTimeLocalValue } from '../format';
+import {
+  formatDateTime,
+  formatDateTimeWithOffset,
+  fromDateTimeLocalValue,
+  toDateTimeLocalValue,
+} from '../format';
 import { t } from '../i18n';
+import { downloadCsv } from '../csv-download';
 import { downloadXlsWorkbook } from '../xls-download';
 import type { XlsCellValue } from '../xls';
 
@@ -311,6 +317,38 @@ async function runQuery(): Promise<void> {
   atPoints.value = result.at;
 }
 
+/**
+ * Export the metric inventory of the selected database as CSV (one row per metric).
+ *
+ * The CSV keeps both the human-readable local timestamp and the raw millisecond epoch, so the file is usable
+ * in a spreadsheet and as machine input (join key = metric name + first/last ms).
+ */
+function exportMetricsCsv(): void {
+  const database = selectedDatabase.value;
+  if (database.length === 0 || metrics.value.length === 0) return;
+  const columns = [
+    t('metrics.csv.database'),
+    t('metrics.csv.metric'),
+    t('metrics.csv.type'),
+    t('metrics.csv.firstPoint'),
+    t('metrics.csv.firstMs'),
+    t('metrics.csv.lastPoint'),
+    t('metrics.csv.lastMs'),
+  ];
+  const rows = metrics.value.map((metric) => [
+    database,
+    metric.metricName,
+    valueTypeName(metric.valueType),
+    formatDateTimeWithOffset(metric.firstTs),
+    metric.firstTs,
+    formatDateTimeWithOffset(metric.lastTs),
+    metric.lastTs,
+  ]);
+  const stamp = formatDateTime(Date.now()).replaceAll(/[: ]/g, '-');
+  const safeDatabase = database.replaceAll(/[^A-Za-z0-9._-]+/g, '_');
+  downloadCsv(`metrics-${safeDatabase}-${stamp}.csv`, columns, rows);
+}
+
 /** `range`/`aggregate` export of the current preview as an Excel-readable `*.xls` */
 function exportCurrent(): void {
   const stamp = formatDateTime(Date.now()).replaceAll(/[: ]/g, '-');
@@ -417,6 +455,9 @@ watch(
         </div>
         <button :disabled="busy || selectedDatabase.length === 0" @click="loadMetrics">
           {{ t('metrics.reload') }}
+        </button>
+        <button :disabled="busy || metrics.length === 0" @click="exportMetricsCsv">
+          {{ t('metrics.exportCsv') }}
         </button>
         <span class="toolbar-note">{{ t('metrics.count', { count: metrics.length }) }}</span>
       </div>

@@ -74,6 +74,22 @@ export function formatDateTime(milliseconds: number): string {
 }
 
 /**
+ * Local `YYYY-MM-DD HH:mm:ss (UTC+08:00)` — the explicit offset is what keeps the cell **text** in Excel.
+ *
+ * A bare `YYYY-MM-DD HH:mm:ss` is auto-detected as a date by Excel/WPS when opening a CSV, then re-rendered with
+ * the operator's cell format (seconds usually hidden, e.g. `1970/1/1 8:29`), so an exported file can look wrong
+ * even though the value is right. The trailing offset is not date-like, so the cell keeps the full local time
+ * **and** states the timezone the timestamps were converted in.
+ */
+export function formatDateTimeWithOffset(milliseconds: number): string {
+  const offsetMinutes = -new Date(milliseconds).getTimezoneOffset();
+  const sign = offsetMinutes < 0 ? '-' : '+';
+  const absoluteMinutes = Math.abs(offsetMinutes);
+  const offset = `UTC${sign}${padTwoDigits(Math.floor(absoluteMinutes / 60))}:${padTwoDigits(absoluteMinutes % 60)}`;
+  return `${formatDateTime(milliseconds)} (${offset})`;
+}
+
+/**
  * `YYYY-MM-DDTHH:mm` value accepted by `<input type="datetime-local">`.
  *
  * Pass `withSeconds` when the picker drives an exact query range: without it a "last 5 minutes" shortcut would be
@@ -90,4 +106,25 @@ export function toDateTimeLocalValue(milliseconds: number, withSeconds = false):
 export function fromDateTimeLocalValue(value: string): number {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+}
+
+/** `YYYY-MM-DD` part of a `<input type="datetime-local">` value (`''` when the value is incomplete) */
+export function dateTimeLocalDay(value: string): string {
+  return value.length >= 10 ? value.slice(0, 10) : '';
+}
+
+/**
+ * `YYYY-MM-DD` → `YYYY-MM-DDTHH:mm:ss` at local midnight — the start of a day-granular range.
+ *
+ * Used by the time-range picker: operators usually think in days ("2026-09-01 to 2026-09-30"), while the query
+ * API needs exact timestamps. Anything that is not a complete `YYYY-MM-DD` is returned unchanged, so a partially
+ * typed date never produces a bogus timestamp.
+ */
+export function dayToDayStart(day: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? `${day}T00:00:00` : day;
+}
+
+/** `YYYY-MM-DD` → `YYYY-MM-DDTHH:mm:ss` at the last second of that local day (inclusive end of a day range) */
+export function dayToDayEnd(day: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? `${day}T23:59:59` : day;
 }

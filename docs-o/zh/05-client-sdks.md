@@ -118,6 +118,8 @@ const databases = await client.listDatabases();              // string[]
 const metrics = await client.listMetrics('plant_a');         // [{ metricName, firstTs, lastTs, valueType }]
 await client.setRetention('plant_a', 90);                    // 天；0 = 永久
 await client.backup('plant_a', '/mnt/backups/2026-10-17');   // 服务端侧拷贝
+// 可选：按天时间段（含首末；不传则整库）。返回 partial / range / days
+await client.backup('plant_a', '/mnt/backups/2026-09', { startDay: '2026-09-01', endDay: '2026-09-30' });
 ```
 
 ### 1.6 用户与令牌（管理面）
@@ -286,4 +288,5 @@ except RtdbClientError as error:
 | 2026-10-17 | Node SDK `listMetrics` 返回项增加 `valueType`（与服务端 `GET /api/v1/metrics/:db` 同步） | GLM-5.3-Flash |
 | 2026-10-17 | 双 SDK `queryRange`/`query_range` 返回值新增可选 `received`（服务器接收时间窗口，块/批次粒度），Python `Series.received` 同步 | GLM-5.3-Flash |
 | 2026-10-17 | 双 SDK 新增 `queryAt`/`query_at`（任意时刻插值取值，`step`/`linear`，`state` 来源标记），示例同步 | GLM-5.3-Flash |
+| 2026-10-18 | Node SDK `backup` 新增可选时间段参数 `{ startDay, endDay }`（按天粒度），返回值增加 `partial` / `range` / `days`；示例同步 | DeepSeek-V4.1-Flash |
 

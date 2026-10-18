@@ -82,8 +82,13 @@ systemctl start ss-rtdb
 ## 3. Backup
 
 ```bash
+# whole database
 rtdbctl backup plant_a /mnt/backups/2026-10-17
 # -> /mnt/backups/2026-10-17/plant_a
+
+# day range (inclusive; --from/--to take yyyyMMdd, a missing side means earliest/latest day)
+rtdbctl backup plant_a /mnt/backups/2026-09 --from 20260901 --to 20260930
+# -> /mnt/backups/2026-09/plant_a (with manifest.json; restored by merging those days)
 ```
 
 Or through the API / SDK:
@@ -92,11 +97,23 @@ Or through the API / SDK:
 curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"targetDir":"/mnt/backups/2026-10-17"}'
+
+curl -X POST "http://127.0.0.1:6180/api/v1/backup/plant_a" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"targetDir":"/mnt/backups/2026-09","startDay":"2026-09-01","endDay":"2026-09-30"}'
 ```
 
 - The server **does not need to be stopped**: sealed segments are immutable, so the copy is consistent.
 - Because a day directory is self-contained, **copying one day directory = a complete backup of that
   day**. `cp -a {dataDir}/{db}/20261017 /backup/` is a valid day-level backup.
+- A **day-range backup** copies only the matching day directories (plus the database-level
+  `retention.json`) and writes `manifest.json` into the backup directory. Restoring it **merges**: same-day
+  directories are replaced, days outside the range are kept — use it to re-inject a few days without
+  wiping the rest of the history. A whole-database backup has no manifest and still restores by
+  replacement.
+- No day directory in the range, `startDay` after `endDay`, or an invalid date → `400 E_INVALID_RANGE`;
+  an existing target database directory is replaced wholesale (re-backing up to the same target is
+  idempotent).
 - `rsync`/`cp`/snapshot tooling all work; there is no proprietary dump format.
 
 ## 4. Restore
@@ -113,8 +130,16 @@ rtdbctl restore plant_a --archive 20261015
 systemctl start ss-rtdb
 ```
 
-Restore is **replace-style**: the target database directory is replaced by the backup content and then
-that database's startup recovery and WAL replay are re-run. Verify afterwards:
+Restore semantics depend on the backup type:
+
+- **Whole-database backup** (no `manifest.json`) → **replace-style**: the target database directory is
+  replaced by the backup content, then that database's startup recovery and WAL replay are re-run.
+- **Day-range backup** (with `manifest.json`) → **merge-style**: only the recorded day directories are
+  written (same-day replaced as a group), days outside the range and the live retention policy are kept,
+  then startup recovery and WAL replay run as usual. `rtdbctl restore` prints `mode: merge` plus the days
+  written; a corrupt manifest fails loudly instead of degrading into a whole-database replacement.
+
+Verify afterwards:
 
 ```bash
 rtdbctl size plant_a --by-day
@@ -287,3 +312,4 @@ rtdbctl archive plant_a            # review cold archives
 | 2026-10-17 | Rewrote the consistency promise: a point is either in a segment (segment fsync precedes the WAL safe point) or in the WAL (group fsync per append); with `fsyncPolicy='wal'` neither a crash nor a power loss loses points | DeepSeek-V4.1-Flash |
 | 2026-10-17 | Added §1.1 segment creation and rolling rules: three creation triggers (first write with sequence continuation / day rollover pre-creation / capacity rollover), three no-roll exceptions (empty segment, block never spans segments i.e. soft limit, sequence exhausted keeps appending), sealing actions and `.idx` rebuild wording | DeepSeek-V4.1-Flash |
 | 2026-10-18 | §10 capacity tuning adds a "query memory ceiling" row: query primitives scan block cluster by block cluster, decoupling memory from the hit point count (`count exact` / aggregate / `queryAt` / descending `range` no longer materialize every hit point) | GLM-5.3-Flash |
+| 2026-10-18 | §3 backup gains a day range (`rtdbctl backup --from/--to`, API `startDay`/`endDay`, `manifest.json`); §4 restore now distinguishes replacement (full) from merge (day range, data outside the range is kept) | DeepSeek-V4.1-Flash |

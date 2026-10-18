@@ -116,6 +116,36 @@ export interface WriteBatchResult {
   accepted: number;
 }
 
+/** Day-granular selection for `backup` (`yyyy-MM-dd` or `yyyyMMdd`, inclusive, server local time) */
+export interface BackupRangeOptions {
+  startDay?: string | number;
+  endDay?: string | number;
+}
+
+/** Day range reported by a range backup (`null` for a whole-database backup) */
+export interface BackupRangeReport {
+  startDay: number;
+  endDay: number;
+  dayCount: number;
+  /** 00:00:00.000 of `startDay` (ms epoch, server local time) */
+  startTimestamp: number;
+  /** 23:59:59.999 of `endDay` (ms epoch, server local time) */
+  endTimestamp: number;
+}
+
+/** Result of `backup` (`POST /api/v1/backup/:db`) */
+export interface BackupReport {
+  database: string;
+  targetDirectory: string;
+  files: number;
+  totalBytes: number;
+  /** `true` = range backup (restore merges those days into the database) */
+  partial: boolean;
+  range: BackupRangeReport | null;
+  /** Day directories copied (`yyyyMMdd`, ascending); `null` for a whole-database backup */
+  days: number[] | null;
+}
+
 /** `status()` report (Detailed Design §3.4; the runtime metrics reported by the server) */
 export interface StatusReport {
   uptimeMs: number;
@@ -411,24 +441,37 @@ export class RtdbClient {
     await this.request('PUT', `/api/v1/retention/${encodeURIComponent(databaseName)}`, { days });
   }
 
-  /** Back up a database to `{targetDir}/{database}` (server `POST /api/v1/backup/:db`) */
+  /**
+   * Back up a database to `{targetDir}/{database}` (server `POST /api/v1/backup/:db`)
+   *
+   * With `options.startDay` / `options.endDay` (`yyyy-MM-dd` or `yyyyMMdd`, inclusive, server local time) only
+   * those day directories are copied and the result becomes a *range backup*: restoring it merges the days into
+   * the target database instead of replacing it.
+   */
   async backup(
     database: string,
     targetDirectory: string,
-  ): Promise<{ database: string; targetDirectory: string; files: number; totalBytes: number }> {
+    options?: BackupRangeOptions,
+  ): Promise<BackupReport> {
     const databaseName = requireDatabaseName(database);
     if (typeof targetDirectory !== 'string' || targetDirectory.length === 0) {
       throw new RtdbClientError(CLIENT_ERROR_CODE.InvalidArgument, 'backup targetDirectory must be a non-empty string');
     }
     const body = await this.request('POST', `/api/v1/backup/${encodeURIComponent(databaseName)}`, {
       targetDir: targetDirectory,
+      ...(options?.startDay !== undefined ? { startDay: options.startDay } : {}),
+      ...(options?.endDay !== undefined ? { endDay: options.endDay } : {}),
     });
     const record = requireObject(body, 'backup response body');
+    const range = record.range === undefined || record.range === null ? null : (record.range as BackupReport['range']);
     return {
       database: String(record.database ?? databaseName),
       targetDirectory: String(record.targetDirectory ?? ''),
       files: readIntegerField(record, 'files'),
       totalBytes: readIntegerField(record, 'totalBytes'),
+      partial: record.partial === true,
+      range,
+      days: Array.isArray(record.days) ? (record.days as number[]) : null,
     };
   }
 

@@ -178,17 +178,19 @@ async function metricsCommand(environment: CliEnvironment): Promise<number> {
 async function backupCommand(environment: CliEnvironment): Promise<number> {
   const database = requirePositional(environment, 0, 'database');
   const targetDirectory = requirePositional(environment, 1, 'directory');
-  const result = await environment.createClient().backup(database, targetDirectory);
-  printRecord(
-    environment,
-    [
-      ['database', result.database],
-      ['targetDirectory', result.targetDirectory],
-      ['files', String(result.files)],
-      ['totalBytes', formatBytes(result.totalBytes)],
-    ],
-    result,
-  );
+  const startDay = flagString(environment.parsed, 'from');
+  const endDay = flagString(environment.parsed, 'to');
+  const result = await environment.createClient().backup(database, targetDirectory, { startDay, endDay });
+  const rows: [string, string][] = [
+    ['database', result.database],
+    ['targetDirectory', result.targetDirectory],
+    ['mode', result.partial ? 'range' : 'full'],
+  ];
+  if (result.range !== null) {
+    rows.push(['days', `${result.range.startDay}..${result.range.endDay} (${result.range.dayCount} day(s))`]);
+  }
+  rows.push(['files', String(result.files)], ['totalBytes', formatBytes(result.totalBytes)]);
+  printRecord(environment, rows, result);
   return 0;
 }
 
@@ -221,17 +223,15 @@ async function restoreCommand(environment: CliEnvironment): Promise<number> {
   const backupDirectory = requirePositional(environment, 1, 'directory');
   const summary = await restoreDatabase(environment.dataDir, database, backupDirectory);
   const databaseDirectory = join(summary.targetDirectory, summary.database);
-  printRecord(
-    environment,
-    [
-      ['database', summary.database],
-      ['sourceDirectory', summary.sourceDirectory],
-      ['targetDirectory', databaseDirectory],
-      ['files', String(summary.fileCount)],
-      ['totalBytes', formatBytes(summary.totalBytes)],
-    ],
-    { ...summary, targetDirectory: databaseDirectory },
-  );
+  const rows: [string, string][] = [
+    ['database', summary.database],
+    ['sourceDirectory', summary.sourceDirectory],
+    ['targetDirectory', databaseDirectory],
+    ['mode', summary.mode],
+  ];
+  if (summary.mode === 'merge') rows.push(['days', summary.days.join(', ')]);
+  rows.push(['files', String(summary.fileCount)], ['totalBytes', formatBytes(summary.totalBytes)]);
+  printRecord(environment, rows, { ...summary, targetDirectory: databaseDirectory });
   return 0;
 }
 

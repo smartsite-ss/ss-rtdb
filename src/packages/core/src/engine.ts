@@ -45,7 +45,13 @@ import { join, resolve } from 'node:path';
 import { PerformanceObserver } from 'node:perf_hooks';
 
 import { ERROR_CODE, RtdbError } from './errors.ts';
-import { dateNumberFromTimestamp, nextDayTimestampFromDateNumber, timestampFromDateNumber } from './format.ts';
+import {
+  dateNumberFromTimestamp,
+  formatDateFolderName,
+  nextDayTimestampFromDateNumber,
+  parseDateFolderName,
+  timestampFromDateNumber,
+} from './format.ts';
 import type { SegmentBlockIndexEntry } from './format.ts';
 import { DataRootLock } from './lock.ts';
 import { BufferPool } from './pool.ts';
@@ -55,8 +61,10 @@ import {
   ARCHIVE_DIRECTORY_NAME,
   RETENTION_SWEEP_INTERVAL_MS,
   archiveDayDirectory,
+  copyDayDirectoriesReplacing,
   copyDirectoryReplacing,
   deleteDayDirectory,
+  mergeDayDirectories,
   planExpiredDayDirectories,
 } from './retention.ts';
 import type { RetentionSweepResult } from './retention.ts';
@@ -96,6 +104,27 @@ const DAY_MS = 86_400_000;
 
 /** Per-database retention policy file name (listed under the database directory, atomically written by `setRetention`; §6.2.1) */
 export const RETENTION_FILE_NAME = 'retention.json';
+
+/**
+ * Backup manifest file name (only written by range backups)
+ *
+ * It describes which day directories the backup contains, so `restore` can merge instead of replacing the whole
+ * database. The name is not a day-directory pattern and is not a known data file, so startup recovery, metrics
+ * and the retention sweep all ignore it.
+ */
+export const BACKUP_MANIFEST_FILE_NAME = 'manifest.json';
+
+/** Manifest of a range backup (`manifest.json` inside `{targetDir}/{database}`) */
+export interface BackupManifest {
+  version: 1;
+  tool: 'ss-rtdb';
+  database: string;
+  mode: 'range';
+  startDay: number;
+  endDay: number;
+  days: number[];
+  createdAt: string;
+}
 
 /** Number of most recent query latencies kept for the `status.query.*` percentiles (ring window over successful queries) */
 export const QUERY_LATENCY_SAMPLE_WINDOW = 1024;
@@ -209,6 +238,26 @@ export interface DatabaseRuntimeStats {
   retention: { days: number | null; effectiveDays: number };
 }
 
+/** Day-granular backup range (`yyyyMMdd`, local timezone, both ends inclusive) */
+export interface BackupRange {
+  startDay: number;
+  endDay: number;
+  /** Number of day directories actually copied */
+  dayCount: number;
+  /** Timestamp of 00:00:00.000 on `startDay` (local time; the range is inclusive) */
+  startTimestamp: number;
+  /** Timestamp of 23:59:59.999 on `endDay` (local time) */
+  endTimestamp: number;
+}
+
+/** Optional day-granular selection for `backup`; both fields omitted = whole database */
+export interface BackupOptions {
+  /** First day to include (`yyyyMMdd`); `null`/omitted = from the earliest day directory */
+  startDay?: number | null;
+  /** Last day to include (`yyyyMMdd`); `null`/omitted = through the latest day directory */
+  endDay?: number | null;
+}
+
 /** Backup result (`backup` output, §2.9) */
 export interface BackupResult {
   database: string;
@@ -218,6 +267,12 @@ export interface BackupResult {
   fileCount: number;
   /** Number of bytes copied */
   totalBytes: number;
+  /** `true` when only a subset of day directories was copied; restore then **merges** instead of replacing */
+  partial?: boolean;
+  /** Effective range of a range backup (absent for a whole-database backup) */
+  range?: BackupRange;
+  /** Day directories copied, ascending (present for range backups) */
+  days?: number[];
 }
 
 /** Restore result (`restore` output, §2.9) */
@@ -227,6 +282,10 @@ export interface RestoreResult {
   sourceDirectory: string;
   fileCount: number;
   totalBytes: number;
+  /** `replace` = whole-database replacement; `merge` = range backup merged into the existing database */
+  mode?: 'replace' | 'merge';
+  /** Day directories written by a merge restore, ascending */
+  days?: number[];
 }
 
 /* ---------- Internal types ---------- */
@@ -892,32 +951,111 @@ export class RtdbEngine {
   }
 
   /**
-   * Back up a database to `{targetDir}/{database}` (whole-database directory replacing copy)
+   * Back up a database to `{targetDir}/{database}` (whole-database or day-granular range copy)
    *
    * Copied content = sealed capacity segments + the current day's active segment snapshot + `.idx` + `.wal` +
    * retention policy file; executed synchronously internally (single-threaded run-to-completion), so it is a
    * **consistent snapshot** and needs no write pause. The backup directory can be restored by another instance
    * via `restore` as a standalone data directory.
+   *
+   * With `options.startDay` / `options.endDay` (`yyyyMMdd`, local time, inclusive) only the matching **day
+   * directories** are copied and a `manifest.json` is written, making the result a *range backup*: `restore`
+   * then merges those days into the target database instead of replacing it (see {@link restore}).
    */
-  async backup(database: string, targetDir: string): Promise<BackupResult> {
+  async backup(database: string, targetDir: string, options?: BackupOptions): Promise<BackupResult> {
     this.requireOpen();
     const sourceDirectory = this.store.databaseDirectoryPath(database);
     if (!existsSync(sourceDirectory)) {
       throw new RtdbError(ERROR_CODE.DatabaseNotFound, `Database does not exist; cannot back up: ${database}`);
     }
+    const startDay = this.normalizeBackupDay(options?.startDay, 'startDay');
+    const endDay = this.normalizeBackupDay(options?.endDay, 'endDay');
     const targetDirectory = join(resolve(targetDir), database);
-    const copied = copyDirectoryReplacing(sourceDirectory, targetDirectory);
-    return { database, targetDirectory, fileCount: copied.fileCount, totalBytes: copied.totalBytes };
+
+    if (startDay === null && endDay === null) {
+      const copied = copyDirectoryReplacing(sourceDirectory, targetDirectory);
+      return {
+        database,
+        targetDirectory,
+        fileCount: copied.fileCount,
+        totalBytes: copied.totalBytes,
+        partial: false,
+      };
+    }
+
+    if (startDay !== null && endDay !== null && startDay > endDay) {
+      throw new RtdbError(
+        ERROR_CODE.InvalidRange,
+        `startDay must not be after endDay: ${formatDateFolderName(startDay)} > ${formatDateFolderName(endDay)}`,
+      );
+    }
+    const allDays = this.store.listDayDirectories(database);
+    const days = allDays.filter(
+      (day) => (startDay === null || day >= startDay) && (endDay === null || day <= endDay),
+    );
+    if (days.length === 0) {
+      const available =
+        allDays.length === 0
+          ? 'the database has no day directory yet'
+          : `available days: ${formatDateFolderName(allDays[0])}..${formatDateFolderName(allDays[allDays.length - 1])}`;
+      throw new RtdbError(
+        ERROR_CODE.InvalidRange,
+        `No day directory in the requested backup range (${available})`,
+      );
+    }
+
+    const copied = copyDayDirectoriesReplacing({
+      sourceDirectory,
+      targetDirectory,
+      dateNumbers: days,
+      rootFileNames: [RETENTION_FILE_NAME],
+    });
+    const effectiveStart = startDay ?? days[0];
+    const effectiveEnd = endDay ?? days[days.length - 1];
+    const manifest: BackupManifest = {
+      version: 1,
+      tool: 'ss-rtdb',
+      database,
+      mode: 'range',
+      startDay: effectiveStart,
+      endDay: effectiveEnd,
+      days,
+      createdAt: new Date().toISOString(),
+    };
+    writeFileSync(
+      join(targetDirectory, BACKUP_MANIFEST_FILE_NAME),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      'utf8',
+    );
+    return {
+      database,
+      targetDirectory,
+      fileCount: copied.fileCount,
+      totalBytes: copied.totalBytes,
+      partial: true,
+      days,
+      range: {
+        startDay: effectiveStart,
+        endDay: effectiveEnd,
+        dayCount: days.length,
+        startTimestamp: timestampFromDateNumber(effectiveStart),
+        endTimestamp: nextDayTimestampFromDateNumber(effectiveEnd) - 1,
+      },
+    };
   }
 
   /**
-   * Restore a database from `{targetDir}/{database}` (whole-database directory replacement)
+   * Restore a database from `{targetDir}/{database}` (whole-database replacement, or day merge for range backups)
    *
    * Order: close that database's write context (flush buffer + seal active segment + close WAL) first -> release
-   * segment/WAL/block cache handles -> replace the database directory -> rerun that database's startup recovery
-   * (half-block truncation + `.idx` rebuild + WAL replay) -> re-read retention overrides.
+   * segment/WAL/block cache handles -> replace (or merge) the database directory -> rerun that database's startup
+   * recovery (half-block truncation + `.idx` rebuild + WAL replay) -> re-read retention overrides.
    * After restore the database is immediately readable/writable; subsequent first writes recreate the write
    * context as needed.
+   *
+   * **Range backups merge**: when the backup directory carries `manifest.json` (`mode: "range"`), only the
+   * recorded day directories are written and every other day of the live database is kept — restoring a range
+   * can never delete data outside that range. The manifest itself is removed after the merge.
    */
   async restore(targetDir: string, database: string): Promise<RestoreResult> {
     this.requireOpen();
@@ -926,12 +1064,36 @@ export class RtdbEngine {
       throw new RtdbError(ERROR_CODE.DatabaseNotFound, `The database does not exist in the backup: ${sourceDirectory}`);
     }
     const targetDirectory = this.store.databaseDirectoryPath(database);
+    // Read the manifest before touching handles: a corrupt manifest must fail here, not silently degrade into a
+    // whole-database replacement (which would delete days outside the backup).
+    const manifest = this.readBackupManifest(sourceDirectory);
 
     this.closeDatabaseContext(database);
     this.store.closeDescriptorsUnder(targetDirectory);
     this.reader.evictDatabase(database);
 
-    const copied = copyDirectoryReplacing(sourceDirectory, targetDirectory);
+    let copied: { fileCount: number; totalBytes: number };
+    if (manifest !== null) {
+      copied = mergeDayDirectories({
+        sourceDirectory,
+        targetDirectory,
+        dateNumbers: manifest.days,
+        rootFileNames: [RETENTION_FILE_NAME],
+      });
+      // The manifest is backup metadata; never let it leak into the live data root.
+      try {
+        unlinkSync(join(targetDirectory, BACKUP_MANIFEST_FILE_NAME));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new RtdbError(
+            ERROR_CODE.Io,
+            `Failed to remove the backup manifest after restore: ${(error as Error).message}`,
+          );
+        }
+      }
+    } else {
+      copied = copyDirectoryReplacing(sourceDirectory, targetDirectory);
+    }
 
     const report = recoverDataRoot({ store: this.store, reader: this.reader, databases: [database] });
     const databaseReport = report.databases[0];
@@ -943,7 +1105,85 @@ export class RtdbEngine {
     if (days !== null) this.retentionByDatabase.set(database, days);
     else this.retentionByDatabase.delete(database);
 
-    return { database, sourceDirectory, fileCount: copied.fileCount, totalBytes: copied.totalBytes };
+    return {
+      database,
+      sourceDirectory,
+      fileCount: copied.fileCount,
+      totalBytes: copied.totalBytes,
+      mode: manifest !== null ? 'merge' : 'replace',
+      ...(manifest !== null ? { days: manifest.days } : {}),
+    };
+  }
+
+  /* ---------- Internal: backup helpers ---------- */
+
+  /** Validate an optional `yyyyMMdd` day selector (`null` = unbounded) */
+  private normalizeBackupDay(value: number | null | undefined, fieldName: string): number | null {
+    if (value === undefined || value === null) return null;
+    if (!Number.isInteger(value) || parseDateFolderName(String(value)) === null) {
+      throw new RtdbError(
+        ERROR_CODE.InvalidRange,
+        `${fieldName} must be a valid yyyyMMdd day in local time: ${String(value)}`,
+      );
+    }
+    return value;
+  }
+
+  /**
+   * Read `manifest.json` from a backup directory
+   *
+   * Returns `null` when the file is absent (whole-database backup). A present but malformed manifest throws
+   * `E_IO` on purpose: treating it as a full backup would replace the whole database on restore.
+   */
+  private readBackupManifest(backupDirectory: string): BackupManifest | null {
+    const filePath = join(backupDirectory, BACKUP_MANIFEST_FILE_NAME);
+    let text: string;
+    try {
+      text = readFileSync(filePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw new RtdbError(
+        ERROR_CODE.Io,
+        `Failed to read the backup manifest ${filePath}: ${(error as Error).message}`,
+      );
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      const value: unknown = JSON.parse(text);
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('not an object');
+      parsed = value as Record<string, unknown>;
+    } catch (error) {
+      throw new RtdbError(
+        ERROR_CODE.Io,
+        `Backup manifest is not a valid JSON object ${filePath}: ${(error as Error).message}`,
+      );
+    }
+    const rawDays = Array.isArray(parsed.days) ? parsed.days : [];
+    const days = [
+      ...new Set(
+        rawDays.filter(
+          (day): day is number => typeof day === 'number' && parseDateFolderName(String(day)) !== null,
+        ),
+      ),
+    ].sort((left, right) => left - right);
+    if (parsed.mode !== 'range' || days.length === 0) {
+      throw new RtdbError(
+        ERROR_CODE.Io,
+        `Backup manifest is not a valid range manifest (mode/days missing): ${filePath}`,
+      );
+    }
+    const startDay = typeof parsed.startDay === 'number' ? parsed.startDay : days[0];
+    const endDay = typeof parsed.endDay === 'number' ? parsed.endDay : days[days.length - 1];
+    return {
+      version: 1,
+      tool: 'ss-rtdb',
+      database: typeof parsed.database === 'string' ? parsed.database : '',
+      mode: 'range',
+      startDay,
+      endDay,
+      days,
+      createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : '',
+    };
   }
 
   /* ---------- Internal: context and ledger ---------- */

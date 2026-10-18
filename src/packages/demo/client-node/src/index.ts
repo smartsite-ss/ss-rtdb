@@ -13,6 +13,9 @@
 export { RtdbClient } from './client.ts';
 export type {
   AggregateQueryOptions,
+  BackupRangeOptions,
+  BackupRangeReport,
+  BackupReport,
   CountQueryOptions,
   CreateUserRequest,
   IssueTokenRequest,

@@ -9,6 +9,10 @@
 /**
  * Backup entry point: `POST /api/v1/backup/{db}` with a mandatory target directory (§3.1).
  *
+ * The optional time range is **day-granular** (`startDay`/`endDay`, inclusive, server local time) because the
+ * storage unit itself is one directory per day: a range backup copies only those day directories and carries a
+ * manifest, so restoring it merges those days into the database instead of replacing it.
+ *
  * The console only triggers the copy; restoring an archive stays a CLI operation (`rtdb-cli restore`)
  * because it requires exclusive access to the data directory.
  */
@@ -25,7 +29,25 @@ const { busy, errorMessage, successMessage, run } = useAsyncAction();
 const databases = ref<string[]>([]);
 const selectedDatabase = ref('');
 const targetDirectory = ref('');
+/** Inclusive day range (`yyyy-MM-dd`, empty = unbounded); both empty = whole-database backup */
+const rangeStart = ref('');
+const rangeEnd = ref('');
 const backupResult = ref<RtdbBackupResult | null>(null);
+
+/** `yyyyMMdd` (server day number) → `yyyy-MM-dd` for display */
+function formatDay(day: number): string {
+  const text = String(day);
+  return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
+}
+
+function rangeSummary(result: RtdbBackupResult): string {
+  if (result.range === null) return t('backup.modeFull');
+  return t('backup.rangeValue', {
+    start: formatDay(result.range.startDay),
+    end: formatDay(result.range.endDay),
+    days: result.range.dayCount,
+  });
+}
 
 async function loadDatabases(): Promise<void> {
   const list = await run(() => props.client.listDatabases());
@@ -42,7 +64,14 @@ async function startBackup(): Promise<void> {
   const result = await run(async () => {
     if (database.length === 0) throw new Error(t('backup.error.selectDatabase'));
     if (target.length === 0) throw new Error(t('backup.error.targetRequired'));
-    return props.client.backup(database, target);
+    // ISO date strings compare chronologically, so no Date parsing is needed here.
+    if (rangeStart.value.length > 0 && rangeEnd.value.length > 0 && rangeStart.value > rangeEnd.value) {
+      throw new Error(t('backup.error.rangeOrder'));
+    }
+    return props.client.backup(database, target, {
+      startDay: rangeStart.value,
+      endDay: rangeEnd.value,
+    });
   }, t('backup.success.done'));
   if (result !== undefined) backupResult.value = result;
 }
@@ -84,9 +113,19 @@ watch(
             :disabled="busy"
           />
         </div>
+        <div class="field">
+          <label class="field-label">{{ t('backup.rangeStart') }}</label>
+          <input v-model="rangeStart" type="date" :disabled="busy" />
+        </div>
+        <div class="field">
+          <label class="field-label">{{ t('backup.rangeEnd') }}</label>
+          <input v-model="rangeEnd" type="date" :disabled="busy" />
+        </div>
         <button class="primary" :disabled="busy" @click="startBackup">{{ t('backup.start') }}</button>
         <button :disabled="busy" @click="loadDatabases">{{ t('backup.reload') }}</button>
       </div>
+
+      <p class="toolbar-note hint">{{ t('backup.rangeHint') }}</p>
 
       <p v-if="errorMessage.length > 0" class="alert error">{{ errorMessage }}</p>
       <p v-if="successMessage.length > 0" class="alert success">{{ successMessage }}</p>
@@ -106,6 +145,14 @@ watch(
             <tr>
               <th>{{ t('backup.column.target') }}</th>
               <td class="mono break-all">{{ backupResult.targetDirectory }}</td>
+            </tr>
+            <tr>
+              <th>{{ t('backup.mode') }}</th>
+              <td class="mono">{{ backupResult.partial ? t('backup.modeRange') : t('backup.modeFull') }}</td>
+            </tr>
+            <tr>
+              <th>{{ t('backup.range') }}</th>
+              <td class="mono">{{ rangeSummary(backupResult) }}</td>
             </tr>
             <tr>
               <th>{{ t('backup.files') }}</th>

@@ -8,15 +8,26 @@
 <script setup lang="ts">
 /**
  * Single "time range" control: the toolbar shows one trigger with the current span, and the popover holds the
- * quick presets plus the exact start / end pickers. Presets apply immediately; the manual fields apply on
- * "Apply", so a half-typed date never fires a query.
+ * quick presets, the **day range** and the exact start / end pickers. Presets apply immediately; the manual fields
+ * apply on "Apply", so a half-typed date never fires a query.
+ *
+ * Two levels of granularity share one state: the day pickers (`From day` / `To day`, local time, both ends
+ * inclusive) write `00:00:00` / `23:59:59` into the exact fields, and editing the exact time moves the day
+ * pickers back accordingly — there is no second copy of the range to keep in sync.
  *
  * Values are `<input type="datetime-local">` strings (`YYYY-MM-DDTHH:mm:ss`) owned by the parent, which keeps the
  * query inputs and the URL-free state model of the console unchanged.
  */
 
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { formatDateTime, fromDateTimeLocalValue, toDateTimeLocalValue } from '../format';
+import {
+  dayToDayEnd,
+  dayToDayStart,
+  dateTimeLocalDay,
+  formatDateTime,
+  fromDateTimeLocalValue,
+  toDateTimeLocalValue,
+} from '../format';
 import { t } from '../i18n';
 import type { MessageKey } from '../locales/en';
 
@@ -51,6 +62,32 @@ const open = ref(false);
 const draftStart = ref(props.start);
 const draftEnd = ref(props.end);
 
+/**
+ * Day pickers derived from the exact fields (no duplicated state).
+ *
+ * Picking a start day snaps the time to `00:00:00`, picking an end day snaps it to `23:59:59`, so the range always
+ * covers whole local days. Typing an exact time moves the day pickers instead.
+ */
+const draftStartDay = computed<string>({
+  get: () => dateTimeLocalDay(draftStart.value),
+  set: (day: string) => {
+    draftStart.value = dayToDayStart(day);
+    // Picking a single day must still produce a valid range on a fresh picker.
+    if (draftEnd.value.length === 0) draftEnd.value = dayToDayEnd(day);
+  },
+});
+
+const draftEndDay = computed<string>({
+  get: () => dateTimeLocalDay(draftEnd.value),
+  set: (day: string) => {
+    draftEnd.value = dayToDayEnd(day);
+    if (draftStart.value.length === 0) draftStart.value = dayToDayStart(day);
+  },
+});
+
+/** Shown inside the popover when Apply is pressed on an empty or inverted range */
+const invalidRange = ref(false);
+
 const rangeLabel = computed(() => {
   const startMs = fromDateTimeLocalValue(props.start);
   const endMs = fromDateTimeLocalValue(props.end);
@@ -70,6 +107,7 @@ function toggle(): void {
   }
   draftStart.value = props.start;
   draftEnd.value = props.end;
+  invalidRange.value = false;
   open.value = true;
 }
 
@@ -94,7 +132,11 @@ function applyPreset(milliseconds: number | null): void {
 function applyDraft(): void {
   const startMs = fromDateTimeLocalValue(draftStart.value);
   const endMs = fromDateTimeLocalValue(draftEnd.value);
-  if (startMs <= 0 || endMs <= 0 || endMs < startMs) return;
+  if (startMs <= 0 || endMs <= 0 || endMs < startMs) {
+    invalidRange.value = true;
+    return;
+  }
+  invalidRange.value = false;
   emitValues();
   close();
 }
@@ -153,6 +195,19 @@ onUnmounted(() => {
 
       <div class="range-fields">
         <div class="field">
+          <label class="field-label">{{ t('metrics.range.fromDay') }}</label>
+          <input v-model="draftStartDay" type="date" />
+        </div>
+        <div class="field">
+          <label class="field-label">{{ t('metrics.range.toDay') }}</label>
+          <input v-model="draftEndDay" type="date" />
+        </div>
+      </div>
+
+      <p class="toolbar-note">{{ t('metrics.range.dayHint') }}</p>
+
+      <div class="range-fields">
+        <div class="field">
           <label class="field-label">{{ t('metrics.start') }}</label>
           <input v-model="draftStart" type="datetime-local" step="1" />
         </div>
@@ -163,6 +218,7 @@ onUnmounted(() => {
       </div>
 
       <p class="toolbar-note">{{ t('metrics.range.hint') }}</p>
+      <p v-if="invalidRange" class="alert error">{{ t('metrics.range.invalid') }}</p>
 
       <div class="range-actions">
         <button class="primary small" @click="applyDraft">{{ t('metrics.range.apply') }}</button>

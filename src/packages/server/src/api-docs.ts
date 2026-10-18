@@ -461,19 +461,37 @@ export const API_DOC_ENDPOINTS: readonly ApiDocEndpoint[] = [
     group: 'maintenance',
     method: 'POST',
     path: '/api/v1/backup/{db}',
-    summary: 'Trigger a whole-database backup on the server host.',
+    summary: 'Trigger a whole-database or day-range backup on the server host.',
     scope: 'write',
     parameters: [DATABASE_PARAMETER],
     body: {
       mediaTypes: ['application/json'],
       fields: [
         { name: 'targetDir', type: 'string', required: true, description: 'Destination directory on the server filesystem.' },
+        {
+          name: 'startDay',
+          type: 'string',
+          required: false,
+          description: 'First day to copy (`yyyy-MM-dd` or `yyyyMMdd`, inclusive, server local time). Omit for the earliest day.',
+        },
+        {
+          name: 'endDay',
+          type: 'string',
+          required: false,
+          description: 'Last day to copy (`yyyy-MM-dd` or `yyyyMMdd`, inclusive). Omit for the latest day.',
+        },
       ],
     },
     success: {
       status: 200,
-      description: '`{"files":N,"totalBytes":N,"database":…,"targetDirectory":…}`.',
+      description:
+        '`{"files":N,"totalBytes":N,"database":…,"targetDirectory":…,"partial":false,"range":null,"days":null}`; a range backup returns `partial:true` plus `range{startDay,endDay,dayCount,startTimestamp,endTimestamp}` and `days[]`.',
     },
+    notes: [
+      'Omitting both `startDay` and `endDay` copies the whole database (restore replaces the database).',
+      'A range backup copies whole day directories and writes `manifest.json`; restoring it **merges** those days into the database and never deletes days outside the range.',
+      'No day directory inside the range → `400 E_INVALID_RANGE`; `startDay` after `endDay` → `400 E_INVALID_RANGE`.',
+    ],
   },
 
   /* --- Sign-in and sessions --- */
